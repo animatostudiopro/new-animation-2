@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Camera, Crosshair, Radio, Navigation, Layers2, Orbit, Sparkles, Shield, Gamepad2, Flame, Zap, Skull, Star, Swords, Crown, Timer } from 'lucide-react';
+import { Camera, Crosshair, Radio, Navigation, Layers2, Orbit, Sparkles, Shield, Gamepad2, Flame, Zap, Skull, Star, Swords, Crown, Timer, Triangle, Sun, CloudFog } from 'lucide-react';
 import gameData from './game-data.json';
 
 // --- Shared Audio Engine ---
@@ -1129,9 +1129,9 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
     // 4. Fallback: auto-detect first player / character object
     if (!activeSource) {
       const playerObj = stageElements.find((el: any) => el.type === 'obj' && (
-        el.name?.toLowerCase().includes('player') ||
-        el.name?.toLowerCase().includes('hero') ||
-        el.data?.toLowerCase().includes('player')
+        (el.name || '').toString().toLowerCase().includes('player') ||
+        (el.name || '').toString().toLowerCase().includes('hero') ||
+        (typeof el.data === 'string' ? el.data : '').toLowerCase().includes('player')
       ));
       if (playerObj) {
         activeSource = playerObj;
@@ -1193,14 +1193,14 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
 
       const isEnemy =
         el.type === 'env_hazard' ||
-        el.name?.toLowerCase().includes('enemy') ||
-        el.name?.toLowerCase().includes('boss') ||
-        el.name?.toLowerCase().includes('monster') ||
-        el.name?.toLowerCase().includes('hazard') ||
-        el.name?.toLowerCase().includes('ghost') ||
-        el.name?.toLowerCase().includes('skull') ||
-        el.name?.toLowerCase().includes('alien') ||
-        el.data?.toLowerCase().includes('enemy');
+        (el.name || '').toString().toLowerCase().includes('enemy') ||
+        (el.name || '').toString().toLowerCase().includes('boss') ||
+        (el.name || '').toString().toLowerCase().includes('monster') ||
+        (el.name || '').toString().toLowerCase().includes('hazard') ||
+        (el.name || '').toString().toLowerCase().includes('ghost') ||
+        (el.name || '').toString().toLowerCase().includes('skull') ||
+        (el.name || '').toString().toLowerCase().includes('alien') ||
+        (typeof el.data === 'string' ? el.data : '').toLowerCase().includes('enemy');
 
       // Filter by trackedTargetIds if they exist
       const isExplicitlyTracked = mapConfig.trackedTargetIds?.includes(el.id);
@@ -3341,7 +3341,7 @@ function ActiveGame() {
 
       let t1 = null;
       if (trackerId) t1 = stageElementsRef.current.find((el: any) => el.id === trackerId || el.data === trackerId);
-      if (!t1) t1 = stageElementsRef.current.find((el: any) => el.type === 'obj' && (el.name?.toLowerCase().includes('player') || el.name?.toLowerCase().includes('hero') || el.data?.toLowerCase().includes('player')));
+      if (!t1) t1 = stageElementsRef.current.find((el: any) => el.type === 'obj' && ((el.name || '').toString().toLowerCase().includes('player') || (el.name || '').toString().toLowerCase().includes('hero') || (typeof el.data === 'string' ? el.data : '').toLowerCase().includes('player')));
       if (!t1) t1 = stageElementsRef.current.find((el: any) => el.type === 'obj');
 
       let t2 = null;
@@ -3352,7 +3352,7 @@ function ActiveGame() {
         let closest = null;
         stageElementsRef.current.forEach((el: any) => {
           if (!el || el.id === t1.id || el.hidden || el.type === 'bg' || el.type === 'game_map' || el.type === 'game_loading') return;
-          const isEnemy = el.type === 'env_hazard' || el.name?.toLowerCase().includes('enemy') || el.name?.toLowerCase().includes('boss') || el.name?.toLowerCase().includes('monster') || el.name?.toLowerCase().includes('hazard') || el.name?.toLowerCase().includes('ghost') || el.name?.toLowerCase().includes('skull') || el.name?.toLowerCase().includes('alien') || el.data?.toLowerCase().includes('enemy');
+          const isEnemy = el.type === 'env_hazard' || (el.name || '').toString().toLowerCase().includes('enemy') || (el.name || '').toString().toLowerCase().includes('boss') || (el.name || '').toString().toLowerCase().includes('monster') || (el.name || '').toString().toLowerCase().includes('hazard') || (el.name || '').toString().toLowerCase().includes('ghost') || (el.name || '').toString().toLowerCase().includes('skull') || (el.name || '').toString().toLowerCase().includes('alien') || (typeof el.data === 'string' ? el.data : '').toLowerCase().includes('enemy');
           const isExplicitlyTracked = mapConfig.trackedTargetIds?.includes(el.id);
           if (isEnemy || isExplicitlyTracked) {
              const ex = (el.x || 0) + (el.width || 50) / 2;
@@ -4009,9 +4009,11 @@ function ActiveGame() {
               const destroyClass = el.isDestroying ? (el.destroyEffect === 'dust' ? 'opacity-0 scale-50 blur-md transition-all duration-1000' : 'opacity-0 transition-opacity duration-1000') : '';
               const filterStyle = el.glowColor ? `drop-shadow(0 0 15px ${el.glowColor})` : (el.colorFilter ? `hue-rotate(90deg) drop-shadow(0 0 8px ${el.colorFilter})` : undefined);
 
-              let elemSrc = el.url || el.data || '';
+              const btnTemplate = (el.type === 'btn' && (el as any).buttonId) ? (gameData.uiButtons || []).find((b: any) => b.id === (el as any).buttonId) : null;
+              const elemSrc = typeof el.url === 'string' ? el.url : (typeof el.data === 'string' ? el.data : (el.data?.src || el.data?.texture || (typeof btnTemplate?.url === 'string' ? btnTemplate.url : (typeof btnTemplate?.data === 'string' ? btnTemplate.data : ''))));
               const isShape = elemSrc === 'rect' || elemSrc === 'circle';
-              const finalBgImage = (el.type !== 'obj' && el.type !== 'video' && elemSrc && !isShape) ? `url("${elemSrc}")` : undefined;
+              const isEnv = ['env_tile', 'env_hazard', 'env_light', 'env_weather'].includes(el.type);
+              const finalBgImage = (el.type !== 'obj' && el.type !== 'video' && !isEnv && elemSrc && !isShape) ? `url("${elemSrc}")` : undefined;
 
               const resolvedVideoSrc = el.type === 'video' ? resolveVideoUrl(el.videoId || elemSrc) : '';
               const isFlippedX = Boolean(el.flipX) || (el.scaleX !== undefined && el.scaleX < 0);
@@ -4061,6 +4063,54 @@ function ActiveGame() {
                     }
                   }}
                 >
+                  {el.type === 'env_tile' && (
+                    <div className="w-full h-full rounded shadow-[inset_0_2px_4px_rgba(255,255,255,0.2),inset_0_-4px_8px_rgba(0,0,0,0.5),0_4px_8px_rgba(0,0,0,0.5)] border border-white/10 relative overflow-hidden" style={{ backgroundColor: el.data?.color, backgroundImage: el.data?.texture ? `url("${el.data.texture}")` : undefined, backgroundSize: '100% 100%' }}>
+                    </div>
+                  )}
+                  {el.type === 'env_hazard' && (
+                    <div className="w-full h-full relative" style={{ backgroundColor: el.data?.texture === 'water' ? 'rgba(59, 130, 246, 0.4)' : 'transparent', borderTop: el.data?.texture === 'water' ? '4px solid rgba(96, 165, 250, 0.8)' : 'none' }}>
+                      {el.data?.name === 'Spikes' && (
+                        <div className="absolute bottom-0 w-full h-1/2 flex items-end justify-between px-1 text-red-500 overflow-hidden">
+                          {Array.from({length: Math.max(1, Math.floor((el.width || 100) / 30))}).map((_, i) => (
+                             <Triangle key={i} size={30} fill="currentColor" style={{ flexShrink: 0 }} />
+                          ))}
+                        </div>
+                      )}
+                      {el.data?.texture === 'water' && (
+                        <div className="absolute inset-0 overflow-hidden">
+                           <div className="w-[200%] h-4 bg-[url('data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 10' preserveAspectRatio='none'%3E%3Cpath d='M0 10 Q 25 0, 50 10 T 100 10 L 100 20 L 0 20 Z' fill='%2360a5fa'%3E%3C/path%3E%3C/svg%3E')] animate-[scrollWater_2s_linear_infinite]" style={{backgroundSize: '50% 100%'}}></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {el.type === 'env_light' && (
+                    <div className="w-full h-full rounded-full" style={{ background: `radial-gradient(circle, ${el.data?.color} 0%, transparent 70%)`, mixBlendMode: 'screen', opacity: 1 }}>
+                    </div>
+                  )}
+                  {el.type === 'env_weather' && (
+                    <div className="w-full h-full overflow-hidden pointer-events-none">
+                      {el.data?.fx === 'fog' && (
+                        <div className="absolute inset-0 opacity-50 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] mix-blend-screen animate-[float_10s_ease-in-out_infinite]"></div>
+                      )}
+                      {el.data?.fx === 'lightning' && (
+                        <>
+                          <div className="absolute inset-0 animate-[lightningFlash_4s_ease-in-out_infinite] bg-white mix-blend-overlay opacity-0"></div>
+                          <div className="absolute top-0 left-1/4 w-[2px] h-full bg-cyan-100 shadow-[0_0_15px_#fff] animate-[lightningBolt_4s_ease-in-out_infinite] opacity-0 origin-top"></div>
+                          <div className="absolute top-0 right-1/3 w-[1.5px] h-2/3 bg-white shadow-[0_0_10px_#fff] animate-[lightningBolt_5s_infinite] opacity-0 origin-top delay-700"></div>
+                        </>
+                      )}
+                      {el.data?.fx === 'rain' && (
+                        <div className="absolute inset-0 opacity-40 pointer-events-none">
+                          <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] animate-[rainFall_0.5s_linear_infinite]"></div>
+                        </div>
+                      )}
+                      {el.data?.fx === 'snow' && (
+                        <div className="absolute inset-0 opacity-60 pointer-events-none">
+                          <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] animate-[snowDrift_3s_linear_infinite]"></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {el.type === 'obj' && (gameObject?.type === 'text' || gameObject?.type === 'var_text') && (
                     <div
                       className="w-full h-full flex items-center justify-center text-center font-bold"
@@ -4128,30 +4178,6 @@ function ActiveGame() {
                     />
                   )}
 
-                  {el.type === 'env_weather' && (
-                    <div className="absolute inset-0 w-full h-full pointer-events-none overflow-hidden">
-                      {el.data?.fx === 'lightning' && (
-                        <>
-                          <div className="absolute inset-0 bg-white opacity-0 animate-[lightningFlash_5s_infinite]" />
-                          <div className="absolute left-1/2 top-0 w-1 h-full bg-cyan-100 opacity-0 animate-[lightningBolt_5s_infinite]" />
-                        </>
-                      )}
-                      {el.data?.fx === 'rain' && (
-                        <div className="absolute inset-0 w-full h-full flex flex-wrap content-start">
-                          {[...Array(40)].map((_, i) => (
-                            <div key={i} className="w-[2px] h-8 bg-blue-400/40 mx-2 animate-[rainFall_1.5s_linear_infinite]" style={{ animationDelay: `${Math.random() * 2}s`, left: `${Math.random() * 100}%` }} />
-                          ))}
-                        </div>
-                      )}
-                      {el.data?.fx === 'snow' && (
-                        <div className="absolute inset-0 w-full h-full flex flex-wrap content-start">
-                          {[...Array(30)].map((_, i) => (
-                            <div key={i} className="w-2 h-2 bg-white/80 rounded-full mx-4 animate-[snowDrift_4s_ease-in-out_infinite]" style={{ animationDelay: `${Math.random() * 4}s`, left: `${Math.random() * 100}%` }} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
 
                   {/* Active Movement Direction Arrow Overlay */}
                   {(() => {

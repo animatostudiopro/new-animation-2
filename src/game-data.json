@@ -49,6 +49,142 @@
         "width": 50,
         "height": 50,
         "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787409871100_5ql0hz",
+        "type": "env_tile",
+        "data": {
+          "color": "#1f2937",
+          "name": "Asphalt Road",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M0 0h16v16H0z' fill='%231f2937'/%3E%3Ccircle cx='4' cy='4' r='1' fill='%23374151'/%3E%3Ccircle cx='12' cy='10' r='1' fill='%23111827'/%3E%3Cpath d='M0 8h16v1H0z' fill='%23374151' fill-opacity='0.2'/%3E%3C/svg%3E"
+        },
+        "x": 0,
+        "y": 620,
+        "width": 2200,
+        "height": 180,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787409871100_oxltoy",
+        "type": "env_tile",
+        "data": {
+          "color": "#9ca3af",
+          "name": "Sidewalk Curb",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 0,
+        "y": 580,
+        "width": 2200,
+        "height": 40,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787409871100_6yr9u4",
+        "type": "env_tile",
+        "data": {
+          "color": "#374151",
+          "name": "Building Ledge 1",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 150,
+        "y": 440,
+        "width": 280,
+        "height": 40,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787409871100_oudh71",
+        "type": "env_tile",
+        "data": {
+          "color": "#374151",
+          "name": "Building Ledge 2",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 550,
+        "y": 320,
+        "width": 320,
+        "height": 40,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787409871100_zxcekw",
+        "type": "env_tile",
+        "data": {
+          "color": "#374151",
+          "name": "Rooftop Platform",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 1000,
+        "y": 200,
+        "width": 400,
+        "height": 50,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_light_1787409871100_zo0q5s",
+        "type": "env_light",
+        "data": {
+          "color": "rgba(255,220,120,0.6)",
+          "name": "Streetlamp Glow"
+        },
+        "x": 200,
+        "y": 450,
+        "width": 220,
+        "height": 220,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_light_1787409871100_olyfiv",
+        "type": "env_light",
+        "data": {
+          "color": "rgba(255,220,120,0.6)",
+          "name": "Streetlamp Glow 2"
+        },
+        "x": 900,
+        "y": 450,
+        "width": 220,
+        "height": 220,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_weather_1787409871100_2zz41g",
+        "type": "env_weather",
+        "data": {
+          "fx": "fog",
+          "name": "City Haze"
+        },
+        "x": 0,
+        "y": 0,
+        "width": 2200,
+        "height": 800,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "el_1787410066409_gjwqii",
+        "type": "joystick",
+        "joystickId": "joy_cam_1",
+        "joystickType": "camera",
+        "name": "Virtual Joystick (Camera)",
+        "design": "compass-gimbal",
+        "customColor": "#eab308",
+        "knobColor": "#fde047",
+        "interactionType": "pan",
+        "attachedObjectId": "",
+        "speed": 160,
+        "flipOnMove": true,
+        "x": 515,
+        "y": 235,
+        "width": 100,
+        "height": 100,
+        "layerId": "layer_1"
       }
     ]
   },
@@ -68,6 +204,15 @@
             "value": "obj_1787408713585_w1b1ya"
           }
         ]
+      },
+      {
+        "id": "ev_1787409905658_av455b",
+        "conditions": [
+          {
+            "type": "always"
+          }
+        ],
+        "actions": []
       }
     ]
   },
@@ -84,7 +229,7 @@
           "id": "anim_default",
           "name": "Animation 1",
           "frames": [
-            "./assets/images/asset_0_4tf3ukp.png"
+            "./assets/images/asset_0_bey2llp.png"
           ],
           "fps": 12
         }
@@ -319,7 +464,7 @@
       "type": "progress_bar",
       "title": "Loading Level Data...",
       "subtitle": "Preparing stage assets and enemy AI...",
-      "progress": 0,
+      "progress": 100,
       "autoIncrement": true,
       "autoDuration": 3,
       "barColor": "#06b6d4",
@@ -339,7 +484,7 @@
       "type": "radial_spinner",
       "title": "Synchronizing World...",
       "subtitle": "Calibrating physics and shaders",
-      "progress": 0,
+      "progress": 100,
       "autoIncrement": true,
       "autoDuration": 2.5,
       "barColor": "#a855f7",
@@ -359,7 +504,7 @@
       "type": "icon_spinner",
       "title": "Entering Combat Zone",
       "subtitle": "Connecting player to battlefield...",
-      "progress": 0,
+      "progress": 100,
       "autoIncrement": true,
       "autoDuration": 3.5,
       "barColor": "#22c55e",
@@ -379,7 +524,7 @@
       "type": "fullscreen_splash",
       "title": "ANIMATO LEGENDS",
       "subtitle": "Tip: Use joysticks or WASD to navigate and evade enemy hazards!",
-      "progress": 0,
+      "progress": 100,
       "autoIncrement": true,
       "autoDuration": 4,
       "barColor": "#eab308",
@@ -399,7 +544,7 @@
       "type": "cyber_loader",
       "title": "BOOTING_SYSTEM_v2.0",
       "subtitle": "INITIALIZING_NEURAL_LINK...",
-      "progress": 0,
+      "progress": 100,
       "autoIncrement": true,
       "autoDuration": 2.8,
       "barColor": "#f43f5e",
@@ -415,5 +560,7 @@
     }
   ],
   "cameraFollowTarget": null,
-  "isCameraFollowEnabled": true
+  "isCameraFollowEnabled": true,
+  "customTemplates": [],
+  "builderCustomProps": []
 }
