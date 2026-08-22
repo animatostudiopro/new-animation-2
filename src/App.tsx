@@ -1060,52 +1060,93 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
   const cx = width / 2;
   const cy = height / 2;
 
-  const { sourceEl, mainCharRotation } = useMemo(() => {
-    let activeJoystickSource = null;
-    let joystickRotation = 0;
+  // Keep track of the last moved character
+  const lastMovedIdRef = useRef<string | null>(null);
 
-    if (joystickStates) {
-      const activeJoyId = Object.keys(joystickStates).find(id => joystickStates[id]?.active && joystickStates[id]?.distance > 0.05);
-      if (activeJoyId) {
-        const joyState = joystickStates[activeJoyId];
-        const joyEl = stageElements.find((el: any) => el.id === activeJoyId);
-        if (joyEl) {
-          const attachedId = joyEl.attachedObjectId || joyEl.joystickConfig?.attachedObjectId;
-          if (attachedId) {
-             const attachedObj = stageElements.find((el: any) => el.id === attachedId || el.data === attachedId);
-             if (attachedObj) {
-               activeJoystickSource = attachedObj;
-               joystickRotation = joyState.angle;
-             }
-          } else {
-             const defaultTarget = stageElements.find((el: any) => (el.type === 'obj' || el.type === 'character') && !el.hidden);
-             if (defaultTarget) {
-               activeJoystickSource = defaultTarget;
-               joystickRotation = joyState.angle;
-             }
-          }
+  // Find currently moved character by joystick
+  let currentlyMovedId: string | null = null;
+  let currentlyMovedRotation = 0;
+
+  if (joystickStates) {
+    const activeJoyId = Object.keys(joystickStates).find(id => joystickStates[id]?.active && joystickStates[id]?.distance > 0.05);
+    if (activeJoyId) {
+      const joyState = joystickStates[activeJoyId];
+      const joyEl = stageElements.find((el: any) => el.id === activeJoyId);
+      if (joyEl) {
+        const attachedId = joyEl.attachedObjectId || joyEl.joystickConfig?.attachedObjectId;
+        if (attachedId) {
+           const attachedObj = stageElements.find((el: any) => el.id === attachedId || el.data === attachedId);
+           if (attachedObj) {
+             currentlyMovedId = attachedObj.id;
+             currentlyMovedRotation = joyState.angle;
+           }
+        } else {
+           const defaultTarget = stageElements.find((el: any) => (el.type === 'obj' || el.type === 'character') && !el.hidden);
+           if (defaultTarget) {
+             currentlyMovedId = defaultTarget.id;
+             currentlyMovedRotation = joyState.angle;
+           }
         }
       }
     }
+  }
 
-    if (activeJoystickSource) {
-       return { sourceEl: activeJoystickSource, mainCharRotation: joystickRotation };
+  if (currentlyMovedId) {
+    lastMovedIdRef.current = currentlyMovedId;
+  }
+
+  const { sourceEl, mainCharRotation } = useMemo(() => {
+    let activeSource = null;
+    let rotation = 0;
+
+    // 1. If currently moved, use it!
+    if (currentlyMovedId) {
+      const match = stageElements.find((el: any) => el.id === currentlyMovedId);
+      if (match) {
+        activeSource = match;
+        rotation = currentlyMovedRotation;
+      }
     }
 
-    if (mapConfig.trackerSource) {
+    // 2. If not currently moved, but we have a last moved id, use that!
+    if (!activeSource && lastMovedIdRef.current) {
+      const match = stageElements.find((el: any) => el.id === lastMovedIdRef.current);
+      if (match) {
+        activeSource = match;
+        rotation = match.rotation || 0;
+      }
+    }
+
+    // 3. Fallback to trackerSource
+    if (!activeSource && mapConfig.trackerSource) {
       const match = stageElements.find((el: any) => el.id === mapConfig.trackerSource || el.data === mapConfig.trackerSource);
-      if (match) return { sourceEl: match, mainCharRotation: match.rotation || 0 };
+      if (match) {
+        activeSource = match;
+        rotation = match.rotation || 0;
+      }
     }
-    const playerObj = stageElements.find((el: any) => el.type === 'obj' && (
-      el.name?.toLowerCase().includes('player') ||
-      el.name?.toLowerCase().includes('hero') ||
-      el.data?.toLowerCase().includes('player')
-    ));
-    if (playerObj) return { sourceEl: playerObj, mainCharRotation: playerObj.rotation || 0 };
-    
-    const fbObj = stageElements.find((el: any) => el.type === 'obj') || { x: virtualWidth / 2, y: virtualHeight / 2, width: 50, height: 50, rotation: 0 };
-    return { sourceEl: fbObj, mainCharRotation: fbObj.rotation || 0 };
-  }, [stageElements, mapConfig.trackerSource, virtualWidth, virtualHeight, joystickStates]);
+
+    // 4. Fallback: auto-detect first player / character object
+    if (!activeSource) {
+      const playerObj = stageElements.find((el: any) => el.type === 'obj' && (
+        el.name?.toLowerCase().includes('player') ||
+        el.name?.toLowerCase().includes('hero') ||
+        el.data?.toLowerCase().includes('player')
+      ));
+      if (playerObj) {
+        activeSource = playerObj;
+        rotation = playerObj.rotation || 0;
+      }
+    }
+
+    // 5. Absolute fallback
+    if (!activeSource) {
+      activeSource = stageElements.find((el: any) => el.type === 'obj') || { x: virtualWidth / 2, y: virtualHeight / 2, width: 50, height: 50, rotation: 0 };
+      rotation = activeSource.rotation || 0;
+    }
+
+    return { sourceEl: activeSource, mainCharRotation: rotation };
+  }, [stageElements, currentlyMovedId, currentlyMovedRotation, mapConfig.trackerSource, virtualWidth, virtualHeight]);
 
   const sourcePos = {
     x: (sourceEl.x || 0) + ((sourceEl.width || 50) / 2),
@@ -4224,6 +4265,46 @@ function ActiveGame() {
                       )}
                     </div>
                   )}
+
+                  {/* Active Movement Direction Arrow Overlay */}
+                  {(() => {
+                    const activeJoy = stageElements.find(joy => {
+                      if (joy.type !== 'joystick' || joy.hidden) return false;
+                      const joyState = joystickStates[joy.id];
+                      if (!joyState || !joyState.active || joyState.distance <= 0.05) return false;
+                      const joyConfig = (gameData.joysticks || []).find((j: any) => j.id === (joy as any).joystickId) || (joy as any);
+                      let targetId = (joy as any).attachedObjectId || joyConfig.attachedObjectId;
+                      if (!targetId) {
+                        const firstObj = stageElements.find(e => e.type === 'obj' && !e.hidden);
+                        if (firstObj) targetId = firstObj.id;
+                      }
+                      return targetId === el.id;
+                    });
+
+                    if (!activeJoy) return null;
+                    const angle = joystickStates[activeJoy.id].angle;
+
+                    return (
+                      <div 
+                        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-[10000] animate-pulse"
+                        style={{
+                          width: '40px',
+                          height: '40px',
+                          transform: `translate(-50%, -50%) rotate(${angle}deg)`,
+                        }}
+                      >
+                        <svg className="w-full h-full drop-shadow-[0_0_8px_rgba(34,197,94,0.9)]" viewBox="0 0 24 24" fill="none">
+                          <path 
+                            d="M12 4L4 12H9V20H15V12H20L12 4Z" 
+                            fill="#22c55e" 
+                            stroke="#ffffff" 
+                            strokeWidth="1.5"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}
