@@ -1153,7 +1153,7 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
     y: (sourceEl.y || 0) + ((sourceEl.height || 50) / 2)
   };
 
-  const { enemyBlips, otherBlips, closestEnemy } = useMemo(() => {
+  const { enemyBlips, otherBlips, closestEnemy, explicitTargets } = useMemo(() => {
     const enemies: any[] = [];
     const others: any[] = [];
     let closest: any = null;

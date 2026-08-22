@@ -8,41 +8,26 @@
   "sceneElements": {
     "scene_1": [
       {
-        "id": "el_1787402767625_5a02p4",
-        "type": "btn",
-        "buttonId": "btn_right",
-        "data": "https://cdn-icons-png.flaticon.com/512/271/271228.png",
-        "url": null,
-        "x": 50,
-        "y": 50,
-        "width": 50,
-        "height": 50,
+        "id": "el_1787408534844_sqqnmo",
+        "type": "joystick",
+        "joystickId": "joy_move_1",
+        "joystickType": "movement",
+        "name": "Virtual Joystick (Move)",
+        "design": "classic-ring",
+        "customColor": "#3b82f6",
+        "knobColor": "#60a5fa",
+        "interactionType": "move",
+        "attachedObjectId": "",
+        "speed": 160,
+        "flipOnMove": true,
+        "x": 25,
+        "y": 235,
+        "width": 100,
+        "height": 100,
         "layerId": "layer_1"
       },
       {
-        "id": "load_el_1787402832215_3iz2",
-        "type": "game_loading",
-        "loadingId": "load_cyber_1",
-        "name": "Cyberpunk 8-Bit Scanline",
-        "x": 50,
-        "y": 50,
-        "width": 340,
-        "height": 110,
-        "layerId": "layer_1",
-        "zIndex": 150
-      },
-      {
-        "id": "el_1787403008629_xy0k38",
-        "type": "obj",
-        "data": "obj_1787403007655_xgikgm",
-        "x": 50,
-        "y": 50,
-        "width": 80,
-        "height": 80,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "map_el_1787403085047_y2a2",
+        "id": "map_el_1787408540209_a8lj",
         "type": "game_map",
         "mapId": "map_radar_1",
         "name": "Tactical Radar HUD",
@@ -52,18 +37,6 @@
         "height": 170,
         "layerId": "layer_1",
         "zIndex": 100
-      },
-      {
-        "id": "map_el_1787403115717_3oz1",
-        "type": "game_map",
-        "mapId": "map_minimap_1",
-        "name": "Modern Combat Minimap",
-        "x": 20,
-        "y": 20,
-        "width": 200,
-        "height": 140,
-        "layerId": "layer_1",
-        "zIndex": 100
       }
     ]
   },
@@ -71,42 +44,15 @@
     "scene_1": [
       {
         "id": "ev_1",
-        "conditions": [
-          {
-            "type": "pressed",
-            "target": "el_1787402767625_5a02p4",
-            "value": 0
-          }
-        ],
+        "conditions": [],
         "actions": []
-      },
-      {
-        "id": "ev_1787402924572_lwmnzg",
-        "conditions": [
-          {
-            "type": "timer",
-            "target": "timer_1787402915504_6skwep",
-            "value": 5
-          }
-        ],
-        "actions": [
-          {
-            "type": "spawn_randomly_around_character"
-          }
-        ]
       }
     ]
   },
   "sceneAttachments": {
     "scene_1": []
   },
-  "gameObjects": [
-    {
-      "id": "obj_1787403007655_xgikgm",
-      "name": "New Character",
-      "type": "character"
-    }
-  ],
+  "gameObjects": [],
   "uiButtons": [
     {
       "id": "btn_left",
