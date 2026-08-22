@@ -1035,7 +1035,7 @@ const evaluateEventConditions = (
 };
 
 // --- Standalone Game Map Renderer ---
-function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [], gameObjects = [], virtualWidth = 800, virtualHeight = 450 }: any) {
+function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [], gameObjects = [], joystickStates, virtualWidth = 800, virtualHeight = 450 }: any) {
   const mapConfig = config || propMapConfig || {
     id: 'default_map',
     name: 'Radar',
@@ -1060,19 +1060,52 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
   const cx = width / 2;
   const cy = height / 2;
 
-  const sourceEl = useMemo(() => {
+  const { sourceEl, mainCharRotation } = useMemo(() => {
+    let activeJoystickSource = null;
+    let joystickRotation = 0;
+
+    if (joystickStates) {
+      const activeJoyId = Object.keys(joystickStates).find(id => joystickStates[id]?.active && joystickStates[id]?.distance > 0.05);
+      if (activeJoyId) {
+        const joyState = joystickStates[activeJoyId];
+        const joyEl = stageElements.find((el: any) => el.id === activeJoyId);
+        if (joyEl) {
+          const attachedId = joyEl.attachedObjectId || joyEl.joystickConfig?.attachedObjectId;
+          if (attachedId) {
+             const attachedObj = stageElements.find((el: any) => el.id === attachedId || el.data === attachedId);
+             if (attachedObj) {
+               activeJoystickSource = attachedObj;
+               joystickRotation = joyState.angle;
+             }
+          } else {
+             const defaultTarget = stageElements.find((el: any) => (el.type === 'obj' || el.type === 'character') && !el.hidden);
+             if (defaultTarget) {
+               activeJoystickSource = defaultTarget;
+               joystickRotation = joyState.angle;
+             }
+          }
+        }
+      }
+    }
+
+    if (activeJoystickSource) {
+       return { sourceEl: activeJoystickSource, mainCharRotation: joystickRotation };
+    }
+
     if (mapConfig.trackerSource) {
       const match = stageElements.find((el: any) => el.id === mapConfig.trackerSource || el.data === mapConfig.trackerSource);
-      if (match) return match;
+      if (match) return { sourceEl: match, mainCharRotation: match.rotation || 0 };
     }
     const playerObj = stageElements.find((el: any) => el.type === 'obj' && (
       el.name?.toLowerCase().includes('player') ||
       el.name?.toLowerCase().includes('hero') ||
       el.data?.toLowerCase().includes('player')
     ));
-    if (playerObj) return playerObj;
-    return stageElements.find((el: any) => el.type === 'obj') || { x: virtualWidth / 2, y: virtualHeight / 2, width: 50, height: 50 };
-  }, [stageElements, mapConfig.trackerSource, virtualWidth, virtualHeight]);
+    if (playerObj) return { sourceEl: playerObj, mainCharRotation: playerObj.rotation || 0 };
+    
+    const fbObj = stageElements.find((el: any) => el.type === 'obj') || { x: virtualWidth / 2, y: virtualHeight / 2, width: 50, height: 50, rotation: 0 };
+    return { sourceEl: fbObj, mainCharRotation: fbObj.rotation || 0 };
+  }, [stageElements, mapConfig.trackerSource, virtualWidth, virtualHeight, joystickStates]);
 
   const sourcePos = {
     x: (sourceEl.x || 0) + ((sourceEl.width || 50) / 2),
@@ -1086,7 +1119,7 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
     let minDistance = Infinity;
 
     stageElements.forEach((el: any) => {
-      if (!el || el.id === sourceEl.id || el.hidden || el.type === 'bg' || el.type === 'game_map' || el.type === 'game_loading') return;
+      if (!el || el.id === sourceEl.id || el.hidden || el.type === 'bg' || el.type === 'game_map' || el.type === 'game_loading' || el.type === 'btn' || el.type === 'joystick' || el.type === 'virtual_joystick' || el.type === 'text') return;
 
       const ex = (el.x || 0) + ((el.width || 50) / 2);
       const ey = (el.y || 0) + ((el.height || 50) / 2);
@@ -1130,15 +1163,14 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
 
       // Filter by trackedTargetIds if they exist
       const isExplicitlyTracked = mapConfig.trackedTargetIds?.includes(el.id);
-      const shouldShowBlip = isExplicitlyTracked || (mapConfig.trackAllEnemies !== false && isEnemy) || (!isEnemy && mapConfig.trackAllEnemies === false);
-
-      if (!shouldShowBlip && !isExplicitlyTracked) return;
 
       const blipData = {
         id: el.id,
         name: el.name || 'Target',
         x: blipX,
         y: blipY,
+        worldX: el.x || 0,
+        worldY: el.y || 0,
         distPx,
         distM,
         isEnemy: isEnemy || isExplicitlyTracked,
@@ -1257,14 +1289,21 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
       {otherBlips.map((blip: any) => (
         <div
           key={blip.id}
-          className="absolute w-2 h-2 rounded-full border border-white/60 transform -translate-x-1/2 -translate-y-1/2 shadow-sm"
+          className="absolute transform -translate-x-1/2 -translate-y-1/2 pointer-events-none"
           style={{
             left: `${blip.x}px`,
-            top: `${blip.y}px`,
-            backgroundColor: neutralColor
+            top: `${blip.y}px`
           }}
           title={blip.name}
-        />
+        >
+          <div 
+             className="w-2 h-2 rounded-full border border-white/60 shadow-sm"
+             style={{ backgroundColor: neutralColor }}
+          />
+          <div className="absolute top-2.5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[5px] text-white/70 font-mono">
+            {Math.round(blip.worldX)}, {Math.round(blip.worldY)}
+          </div>
+        </div>
       ))}
       {enemyBlips.map((blip: any) => {
         const isTargeted = closestEnemy && closestEnemy.id === blip.id;
@@ -1292,6 +1331,9 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
             >
               <Skull size={7} className="text-white" />
             </div>
+            <div className="absolute top-3.5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[5px] text-white/70 font-mono">
+              {Math.round(blip.worldX)}, {Math.round(blip.worldY)}
+            </div>
           </div>
         );
       })}
@@ -1300,13 +1342,28 @@ function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [],
         style={{ left: `${cx}px`, top: `${cy}px` }}
       >
         <div
-          className="w-4 h-4 rounded-full border-2 border-white flex items-center justify-center shadow-lg animate-pulse"
+          className="w-4 h-4 rounded-full border-2 border-white flex items-center justify-center shadow-lg animate-pulse relative"
           style={{
             backgroundColor: playerColor,
             boxShadow: `0 0 10px ${playerColor}`
           }}
         >
           <div className="w-1.5 h-1.5 bg-white rounded-full" />
+          <div 
+             className="absolute"
+             style={{
+               width: 0, height: 0,
+               borderLeft: '4px solid transparent',
+               borderRight: '4px solid transparent',
+               borderBottom: `6px solid ${playerColor}`,
+               top: '-8px',
+               transformOrigin: '50% 16px',
+               transform: `rotate(${mainCharRotation}deg)`
+             }}
+          />
+        </div>
+        <div className="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[5px] font-bold text-white/90 font-mono">
+          {Math.round(sourceEl.x || 0)}, {Math.round(sourceEl.y || 0)}
         </div>
       </div>
       {mapConfig.label && (
@@ -4268,6 +4325,7 @@ function ActiveGame() {
                       }}
                       stageElements={stageElements}
                       gameObjects={gameData.gameObjects || []}
+                      joystickStates={joystickStatesRef.current}
                       virtualWidth={VIRTUAL_WIDTH}
                       virtualHeight={VIRTUAL_HEIGHT}
                     />

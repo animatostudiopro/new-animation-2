@@ -3,89 +3,73 @@
     {
       "id": "scene_1",
       "name": "Scene 1"
-    },
-    {
-      "id": "scene_1787392128629_fpqz6n",
-      "name": "Scene 2"
     }
   ],
   "sceneElements": {
     "scene_1": [
       {
-        "id": "el_1787388443729_d4tg6u",
-        "type": "obj",
-        "data": "obj_1787388442969_5t2be6",
-        "x": 318,
-        "y": 39,
-        "width": 80,
-        "height": 80,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "el_1787388473616_2to0lz",
-        "type": "obj",
-        "data": "obj_1787388472318_7p04uo",
-        "x": 50,
-        "y": 273,
-        "width": 80,
-        "height": 80,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "map_el_1787393259104_njt6",
+        "id": "map_el_1787400787226_68bg",
         "type": "game_map",
-        "mapId": "map_1787393241064_snpq",
-        "name": "Custom Map 7",
+        "mapId": "map_radar_1",
+        "name": "Tactical Radar HUD",
         "x": 20,
         "y": 20,
         "width": 170,
         "height": 170,
         "layerId": "layer_1",
-        "zIndex": 100
+        "zIndex": 100,
+        "mapConfig": {
+          "zoom": 0.8,
+          "type": "compass_dial"
+        }
+      },
+      {
+        "id": "el_1787400793691_adddl1",
+        "type": "obj",
+        "data": "obj_1787400792730_h724de",
+        "x": 539.7781698922005,
+        "y": 49.77989012333238,
+        "width": 80,
+        "height": 80,
+        "layerId": "layer_1",
+        "flipX": false,
+        "scaleX": 1
+      },
+      {
+        "id": "el_1787400804798_a7407s",
+        "type": "obj",
+        "data": "obj_1787400803696_q0e3ga",
+        "x": 293,
+        "y": 303,
+        "width": 80,
+        "height": 80,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "el_1787400872112_1lrwgc",
+        "type": "joystick",
+        "joystickId": "joy_move_1",
+        "joystickType": "movement",
+        "name": "Virtual Joystick (Move)",
+        "design": "classic-ring",
+        "customColor": "#3b82f6",
+        "knobColor": "#60a5fa",
+        "interactionType": "move",
+        "attachedObjectId": "el_1787400793691_adddl1",
+        "speed": 160,
+        "flipOnMove": true,
+        "x": 25,
+        "y": 235,
+        "width": 100,
+        "height": 100,
+        "layerId": "layer_1"
       }
-    ],
-    "scene_1787392128629_fpqz6n": []
+    ]
   },
   "sceneEvents": {
     "scene_1": [
       {
         "id": "ev_1",
-        "conditions": [
-          {
-            "type": "always",
-            "_uiCollapsed": false
-          }
-        ],
-        "actions": [
-          {
-            "type": "configure_map",
-            "target": "map_el_1787388405442_ees0",
-            "target3": "obj_1787388472318_7p04uo",
-            "target2": "obj_1787388442969_5t2be6",
-            "_uiCollapsed": true
-          }
-        ]
-      },
-      {
-        "id": "ev_1787392108156_8oujpw",
-        "conditions": [
-          {
-            "type": "loading_progress",
-            "operator": "==",
-            "value": 50
-          }
-        ],
-        "actions": [
-          {
-            "type": "goto_scene",
-            "target": "scene_1787392128629_fpqz6n"
-          }
-        ]
-      }
-    ],
-    "scene_1787392128629_fpqz6n": [
-      {
-        "id": "ev_1787392128629_3et2ux",
         "conditions": [],
         "actions": []
       }
@@ -96,34 +80,14 @@
   },
   "gameObjects": [
     {
-      "id": "obj_1787388442969_5t2be6",
-      "name": "New Character",
-      "type": "character",
-      "animations": [
-        {
-          "id": "anim_default",
-          "name": "Animation 1",
-          "frames": [
-            "./assets/images/asset_0_m61waq3.png"
-          ],
-          "fps": 12
-        }
-      ]
+      "id": "obj_1787400792730_h724de",
+      "name": "New Enemy",
+      "type": "enemy"
     },
     {
-      "id": "obj_1787388472318_7p04uo",
-      "name": "New Enemy",
-      "type": "enemy",
-      "animations": [
-        {
-          "id": "anim_default",
-          "name": "Animation 1",
-          "frames": [
-            "./assets/images/asset_1_53qq695.png"
-          ],
-          "fps": 12
-        }
-      ]
+      "id": "obj_1787400803696_q0e3ga",
+      "name": "New Character",
+      "type": "character"
     }
   ],
   "uiButtons": [
@@ -187,7 +151,7 @@
     {
       "id": "map_radar_1",
       "name": "Tactical Radar HUD",
-      "type": "radar_circle",
+      "type": "minimap_rect",
       "trackerSource": "",
       "trackAllEnemies": true,
       "showTrackingLine": true,
@@ -199,7 +163,7 @@
       "enemyBlipColor": "#ef4444",
       "playerBlipColor": "#22c55e",
       "neutralBlipColor": "#eab308",
-      "zoom": 0.55,
+      "zoom": 0.25,
       "opacity": 0.9,
       "width": 170,
       "height": 170,
@@ -345,33 +309,6 @@
       "showGrid": false,
       "showBorder": true,
       "label": "WORLD MAP"
-    },
-    {
-      "id": "map_1787393241064_snpq",
-      "name": "Custom Map 7",
-      "type": "radar_circle",
-      "trackerSource": "",
-      "trackAllEnemies": true,
-      "showTrackingLine": true,
-      "trackingLineColor": "#ef4444",
-      "showDistanceText": true,
-      "distanceUnit": "m",
-      "radarSweep": true,
-      "radarColor": "#22c55e",
-      "enemyBlipColor": "#ef4444",
-      "playerBlipColor": "#22c55e",
-      "neutralBlipColor": "#eab308",
-      "zoom": 0.25,
-      "opacity": 0.9,
-      "width": 170,
-      "height": 170,
-      "position": "top-right",
-      "x": 20,
-      "y": 20,
-      "visibleOnStart": true,
-      "showGrid": true,
-      "showBorder": true,
-      "label": "RADAR-01"
     }
   ],
   "gameLoadings": [
