@@ -78,12 +78,7 @@
             "value": 0
           }
         ],
-        "actions": [
-          {
-            "type": "start_timer",
-            "target": "timer_1787402915504_6skwep"
-          }
-        ]
+        "actions": []
       },
       {
         "id": "ev_1787402924572_lwmnzg",
@@ -94,7 +89,11 @@
             "value": 5
           }
         ],
-        "actions": []
+        "actions": [
+          {
+            "type": "spawn_randomly_around_character"
+          }
+        ]
       }
     ]
   },
