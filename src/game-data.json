@@ -8,167 +8,110 @@
   "sceneElements": {
     "scene_1": [
       {
-        "id": "el_1787408534844_sqqnmo",
-        "type": "joystick",
-        "joystickId": "joy_move_1",
-        "joystickType": "movement",
-        "name": "Virtual Joystick (Move)",
-        "design": "classic-ring",
-        "customColor": "#3b82f6",
-        "knobColor": "#60a5fa",
-        "interactionType": "move",
-        "attachedObjectId": "",
-        "speed": 160,
-        "flipOnMove": true,
-        "x": 25,
-        "y": 235,
-        "width": 100,
-        "height": 100,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "map_el_1787408540209_a8lj",
-        "type": "game_map",
-        "mapId": "map_radar_1",
-        "name": "Tactical Radar HUD",
-        "x": 20,
-        "y": 20,
-        "width": 170,
-        "height": 170,
-        "layerId": "layer_1",
-        "zIndex": 100
-      },
-      {
-        "id": "el_1787408703531_24o4av",
-        "type": "btn",
-        "buttonId": "btn_left",
-        "data": "https://cdn-icons-png.flaticon.com/512/271/271220.png",
-        "url": null,
-        "x": 542,
-        "y": 50,
-        "width": 50,
-        "height": 50,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787409871100_5ql0hz",
+        "id": "env_tile_1787413703950_lud5yt",
         "type": "env_tile",
         "data": {
-          "color": "#1f2937",
-          "name": "Asphalt Road",
+          "color": "#111827",
+          "name": "Alley Pavement",
           "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M0 0h16v16H0z' fill='%231f2937'/%3E%3Ccircle cx='4' cy='4' r='1' fill='%23374151'/%3E%3Ccircle cx='12' cy='10' r='1' fill='%23111827'/%3E%3Cpath d='M0 8h16v1H0z' fill='%23374151' fill-opacity='0.2'/%3E%3C/svg%3E"
         },
         "x": 0,
+        "y": 640,
+        "width": 2000,
+        "height": 160,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787413703950_wnm78k",
+        "type": "env_tile",
+        "data": {
+          "color": "#475569",
+          "name": "Fire Escape Tier 1",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%23475569'/%3E%3Cpath d='M0 0l20 20M20 0L0 20' stroke='%23334155' stroke-width='2'/%3E%3Crect x='1' y='1' width='18' height='18' fill='none' stroke='%2364748b' stroke-width='1.5'/%3E%3C/svg%3E"
+        },
+        "x": 120,
+        "y": 500,
+        "width": 220,
+        "height": 35,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787413703950_x12ife",
+        "type": "env_tile",
+        "data": {
+          "color": "#475569",
+          "name": "Fire Escape Tier 2",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%23475569'/%3E%3Cpath d='M0 0l20 20M20 0L0 20' stroke='%23334155' stroke-width='2'/%3E%3Crect x='1' y='1' width='18' height='18' fill='none' stroke='%2364748b' stroke-width='1.5'/%3E%3C/svg%3E"
+        },
+        "x": 380,
+        "y": 370,
+        "width": 220,
+        "height": 35,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787413703950_1x8q6u",
+        "type": "env_tile",
+        "data": {
+          "color": "#475569",
+          "name": "Fire Escape Tier 3",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%23475569'/%3E%3Cpath d='M0 0l20 20M20 0L0 20' stroke='%23334155' stroke-width='2'/%3E%3Crect x='1' y='1' width='18' height='18' fill='none' stroke='%2364748b' stroke-width='1.5'/%3E%3C/svg%3E"
+        },
+        "x": 120,
+        "y": 240,
+        "width": 220,
+        "height": 35,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_hazard_1787413703950_jgjsj9",
+        "type": "env_hazard",
+        "data": {
+          "color": "#06b6d4",
+          "name": "Neon Puddle",
+          "texture": "water"
+        },
+        "x": 750,
         "y": 620,
-        "width": 2200,
-        "height": 180,
+        "width": 260,
+        "height": 30,
         "isPlatform": true,
         "layerId": "layer_1"
       },
       {
-        "id": "env_tile_1787409871100_oxltoy",
-        "type": "env_tile",
+        "id": "env_light_1787413703950_mcduyn",
+        "type": "env_light",
         "data": {
-          "color": "#9ca3af",
-          "name": "Sidewalk Curb",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+          "color": "rgba(236,72,153,0.7)",
+          "name": "Pink Neon Sign"
         },
-        "x": 0,
-        "y": 580,
-        "width": 2200,
-        "height": 40,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787409871100_6yr9u4",
-        "type": "env_tile",
-        "data": {
-          "color": "#374151",
-          "name": "Building Ledge 1",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 150,
-        "y": 440,
-        "width": 280,
-        "height": 40,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787409871100_oudh71",
-        "type": "env_tile",
-        "data": {
-          "color": "#374151",
-          "name": "Building Ledge 2",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 550,
-        "y": 320,
-        "width": 320,
-        "height": 40,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787409871100_zxcekw",
-        "type": "env_tile",
-        "data": {
-          "color": "#374151",
-          "name": "Rooftop Platform",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 1000,
+        "x": 100,
         "y": 200,
-        "width": 400,
-        "height": 50,
+        "width": 300,
+        "height": 300,
         "isPlatform": true,
         "layerId": "layer_1"
       },
       {
-        "id": "env_light_1787409871100_zo0q5s",
+        "id": "env_light_1787413703950_8u2tt1",
         "type": "env_light",
         "data": {
-          "color": "rgba(255,220,120,0.6)",
-          "name": "Streetlamp Glow"
+          "color": "rgba(6,182,212,0.7)",
+          "name": "Cyan Neon Sign"
         },
-        "x": 200,
-        "y": 450,
-        "width": 220,
-        "height": 220,
+        "x": 600,
+        "y": 300,
+        "width": 300,
+        "height": 300,
         "isPlatform": true,
         "layerId": "layer_1"
       },
       {
-        "id": "env_light_1787409871100_olyfiv",
-        "type": "env_light",
-        "data": {
-          "color": "rgba(255,220,120,0.6)",
-          "name": "Streetlamp Glow 2"
-        },
-        "x": 900,
-        "y": 450,
-        "width": 220,
-        "height": 220,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_weather_1787409871100_2zz41g",
-        "type": "env_weather",
-        "data": {
-          "fx": "fog",
-          "name": "City Haze"
-        },
-        "x": 0,
-        "y": 0,
-        "width": 2200,
-        "height": 800,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "el_1787410066409_gjwqii",
+        "id": "el_1787413708276_sclxzh",
         "type": "joystick",
         "joystickId": "joy_cam_1",
         "joystickType": "camera",
@@ -185,6 +128,35 @@
         "width": 100,
         "height": 100,
         "layerId": "layer_1"
+      },
+      {
+        "id": "el_1787413731264_lmzq1n",
+        "type": "obj",
+        "data": "obj_1787413730540_3s6sxu",
+        "x": 50,
+        "y": 52.5,
+        "width": 80,
+        "height": 80,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "el_1787413749973_c3stlb",
+        "type": "joystick",
+        "joystickId": "joy_move_1",
+        "joystickType": "movement",
+        "name": "Virtual Joystick (Move)",
+        "design": "classic-ring",
+        "customColor": "#3b82f6",
+        "knobColor": "#60a5fa",
+        "interactionType": "move",
+        "attachedObjectId": "el_1787413731264_lmzq1n",
+        "speed": 160,
+        "flipOnMove": true,
+        "x": 25,
+        "y": 235,
+        "width": 100,
+        "height": 100,
+        "layerId": "layer_1"
       }
     ]
   },
@@ -192,26 +164,7 @@
     "scene_1": [
       {
         "id": "ev_1",
-        "conditions": [
-          {
-            "type": "pressed",
-            "target": "el_1787408703531_24o4av"
-          }
-        ],
-        "actions": [
-          {
-            "type": "spawn_randomly_on_map",
-            "value": "obj_1787408713585_w1b1ya"
-          }
-        ]
-      },
-      {
-        "id": "ev_1787409905658_av455b",
-        "conditions": [
-          {
-            "type": "always"
-          }
-        ],
+        "conditions": [],
         "actions": []
       }
     ]
@@ -221,15 +174,16 @@
   },
   "gameObjects": [
     {
-      "id": "obj_1787408713585_w1b1ya",
+      "id": "obj_1787413730540_3s6sxu",
       "name": "New Character",
       "type": "character",
+      "hasGravity": true,
       "animations": [
         {
           "id": "anim_default",
           "name": "Animation 1",
           "frames": [
-            "./assets/images/asset_0_bey2llp.png"
+            "./assets/images/asset_0_0v0ig5c.png"
           ],
           "fps": 12
         }

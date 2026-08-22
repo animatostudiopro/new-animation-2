@@ -1558,6 +1558,7 @@ function ActiveGame() {
   const [gameLoadings, setGameLoadings] = useState<any[]>(() => gameData.gameLoadings || []);
   const [loadingProgressState, setLoadingProgressState] = useState<Record<string, number>>({});
   const [stageElements, setStageElements] = useState<any[]>([]);
+  const cameraTargetRef = useRef<{ x: number; y: number; zoom: number }>({ x: 0, y: 0, zoom: 1 });
   const smoothCamRef = useRef<{ x: number; y: number; zoom: number }>({ x: 0, y: 0, zoom: 1 });
   const [windowSize, setWindowSize] = useState({
     width: typeof window !== 'undefined' ? window.innerWidth : 640,
@@ -2068,7 +2069,7 @@ function ActiveGame() {
             if (act.y !== undefined && act.y !== '') targetY = Number(act.y);
           }
 
-          setGlobalCamera({ zoom: targetZoom, x: targetX, y: targetY });
+          cameraTargetRef.current = { zoom: targetZoom, x: targetX, y: targetY };
           break;
         }
         
@@ -2098,8 +2099,7 @@ function ActiveGame() {
 
         case 'reset_camera': {
           autoCameraStateRef.current = null;
-          smoothCamRef.current = { x: 0, y: 0, zoom: 1 };
-          setGlobalCamera({ zoom: 1, x: 0, y: 0 });
+          cameraTargetRef.current = { zoom: 1, x: 0, y: 0 };
           break;
         }
 
@@ -3527,6 +3527,10 @@ function ActiveGame() {
           const smoothY = smoothCamRef.current.y + (clamped.y - smoothCamRef.current.y) * lerpFactor;
           const smoothZoom = smoothCamRef.current.zoom + (zoom - smoothCamRef.current.zoom) * lerpFactor;
           smoothCamRef.current = { x: smoothX, y: smoothY, zoom: smoothZoom };
+          
+          // Sync manual targets
+          cameraTargetRef.current = { x: smoothX, y: smoothY, zoom: smoothZoom };
+
           setGlobalCamera({ zoom: smoothZoom, x: smoothX, y: smoothY });
         }
       } else if (!isAnyCameraJoyActive && cameraFollowTargetRef.current && stageElementsRef.current) {
@@ -3535,17 +3539,35 @@ function ActiveGame() {
           const targetCX = (targetEl.x || 0) + (targetEl.width || 50) / 2;
           const targetCY = (targetEl.y || 0) + (targetEl.height || 50) / 2;
           
-          setGlobalCamera(cam => {
-            const targetX = (VIRTUAL_WIDTH / 2) - targetCX;
-            const targetY = (VIRTUAL_HEIGHT / 2) - targetCY;
-            const followLerp = Math.min(1, Math.max(0.05, 6 * dt));
-            const nextX = smoothCamRef.current.x + (targetX - smoothCamRef.current.x) * followLerp;
-            const nextY = smoothCamRef.current.y + (targetY - smoothCamRef.current.y) * followLerp;
-            const clamped = clampCameraToBounds(nextX, nextY, cam.zoom, stageElementsRef.current || [], VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
-            smoothCamRef.current.x = clamped.x;
-            smoothCamRef.current.y = clamped.y;
-            return { ...cam, x: clamped.x, y: clamped.y };
-          });
+          const targetX = (VIRTUAL_WIDTH / 2) - targetCX;
+          const targetY = (VIRTUAL_HEIGHT / 2) - targetCY;
+          const followLerp = Math.min(1, Math.max(0.05, 6 * dt));
+          const nextX = smoothCamRef.current.x + (targetX - smoothCamRef.current.x) * followLerp;
+          const nextY = smoothCamRef.current.y + (targetY - smoothCamRef.current.y) * followLerp;
+          const clamped = clampCameraToBounds(nextX, nextY, globalCameraRef.current.zoom, stageElementsRef.current || [], VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+          smoothCamRef.current.x = clamped.x;
+          smoothCamRef.current.y = clamped.y;
+
+          // Sync manual targets
+          cameraTargetRef.current.x = clamped.x;
+          cameraTargetRef.current.y = clamped.y;
+
+          setGlobalCamera(cam => ({ ...cam, x: clamped.x, y: clamped.y }));
+        }
+      } else if (!isAnyCameraJoyActive) {
+        // Smoothly interpolate towards manual target if set via camera_control
+        const targetLerp = Math.min(1, Math.max(0.05, 8 * dt));
+        const dx = cameraTargetRef.current.x - smoothCamRef.current.x;
+        const dy = cameraTargetRef.current.y - smoothCamRef.current.y;
+        const dz = cameraTargetRef.current.zoom - smoothCamRef.current.zoom;
+        
+        if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1 || Math.abs(dz) > 0.001) {
+          smoothCamRef.current.x += dx * targetLerp;
+          smoothCamRef.current.y += dy * targetLerp;
+          smoothCamRef.current.zoom += dz * targetLerp;
+          
+          const clamped = clampCameraToBounds(smoothCamRef.current.x, smoothCamRef.current.y, smoothCamRef.current.zoom, stageElementsRef.current, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+          setGlobalCamera({ zoom: smoothCamRef.current.zoom, x: clamped.x, y: clamped.y });
         }
       }
 
@@ -3993,7 +4015,6 @@ function ActiveGame() {
             style={{
               transform: `scale(${globalCamera.zoom || 1}) translate(${globalCamera.x || 0}px, ${globalCamera.y || 0}px)`,
               transformOrigin: 'center center',
-              transition: 'transform 0.1s cubic-bezier(0.25, 1, 0.5, 1)'
             }}
           >
             {stageElements.filter(el => el.type !== 'btn' && el.type !== 'joystick').map((el, i) => {
@@ -4180,44 +4201,7 @@ function ActiveGame() {
 
 
                   {/* Active Movement Direction Arrow Overlay */}
-                  {(() => {
-                    const activeJoy = stageElements.find(joy => {
-                      if (joy.type !== 'joystick' || joy.hidden) return false;
-                      const joyState = joystickStates[joy.id];
-                      if (!joyState || !joyState.active || joyState.distance <= 0.05) return false;
-                      const joyConfig = (gameData.joysticks || []).find((j: any) => j.id === (joy as any).joystickId) || (joy as any);
-                      let targetId = (joy as any).attachedObjectId || joyConfig.attachedObjectId;
-                      if (!targetId) {
-                        const firstObj = stageElements.find(e => e.type === 'obj' && !e.hidden);
-                        if (firstObj) targetId = firstObj.id;
-                      }
-                      return targetId === el.id;
-                    });
-
-                    if (!activeJoy) return null;
-                    const angle = joystickStates[activeJoy.id].angle;
-
-                    return (
-                      <div 
-                        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-[10000] animate-pulse"
-                        style={{
-                          width: '40px',
-                          height: '40px',
-                          transform: `translate(-50%, -50%) rotate(${angle}deg)`,
-                        }}
-                      >
-                        <svg className="w-full h-full drop-shadow-[0_0_8px_rgba(34,197,94,0.9)]" viewBox="0 0 24 24" fill="none">
-                          <path 
-                            d="M12 4L4 12H9V20H15V12H20L12 4Z" 
-                            fill="#22c55e" 
-                            stroke="#ffffff" 
-                            strokeWidth="1.5"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                      </div>
-                    );
-                  })()}
+                  {null}
                 </div>
               );
             })}
