@@ -2021,14 +2021,7 @@ function ActiveGame() {
           break;
         }
 
-        case "camera_follow": {
-          if (act.target) setCameraFollowTarget(act.target);
-          break;
-        }
-        case "camera_unfollow": {
-          setCameraFollowTarget(null);
-          break;
-        }
+
         case "activate_joystick":
         case "deactivate_joystick":
         case "toggle_joystick_visibility": {
@@ -2128,10 +2121,18 @@ function ActiveGame() {
         case 'start_loading_animation': {
           const targetId = act.target;
           const duration = Math.max(0.5, Number(act.value || act.duration || 3.0));
+          // Instantly reveal the loading elements on stage if they are hidden
+          setStageElements(prev => prev.map(el => {
+            if (el.type === 'game_loading' && (!targetId || el.loadingId === targetId || el.id === targetId)) {
+              return { ...el, hidden: false, opacity: 1 };
+            }
+            return el;
+          }));
+
           const startTime = Date.now();
           const animInterval = setInterval(() => {
             const elapsed = (Date.now() - startTime) / 1000;
-            const prog = Math.min(100, Math.round((elapsed / duration) * 100));
+            const prog = Math.min(100, (elapsed / duration) * 100);
             if (targetId) {
               setLoadingProgressState(prev => ({ ...prev, [targetId]: prog }));
             }
@@ -2693,7 +2694,7 @@ function ActiveGame() {
             setStageElements((prev) =>
               prev.map((el) =>
                 el.data === act.target || el.id === act.target || el.buttonId === act.target
-                  ? { ...el, width: el.width + addWidth }
+                  ? { ...el, width: (el.width || 0) + addWidth }
                   : el
               )
             );
@@ -2707,7 +2708,7 @@ function ActiveGame() {
             setStageElements((prev) =>
               prev.map((el) =>
                 el.data === act.target || el.id === act.target || el.buttonId === act.target
-                  ? { ...el, height: el.height + addHeight }
+                  ? { ...el, height: (el.height || 0) + addHeight }
                   : el
               )
             );
@@ -2716,8 +2717,9 @@ function ActiveGame() {
         }
 
         case 'create_character': {
-          if (act.target) {
-            const targetObj = (gameData.gameObjects || []).find((g: any) => g.id === act.target);
+          const charId = act.target || act.value;
+          if (charId) {
+            const targetObj = (gameData.gameObjects || []).find((g: any) => g.id === charId);
             if (targetObj) {
               const newId = `created_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
               setStageElements((prev) => [
@@ -2725,12 +2727,13 @@ function ActiveGame() {
                 {
                   id: newId,
                   type: 'obj',
-                  data: act.target,
+                  data: charId,
                   x: Number(act.x ?? 100),
                   y: Number(act.y ?? 100),
-                  width: 100,
-                  height: 100,
-                  zIndex: 10
+                  width: targetObj.width || 100,
+                  height: targetObj.height || 100,
+                  zIndex: 10,
+                  layerId: gameData.layers?.[0]?.id || 'layer_1'
                 }
               ]);
             }
@@ -2895,122 +2898,6 @@ function ActiveGame() {
               const elVid = document.getElementById(`video_player_${existing.id}`) as HTMLVideoElement;
               if (elVid) elVid.currentTime = sec;
             }
-          }
-          break;
-        }
-
-        case 'create_character': {
-          if (act.value) {
-            const objId = act.value;
-            const newId = `char_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            setStageElements(prev => [
-              ...prev,
-              {
-                id: newId,
-                type: 'obj',
-                data: objId,
-                x: Number(act.x ?? 100),
-                y: Number(act.y ?? 100),
-                width: 60,
-                height: 60,
-                layerId: gameData.layers?.[0]?.id || 'layer_1'
-              }
-            ]);
-          }
-          break;
-        }
-
-        case 'increase_speed': {
-          if (act.target) {
-            setStageElements(prev => prev.map(el => {
-              if (el.data === act.target || el.id === act.target || el.buttonId === act.target) {
-                const mult = Number(act.value ?? 1.5);
-                return { ...el, animationSpeedMultiplier: (el.animationSpeedMultiplier || 1) * mult };
-              }
-              return el;
-            }));
-          }
-          break;
-        }
-
-        case 'vibrate': {
-          if (act.target) {
-            setStageElements(prev => prev.map(el => {
-              if (el.data === act.target || el.id === act.target || el.buttonId === act.target) {
-                return { ...el, vibrating: act.value === 'once' ? 'once' : 'infinite' };
-              }
-              return el;
-            }));
-          }
-          break;
-        }
-
-        case 'stop_vibration': {
-          if (act.target) {
-            setStageElements(prev => prev.map(el => {
-              if (el.data === act.target || el.id === act.target || el.buttonId === act.target) {
-                const newEl = { ...el };
-                delete (newEl as any).vibrating;
-                return newEl;
-              }
-              return el;
-            }));
-          }
-          break;
-        }
-
-        case 'inc_width': {
-          if (act.target) {
-            const amount = Number(act.value ?? 10);
-            setStageElements(prev => prev.map(el => {
-              if (el.data === act.target || el.id === act.target || el.buttonId === act.target) {
-                return { ...el, width: (el.width || 0) + amount };
-              }
-              return el;
-            }));
-          }
-          break;
-        }
-
-        case 'inc_height': {
-          if (act.target) {
-            const amount = Number(act.value ?? 10);
-            setStageElements(prev => prev.map(el => {
-              if (el.data === act.target || el.id === act.target || el.buttonId === act.target) {
-                return { ...el, height: (el.height || 0) + amount };
-              }
-              return el;
-            }));
-          }
-          break;
-        }
-
-        case 'rotate': {
-          if (act.target) {
-            const rotationDegrees = Number(act.value ?? 15);
-            setStageElements(prev => prev.map(el => {
-              if (el.data === act.target || el.id === act.target || el.buttonId === act.target) {
-                return { ...el, rotation: (el.rotation || 0) + rotationDegrees };
-              }
-              return el;
-            }));
-          }
-          break;
-        }
-
-        case 'toggle_var': {
-          if (act.target) {
-            setVariables(prev => prev.map(v => (v.id === act.target || v.name === act.target) ? { ...v, value: !v.value } : v));
-          }
-          break;
-        }
-
-        case 'random_number': {
-          if (act.target) {
-            const min = Number(act.min ?? 0);
-            const max = Number(act.max ?? 100);
-            const val = Math.floor(Math.random() * (max - min + 1)) + min;
-            setVariables(prev => prev.map(v => (v.id === act.target || v.name === act.target) ? { ...v, value: val } : v));
           }
           break;
         }
@@ -4450,6 +4337,39 @@ function ActiveGame() {
   );
 }
 
+// --- Error Boundary for Deployed Builds ---
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, errorInfo) {
+    console.error("Game Render Error:", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: '20px', background: '#111', color: '#ff4d4d', fontFamily: 'monospace', height: '100vh', width: '100vw', overflow: 'auto', boxSizing: 'border-box' }}>
+          <h2 style={{ margin: '0 0 10px 0' }}>Game Runtime Error</h2>
+          <pre style={{ background: '#222', padding: '15px', color: '#fff', overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+            {this.state.error && this.state.error.toString()}
+          </pre>
+          <pre style={{ background: '#222', padding: '15px', color: '#888', overflowX: 'auto', fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+            {this.state.error && this.state.error.stack}
+          </pre>
+          <button onClick={() => window.location.reload()} style={{ marginTop: '20px', padding: '10px 20px', background: '#fff', color: '#000', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+            Reload Page
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // --- Root Entry Point with Splash Autoplay Unlock ---
 export default function App() {
   const [hasStarted, setHasStarted] = useState(false);
@@ -4473,7 +4393,9 @@ export default function App() {
           <p className="text-sm text-gray-400">Click or tap anywhere to start playing</p>
         </div>
       ) : (
-        <ActiveGame />
+        <ErrorBoundary>
+          <ActiveGame />
+        </ErrorBoundary>
       )}
     </div>
   );
