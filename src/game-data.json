@@ -8,48 +8,168 @@
   "sceneElements": {
     "scene_1": [
       {
-        "id": "el_1787323588708_s525dq",
-        "type": "obj",
-        "data": "obj_1787323554198_bylg4h",
-        "x": 154.5,
-        "y": 54.5,
-        "width": 80,
-        "height": 80,
-        "layerId": "layer_1",
-        "scaleX": 1,
-        "rotation": 0,
-        "scale": 1.0127637245209673
-      },
-      {
-        "id": "el_1787323595292_9orh6z",
-        "type": "joystick",
-        "joystickId": "joy_move_1",
-        "x": 20,
-        "y": 492,
-        "width": 100,
-        "height": 100,
-        "layerId": "layer_1",
-        "attachedObjectId": "el_1787323760426_krbbg2",
-        "interactionType": "rotate",
-        "customColor": "#d2f63b",
-        "knobColor": "#000000"
-      },
-      {
-        "id": "el_1787323760426_krbbg2",
-        "type": "obj",
-        "data": "obj_1787323743947_oevr9p",
-        "x": 124,
-        "y": 24,
-        "width": 141,
-        "height": 141,
+        "id": "env_tile_1787367424754_llfdhn",
+        "type": "env_tile",
+        "data": {
+          "color": "#1f2937",
+          "name": "Asphalt Road",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M0 0h16v16H0z' fill='%231f2937'/%3E%3Ccircle cx='4' cy='4' r='1' fill='%23374151'/%3E%3Ccircle cx='12' cy='10' r='1' fill='%23111827'/%3E%3Cpath d='M0 8h16v1H0z' fill='%23374151' fill-opacity='0.2'/%3E%3C/svg%3E"
+        },
+        "x": 0,
+        "y": 620,
+        "width": 2200,
+        "height": 180,
+        "isPlatform": true,
         "layerId": "layer_1"
       },
       {
-        "id": "el_1787323800071_gr6sl2",
+        "id": "env_tile_1787367424754_09p51k",
+        "type": "env_tile",
+        "data": {
+          "color": "#9ca3af",
+          "name": "Sidewalk Curb",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 0,
+        "y": 580,
+        "width": 2200,
+        "height": 40,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787367424754_xc4wgz",
+        "type": "env_tile",
+        "data": {
+          "color": "#374151",
+          "name": "Building Ledge 1",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 150,
+        "y": 440,
+        "width": 280,
+        "height": 40,
+        "isPlatform": true,
+        "assignedCharacterId": "el_1787367536977_fnpn8h",
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787367424754_fc9mx7",
+        "type": "env_tile",
+        "data": {
+          "color": "#374151",
+          "name": "Building Ledge 2",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 550,
+        "y": 320,
+        "width": 320,
+        "height": 40,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_tile_1787367424754_h2xaxt",
+        "type": "env_tile",
+        "data": {
+          "color": "#374151",
+          "name": "Rooftop Platform",
+          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
+        },
+        "x": 1000,
+        "y": 200,
+        "width": 400,
+        "height": 50,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_light_1787367424754_s17jx2",
+        "type": "env_light",
+        "data": {
+          "color": "rgba(255,220,120,0.6)",
+          "name": "Streetlamp Glow"
+        },
+        "x": 200,
+        "y": 450,
+        "width": 220,
+        "height": 220,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_light_1787367424754_b8eo77",
+        "type": "env_light",
+        "data": {
+          "color": "rgba(255,220,120,0.6)",
+          "name": "Streetlamp Glow 2"
+        },
+        "x": 900,
+        "y": 450,
+        "width": 220,
+        "height": 220,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "env_weather_1787367424754_54a7i9",
+        "type": "env_weather",
+        "data": {
+          "fx": "fog",
+          "name": "City Haze"
+        },
+        "x": 0,
+        "y": 0,
+        "width": 2200,
+        "height": 800,
+        "isPlatform": true,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "el_1787367452004_xl3x2i",
+        "type": "joystick",
+        "joystickId": "joy_cam_1",
+        "joystickType": "camera",
+        "name": "Virtual Joystick (Camera)",
+        "design": "outline-only",
+        "customColor": "#eab308",
+        "knobColor": "#fde047",
+        "interactionType": "pan",
+        "attachedObjectId": "",
+        "speed": 160,
+        "flipOnMove": true,
+        "x": 235,
+        "y": 179,
+        "width": 100,
+        "height": 100,
+        "layerId": "layer_1"
+      },
+      {
+        "id": "el_1787367536977_fnpn8h",
+        "type": "obj",
+        "data": "obj_1787367526780_ynp8eo",
+        "x": 218,
+        "y": 360,
+        "width": 80,
+        "height": 80,
+        "layerId": "layer_1",
+        "isPlatform": true
+      },
+      {
+        "id": "el_1787367613205_b27lx5",
         "type": "joystick",
         "joystickId": "joy_move_1",
-        "x": 20,
-        "y": 1985,
+        "joystickType": "movement",
+        "name": "Virtual Joystick (Move)",
+        "design": "outline-only",
+        "customColor": "#3b82f6",
+        "knobColor": "#60a5fa",
+        "interactionType": "move",
+        "attachedObjectId": "el_1787367536977_fnpn8h",
+        "speed": 160,
+        "flipOnMove": true,
+        "x": 25,
+        "y": 169,
         "width": 100,
         "height": 100,
         "layerId": "layer_1"
@@ -59,72 +179,22 @@
   "sceneEvents": {
     "scene_1": [
       {
-        "id": "ev_1787323879566_lmwdla",
-        "isFolder": true,
-        "name": "New Folder",
-        "conditions": [],
-        "actions": []
-      },
-      {
-        "id": "ev_1787323882379_b85wjm",
-        "parentId": "ev_1787323879566_lmwdla",
-        "conditions": [
-          {
-            "type": "pressed",
-            "_uiCollapsed": true
-          }
-        ],
-        "actions": [
-          {
-            "type": "stop_all_sounds",
-            "_uiCollapsed": true
-          }
-        ]
-      },
-      {
-        "id": "ev_1787323893801_fel3al",
-        "parentId": "ev_1787323882379_b85wjm",
+        "id": "ev_1",
         "conditions": [],
         "actions": []
       }
     ]
   },
   "sceneAttachments": {
-    "scene_1": [
-      {
-        "id": "att_1787323839341_i82w8a",
-        "name": "Attachment 1",
-        "childElementId": "el_1787323588708_s525dq",
-        "parentElementId": "el_1787323760426_krbbg2",
-        "category": "part_of_character",
-        "offsetX": 0,
-        "offsetY": 0,
-        "followRotation": true,
-        "followFlip": true,
-        "followScale": true
-      }
-    ]
+    "scene_1": []
   },
   "gameObjects": [
     {
-      "id": "obj_1787323554198_bylg4h",
-      "name": "New Character",
-      "type": "character"
-    },
-    {
-      "id": "obj_1787323743947_oevr9p",
+      "id": "obj_1787367526780_ynp8eo",
       "name": "New Character",
       "type": "character",
-      "animations": [
-        {
-          "id": "anim_default",
-          "name": "Animation 1",
-          "frames": [
-            "./assets/images/asset_0_iw4n52c.png"
-          ],
-          "fps": 12
-        }
-      ]
+      "hasGravity": true,
+      "isPlatform": true
     }
   ],
   "uiButtons": [
@@ -165,20 +235,7 @@
   "VIRTUAL_HEIGHT": 640,
   "variables": [],
   "timers": [],
-  "attachments": [
-    {
-      "id": "att_1787323839341_i82w8a",
-      "name": "Attachment 1",
-      "childElementId": "el_1787323588708_s525dq",
-      "parentElementId": "el_1787323760426_krbbg2",
-      "category": "part_of_character",
-      "offsetX": 0,
-      "offsetY": 0,
-      "followRotation": true,
-      "followFlip": true,
-      "followScale": true
-    }
-  ],
+  "attachments": [],
   "joysticks": [
     {
       "id": "joy_move_1",
@@ -186,7 +243,8 @@
       "type": "movement",
       "color": "#3b82f6",
       "knobColor": "#60a5fa",
-      "interactionType": "move"
+      "interactionType": "move",
+      "design": "outline-only"
     },
     {
       "id": "joy_cam_1",
@@ -194,9 +252,10 @@
       "type": "camera",
       "color": "#eab308",
       "knobColor": "#fde047",
-      "interactionType": "pan"
+      "interactionType": "pan",
+      "design": "outline-only"
     }
   ],
   "cameraFollowTarget": null,
-  "isCameraFollowEnabled": false
+  "isCameraFollowEnabled": true
 }

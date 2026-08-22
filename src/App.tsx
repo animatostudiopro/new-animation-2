@@ -76,6 +76,55 @@ if (typeof window !== 'undefined') {
   window.addEventListener('pointerdown', unlock, { passive: true });
 }
 
+function clampCameraToBounds(
+  camX: number,
+  camY: number,
+  zoom: number,
+  elements: any[],
+  vWidth: number = 640,
+  vHeight: number = 360
+): { x: number; y: number } {
+  const bgEl = (elements || []).find(el => el && el.type === 'bg' && !el.hidden);
+  if (!bgEl) {
+    // When there is NO environment, camera panning is completely unconstrained
+    return { x: camX, y: camY };
+  }
+  const bgX = Number(bgEl.x || 0);
+  const bgY = Number(bgEl.y || 0);
+  const bgScale = Number(bgEl.scale || 1);
+  const bgW = Number(bgEl.width || vWidth) * bgScale;
+  const bgH = Number(bgEl.height || vHeight) * bgScale;
+
+  const currentZoom = Math.max(0.1, zoom || 1);
+  const halfViewW = (vWidth / 2) / currentZoom;
+  const halfViewH = (vHeight / 2) / currentZoom;
+
+  const minWorldX = bgX + halfViewW;
+  const maxWorldX = bgX + bgW - halfViewW;
+  const minWorldY = bgY + halfViewH;
+  const maxWorldY = bgY + bgH - halfViewH;
+
+  let worldCenterX = vWidth / 2 - camX;
+  let worldCenterY = vHeight / 2 - camY;
+
+  if (minWorldX >= maxWorldX) {
+    worldCenterX = bgX + bgW / 2;
+  } else {
+    worldCenterX = Math.max(minWorldX, Math.min(maxWorldX, worldCenterX));
+  }
+
+  if (minWorldY >= maxWorldY) {
+    worldCenterY = bgY + bgH / 2;
+  } else {
+    worldCenterY = Math.max(minWorldY, Math.min(maxWorldY, worldCenterY));
+  }
+
+  return {
+    x: vWidth / 2 - worldCenterX,
+    y: vHeight / 2 - worldCenterY
+  };
+}
+
 function computeElementZIndex(el: any, layers: any[] = [], opts: any = {}): number {
   if (!el) return 0;
   if (el.type === 'bg') return 0;
@@ -2195,21 +2244,10 @@ function ActiveGame() {
           setGlobalCamera(cam => {
             const targetX = (VIRTUAL_WIDTH / 2) - targetCX;
             const targetY = (VIRTUAL_HEIGHT / 2) - targetCY;
-            // Use clampCameraToBounds if available or just update
             const nextX = cam.x + (targetX - cam.x) * 5 * dt;
             const nextY = cam.y + (targetY - cam.y) * 5 * dt;
-            // Find background for clamping
-            const bg = stageElementsRef.current.find(el => el.type === 'bg');
-            if (bg) {
-               const minX = VIRTUAL_WIDTH - (bg.width || VIRTUAL_WIDTH) * (bg.scale || 1);
-               const minY = VIRTUAL_HEIGHT - (bg.height || VIRTUAL_HEIGHT) * (bg.scale || 1);
-               return {
-                 ...cam,
-                 x: Math.min(0, Math.max(minX, nextX)),
-                 y: Math.min(0, Math.max(minY, nextY))
-               };
-            }
-            return { ...cam, x: nextX, y: nextY };
+            const clamped = clampCameraToBounds(nextX, nextY, cam.zoom, stageElementsRef.current || [], VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+            return { ...cam, x: clamped.x, y: clamped.y };
           });
         }
       }
@@ -2240,34 +2278,65 @@ function ActiveGame() {
           const joyState = joystickStatesRef.current[joyEl.id];
           if (joyState && joyState.active && joyState.distance > 0.05) {
             const joyConfig = gameData.joysticks?.find((j: any) => j.id === joyEl.joystickId) || joyEl;
-            const interactionType = joyEl.interactionType || joyConfig.interactionType || (joyConfig.type === 'camera' ? 'pan' : 'move');
+            const isCamJoy = joyEl.joystickType === 'camera' || 
+                             joyEl.type === 'camera' || 
+                             joyConfig.type === 'camera' || 
+                             joyEl.interactionType === 'pan' || 
+                             joyEl.interactionType === 'pan_camera' || 
+                             joyEl.interactionType === 'zoom' || 
+                             joyConfig.interactionType === 'pan' || 
+                             joyConfig.interactionType === 'pan_camera' || 
+                             joyConfig.interactionType === 'zoom';
+            const interactionType = joyEl.interactionType || joyConfig.interactionType || (isCamJoy ? 'pan' : 'move');
             const speed = Number(joyEl.speed || joyConfig.speed || (interactionType === 'rotate' ? 180 : 160));
-            const targetId = joyEl.attachedObjectId || joyConfig.attachedObjectId;
+            let targetId = joyEl.attachedObjectId || joyConfig.attachedObjectId;
 
-            if (interactionType === 'pan' || interactionType === 'pan_camera' || interactionType === 'zoom') {
+            if (isCamJoy || interactionType === 'pan' || interactionType === 'pan_camera' || interactionType === 'zoom') {
               if (interactionType === 'zoom') {
-                setGlobalCamera((cam: any) => ({ ...cam, zoom: Math.max(0.2, Math.min(3, cam.zoom + (-joyState.normY) * 1.0 * dt)) }));
+                setGlobalCamera((cam: any) => {
+                  const nextZoom = Math.max(0.2, Math.min(3, cam.zoom + (-joyState.normY) * 1.0 * dt));
+                  const clamped = clampCameraToBounds(cam.x, cam.y, nextZoom, prevElements, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+                  return { zoom: nextZoom, x: clamped.x, y: clamped.y };
+                });
               } else {
-                setGlobalCamera((cam: any) => ({ ...cam, x: cam.x - joyState.normX * speed * dt, y: cam.y - joyState.normY * speed * dt }));
+                setGlobalCamera((cam: any) => {
+                  const nextX = cam.x - joyState.normX * speed * dt;
+                  const nextY = cam.y - joyState.normY * speed * dt;
+                  const clamped = clampCameraToBounds(nextX, nextY, cam.zoom, prevElements, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+                  return { ...cam, x: clamped.x, y: clamped.y };
+                });
               }
-            } else if (targetId) {
-              const targetIdx = prevElements.findIndex((el: any) => el.id === targetId || el.data === targetId);
-              if (targetIdx >= 0) {
-                const target = prevElements[targetIdx];
-                if (interactionType === 'move') {
-                  target.x = (target.x || 0) + joyState.normX * speed * dt;
-                  target.y = (target.y || 0) + joyState.normY * speed * dt;
-                  if (joyEl.flipOnMove !== false && Math.abs(joyState.normX) > 0.2) {
-                    target.scaleX = joyState.normX < 0 ? -Math.abs(target.scaleX || 1) : Math.abs(target.scaleX || 1);
+            } else {
+              if (!targetId) {
+                const defaultTarget = prevElements.find((el: any) => (el.type === 'obj' || el.type === 'character') && !el.hidden);
+                if (defaultTarget) targetId = defaultTarget.id;
+              }
+              if (targetId) {
+                const targetIdx = prevElements.findIndex((el: any) => el.id === targetId || el.data === targetId);
+                if (targetIdx >= 0) {
+                  const target = prevElements[targetIdx];
+                  if (interactionType === 'move') {
+                    target.x = (target.x || 0) + joyState.normX * speed * dt;
+                    target.y = (target.y || 0) + joyState.normY * speed * dt;
+                    const shouldFlip = joyEl.flipOnMove !== false && joyConfig.flipOnMove !== false;
+                    if (shouldFlip) {
+                      if (joyState.normX < -0.15) {
+                        target.flipX = true;
+                        target.scaleX = -Math.abs(target.scaleX || 1);
+                      } else if (joyState.normX > 0.15) {
+                        target.flipX = false;
+                        target.scaleX = Math.abs(target.scaleX || 1);
+                      }
+                    }
+                  } else if (interactionType === 'rotate') {
+                    target.rotation = joyState.angle;
+                  } else if (interactionType === 'scale') {
+                    target.scale = Math.max(0.2, Math.min(3, (target.scale || 1) + (-joyState.normY) * 1.5 * dt));
+                  } else if (interactionType === 'aim') {
+                    target.rotation = joyState.angle;
                   }
-                } else if (interactionType === 'rotate') {
-                  target.rotation = joyState.angle;
-                } else if (interactionType === 'scale') {
-                  target.scale = Math.max(0.2, Math.min(3, (target.scale || 1) + (-joyState.normY) * 1.5 * dt));
-                } else if (interactionType === 'aim') {
-                  target.rotation = joyState.angle;
+                  hasChanges = true;
                 }
-                hasChanges = true;
               }
             }
           }
@@ -2460,226 +2529,290 @@ function ActiveGame() {
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerCancel}
         >
-          {stageElements.map((el, i) => {
-          const gameObject = (el.type === 'obj' || el.type === 'enemy') ? (gameData.gameObjects || []).find((o: any) => o.id === el.data) : null;
-          const activeAnimIndex = el.activeAnimationIndex || 0;
-          const firstAnim = gameObject?.animations?.[activeAnimIndex] || gameObject?.animations?.[0];
-          const isButton = el.type === 'btn', isText = gameObject?.type === 'text' || gameObject?.type === 'var_text';
-          const isFitVideo = el.type === 'video' && el.fitToScreen;
-          
-          const finalZ = computeElementZIndex(el, gameData.layers || [], { gameObject });
+          {/* 1. WORLD LAYER: Camera zoom & panning applied ONLY here */}
+          <div 
+            id="world_camera_layer"
+            className="absolute inset-0 w-full h-full pointer-events-none"
+            style={{
+              transform: `scale(${globalCamera.zoom || 1}) translate(${globalCamera.x || 0}px, ${globalCamera.y || 0}px)`,
+              transformOrigin: 'center center',
+              transition: 'transform 0.1s cubic-bezier(0.25, 1, 0.5, 1)'
+            }}
+          >
+            {stageElements.filter(el => el.type !== 'btn' && el.type !== 'joystick').map((el, i) => {
+              const gameObject = (el.type === 'obj' || el.type === 'enemy') ? (gameData.gameObjects || []).find((o: any) => o.id === el.data) : null;
+              const activeAnimIndex = el.activeAnimationIndex || 0;
+              const firstAnim = gameObject?.animations?.[activeAnimIndex] || gameObject?.animations?.[0];
+              const isFitVideo = el.type === 'video' && el.fitToScreen;
+              
+              const finalZ = computeElementZIndex(el, gameData.layers || [], { gameObject });
 
-          const isVibrating = el.vibrating;
-          const vibrateClass = isVibrating ? (isVibrating === 'once' ? 'animate-[vibrate_0.3s_linear]' : 'animate-[vibrate_0.1s_linear_infinite]') : '';
-          const destroyClass = el.isDestroying ? (el.destroyEffect === 'dust' ? 'opacity-0 scale-50 blur-md transition-all duration-1000' : 'opacity-0 transition-opacity duration-1000') : '';
-          const filterStyle = el.glowColor ? `drop-shadow(0 0 15px ${el.glowColor})` : (el.colorFilter ? `hue-rotate(90deg) drop-shadow(0 0 8px ${el.colorFilter})` : undefined);
+              const isVibrating = el.vibrating;
+              const vibrateClass = isVibrating ? (isVibrating === 'once' ? 'animate-[vibrate_0.3s_linear]' : 'animate-[vibrate_0.1s_linear_infinite]') : '';
+              const destroyClass = el.isDestroying ? (el.destroyEffect === 'dust' ? 'opacity-0 scale-50 blur-md transition-all duration-1000' : 'opacity-0 transition-opacity duration-1000') : '';
+              const filterStyle = el.glowColor ? `drop-shadow(0 0 15px ${el.glowColor})` : (el.colorFilter ? `hue-rotate(90deg) drop-shadow(0 0 8px ${el.colorFilter})` : undefined);
 
-          const btnTemplate = (el.type === 'btn' && el.buttonId) ? (gameData.uiButtons || []).find((b: any) => b.id === el.buttonId) : null;
-          let elemSrc = el.url || el.data || btnTemplate?.url || btnTemplate?.data || '';
-          
-          // Parity with Studio: Handle shape data better
-          const isShape = elemSrc === 'rect' || elemSrc === 'circle';
-          const finalBgImage = (el.type !== 'obj' && el.type !== 'video' && elemSrc && !isShape) ? `url("${elemSrc}")` : undefined;
-          const finalBgColor = (!elemSrc || isShape) && el.type === 'btn' ? (el.customColor || 'rgba(236,72,153,0.2)') : undefined;
+              let elemSrc = el.url || el.data || '';
+              const isShape = elemSrc === 'rect' || elemSrc === 'circle';
+              const finalBgImage = (el.type !== 'obj' && el.type !== 'video' && elemSrc && !isShape) ? `url("${elemSrc}")` : undefined;
 
-          const resolvedVideoSrc = el.type === 'video' ? resolveVideoUrl(el.videoId || elemSrc) : '';
-          const elementTransform = [
-            el.rotation ? `rotate(${el.rotation}deg)` : '',
-            el.flipX ? 'scaleX(-1)' : '',
-            el.flipY ? 'scaleY(-1)' : '',
-            el.scale && el.scale !== 1 ? `scale(${el.scale})` : ''
-          ].filter(Boolean).join(' ') || undefined;
+              const resolvedVideoSrc = el.type === 'video' ? resolveVideoUrl(el.videoId || elemSrc) : '';
+              const isFlippedX = Boolean(el.flipX) || (el.scaleX !== undefined && el.scaleX < 0);
+              const isFlippedY = Boolean(el.flipY) || (el.scaleY !== undefined && el.scaleY < 0);
+              const elementTransform = [
+                el.rotation ? `rotate(${el.rotation}deg)` : '',
+                isFlippedX ? 'scaleX(-1)' : '',
+                isFlippedY ? 'scaleY(-1)' : '',
+                el.scale && el.scale !== 1 ? `scale(${el.scale})` : ''
+              ].filter(Boolean).join(' ') || undefined;
 
-          return (
-            <div
-              key={el.id}
-              data-element-id={el.id}
-              data-element-data={el.data}
-              data-btn-id={(el as any).buttonId}
-              draggable={false}
-              onDragStart={(e) => e.preventDefault()}
-              className={`absolute select-none ${vibrateClass} ${destroyClass} ${elemSrc === 'circle' ? 'rounded-full' : ''}`}
-              style={{
-                left: (el.type === 'bg' || isFitVideo) ? 0 : el.x,
-                top: (el.type === 'bg' || isFitVideo) ? 0 : el.y,
-                width: (el.type === 'bg' || isFitVideo) ? '100%' : el.width,
-                height: (el.type === 'bg' || isFitVideo) ? '100%' : el.height,
-                backgroundImage: finalBgImage,
-                backgroundSize: '100% 100%',
-                backgroundRepeat: 'no-repeat',
-                backgroundColor: finalBgColor,
-                zIndex: (el.type === 'bg') ? 0 : (isFitVideo ? Math.max(50000, finalZ) : finalZ),
-                cursor: isButton ? 'pointer' : 'default',
-                opacity: el.opacity !== undefined ? el.opacity : 1,
-                transform: elementTransform,
-                filter: filterStyle,
-                pointerEvents: (isButton || el.type === 'obj' || el.type === 'enemy') ? 'auto' : 'none',
-                touchAction: 'none',
-                userSelect: 'none',
-                WebkitUserSelect: 'none'
-              }}
-              onClick={(e) => {
-                if (isSwipingActiveRef.current) {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  return;
-                }
-                if (isButton || el.type === 'obj' || el.type === 'enemy') {
-                  e.stopPropagation();
-                  handleElementClick(el.id);
-                }
-              }}
-            >
-              {el.type === 'obj' && (gameObject?.type === 'text' || gameObject?.type === 'var_text') && (
+              return (
                 <div
-                  className="w-full h-full flex items-center justify-center text-center font-bold"
+                  key={el.id}
+                  data-element-id={el.id}
+                  data-element-data={el.data}
+                  draggable={false}
+                  onDragStart={(e) => e.preventDefault()}
+                  className={`absolute select-none ${vibrateClass} ${destroyClass} ${elemSrc === 'circle' ? 'rounded-full' : ''}`}
                   style={{
-                    fontSize: `${gameObject.fontSize ?? 24}px`,
-                    color: gameObject.color ?? '#ffffff',
-                    fontFamily: gameObject.fontFamily ?? 'Inter, sans-serif',
-                    lineHeight: 1.2,
-                    wordBreak: 'break-word',
-                    overflow: 'visible'
+                    left: (el.type === 'bg' || isFitVideo) && !el.x ? 0 : el.x,
+                    top: (el.type === 'bg' || isFitVideo) && !el.y ? 0 : el.y,
+                    width: (el.type === 'bg' || isFitVideo) && !el.width ? '100%' : (el.width ? `${el.width}px` : '100%'),
+                    height: (el.type === 'bg' || isFitVideo) && !el.height ? '100%' : (el.height ? `${el.height}px` : '100%'),
+                    backgroundImage: finalBgImage,
+                    backgroundSize: el.type === 'bg' ? 'cover' : '100% 100%',
+                    backgroundPosition: 'center',
+                    backgroundRepeat: 'no-repeat',
+                    zIndex: (el.type === 'bg') ? 0 : (isFitVideo ? Math.max(50000, finalZ) : finalZ),
+                    opacity: el.opacity !== undefined ? el.opacity : 1,
+                    transform: elementTransform,
+                    filter: filterStyle,
+                    pointerEvents: (el.type === 'obj' || el.type === 'enemy') ? 'auto' : 'none',
+                    touchAction: 'none',
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none'
                   }}
-                >
-                  {gameObject?.type === 'var_text'
-                    ? String(variables.find((v) => v.id === (gameObject as any).variableId)?.value ?? '0')
-                    : (gameObject.textContent ?? gameObject.name ?? 'Text')}
-                </div>
-              )}
-
-              {el.type === 'obj' && firstAnim?.frames?.length > 0 && (
-                <AnimatedSprite
-                  frames={firstAnim.frames}
-                  fps={firstAnim.fps || 24}
-                  speed={(firstAnim.speed || 1) * (el.animationSpeedMultiplier || 1)}
-                  tintColor={el.customColor}
-                  width={el.width}
-                  height={el.height}
-                />
-              )}
-
-              {el.type === 'joystick' && (
-                <div 
-                  className="w-full h-full bg-black/30 border-2 border-white/20 rounded-full flex flex-col items-center justify-center overflow-hidden backdrop-blur-sm shadow-xl" 
-                  style={{ visibility: el.hidden ? 'hidden' : 'visible', pointerEvents: 'auto' }}
-                  onPointerDown={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const cx = rect.left + rect.width / 2;
-                    const cy = rect.top + rect.height / 2;
-                    const maxDist = rect.width / 2;
-                    const updateJoystick = (ex: number, ey: number) => {
-                      const dx = ex - cx;
-                      const dy = ey - cy;
-                      const dist = Math.min(Math.hypot(dx, dy), maxDist);
-                      const angle = Math.atan2(dy, dx);
-                      const normX = Math.cos(angle) * (dist / maxDist);
-                      const normY = Math.sin(angle) * (dist / maxDist);
-                      
-                      setJoystickStates(prev => ({ ...prev, [el.id]: { active: true, x: normX, y: normY, angle: angle * 180 / Math.PI } }));
-                      
-                      if (el.attachedObjectId) {
-                         setStageElements((prev: any[]) => prev.map(p => {
-                           if (p.id === el.attachedObjectId) {
-                             if (el.interactionType === 'weapon') {
-                               return { ...p, rotation: angle * 180 / Math.PI };
-                             } else {
-                               return { ...p, x: p.x + normX * 5, y: p.y + normY * 5 };
-                             }
-                           }
-                           return p;
-                         }));
-                      }
-                      // If it's a camera joystick, let's just pan camera
-                      if (el.interactionType === 'camera') {
-                        setGlobalCamera(prev => ({ ...prev, x: prev.x - normX * 10, y: prev.y - normY * 10 }));
-                      }
-                    };
-                    updateJoystick(e.clientX, e.clientY);
-                    
-                    const onMove = (ev: PointerEvent) => updateJoystick(ev.clientX, ev.clientY);
-                    const onUp = () => {
-                      setJoystickStates(prev => ({ ...prev, [el.id]: { active: false, x: 0, y: 0, angle: 0 } }));
-                      window.removeEventListener('pointermove', onMove);
-                      window.removeEventListener('pointerup', onUp);
-                    };
-                    window.addEventListener('pointermove', onMove);
-                    window.addEventListener('pointerup', onUp);
-                  }}
-                >
-                  <img src={gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.url || 'https://cdn-icons-png.flaticon.com/512/808/808569.png'} className="w-full h-full object-cover opacity-80" draggable={false} />
-                  <div 
-                    className="absolute w-1/2 h-1/2 bg-white/40 rounded-full shadow-lg border border-white/50" 
-                    style={{
-                      transform: 'translate(' + ((joystickStates[el.id]?.x || 0) * 50) + '%, ' + ((joystickStates[el.id]?.y || 0) * 50) + '%)'
-                    }}
-                  />
-                </div>
-              )}
-              {el.type === 'btn' && (
-                <button className="w-full h-full flex items-center justify-center bg-transparent border-0 text-white font-bold cursor-pointer select-none">
-                  {el.text || ''}
-                </button>
-              )}
-
-              {el.isToast && (
-                <div 
-                  className={`w-full h-full rounded px-3 py-1 shadow-lg text-center animate-bounce flex items-center justify-center ${
-                    (el as any).style?.background === 'transparent' ? 'bg-transparent border-transparent' : 'bg-black/95 border border-yellow-500/80'
-                  }`}
-                  style={{
-                    color: (el as any).style?.color || '#ffff00',
-                    fontSize: (el as any).style?.fontSize || '20px',
-                    fontFamily: (el as any).style?.fontFamily || 'monospace',
-                    fontWeight: (el as any).style?.fontWeight || 'bold',
-                    fontStyle: (el as any).style?.fontStyle || 'normal',
-                  }}
-                >
-                  {el.text}
-                </div>
-              )}
-
-              {el.type === 'video' && (
-                <video
-                  id={`video_player_${el.id}`}
-                  src={resolvedVideoSrc}
-                  className="w-full h-full"
-                  style={{ objectFit: el.fitToScreen ? 'cover' : 'contain', pointerEvents: 'none' }}
-                  playsInline
-                  webkit-playsinline="true"
-                  
-                  preload="auto"
-                  autoPlay
-                  muted={el.muted ?? false}
-                  loop={el.loop ?? false}
-                  onEnded={() => {
-                    handleVideoEnded(el.videoId, el.id);
-                    if (!el.loop && !el.keepOnStage) {
-                      setStageElements(prev => prev.filter(item => item.id !== el.id));
+                  onClick={(e) => {
+                    if (isSwipingActiveRef.current) {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      return;
+                    }
+                    if (el.type === 'obj' || el.type === 'enemy') {
+                      e.stopPropagation();
+                      handleElementClick(el.id);
                     }
                   }}
-                />
-              )}
+                >
+                  {el.type === 'obj' && (gameObject?.type === 'text' || gameObject?.type === 'var_text') && (
+                    <div
+                      className="w-full h-full flex items-center justify-center text-center font-bold"
+                      style={{
+                        fontSize: `${gameObject.fontSize ?? 24}px`,
+                        color: gameObject.color ?? '#ffffff',
+                        fontFamily: gameObject.fontFamily ?? 'Inter, sans-serif',
+                        lineHeight: 1.2,
+                        wordBreak: 'break-word',
+                        overflow: 'visible'
+                      }}
+                    >
+                      {gameObject?.type === 'var_text'
+                        ? String(variables.find((v) => v.id === (gameObject as any).variableId)?.value ?? '0')
+                        : (gameObject.textContent ?? gameObject.name ?? 'Text')}
+                    </div>
+                  )}
 
-              {el.isToast && (
+                  {el.type === 'obj' && firstAnim?.frames?.length > 0 && (
+                    <AnimatedSprite
+                      frames={firstAnim.frames}
+                      fps={firstAnim.fps || 24}
+                      speed={(firstAnim.speed || 1) * (el.animationSpeedMultiplier || 1)}
+                      tintColor={el.customColor}
+                      width={el.width}
+                      height={el.height}
+                    />
+                  )}
+
+                  {el.isToast && (
+                    <div 
+                      className={`w-full h-full rounded px-3 py-1 shadow-lg text-center animate-bounce flex items-center justify-center ${
+                        (el as any).style?.background === 'transparent' ? 'bg-transparent border-transparent' : 'bg-black/95 border border-yellow-500/80'
+                      }`}
+                      style={{
+                        color: (el as any).style?.color || '#ffff00',
+                        fontSize: (el as any).style?.fontSize || '20px',
+                        fontFamily: (el as any).style?.fontFamily || 'monospace',
+                        fontWeight: (el as any).style?.fontWeight || 'bold',
+                        fontStyle: (el as any).style?.fontStyle || 'normal',
+                      }}
+                    >
+                      {el.text}
+                    </div>
+                  )}
+
+                  {el.type === 'video' && (
+                    <video
+                      id={`video_player_${el.id}`}
+                      src={resolvedVideoSrc}
+                      className="w-full h-full"
+                      style={{ objectFit: el.fitToScreen ? 'cover' : 'contain', pointerEvents: 'none' }}
+                      playsInline
+                      webkit-playsinline="true"
+                      preload="auto"
+                      autoPlay
+                      muted={el.muted ?? false}
+                      loop={el.loop ?? false}
+                      onEnded={() => {
+                        handleVideoEnded(el.videoId, el.id);
+                        if (!el.loop && !el.keepOnStage) {
+                          setStageElements(prev => prev.filter(item => item.id !== el.id));
+                        }
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 2. UI / HUD LAYER: Fixed to screen, completely unaffected by camera */}
+          <div 
+            id="hud_ui_layer"
+            className="absolute inset-0 w-full h-full pointer-events-none z-[60000]"
+          >
+            {stageElements.filter(el => el.type === 'btn' || el.type === 'joystick').map((el, i) => {
+              const finalZ = computeElementZIndex(el, gameData.layers || [], {});
+
+              const isVibrating = el.vibrating;
+              const vibrateClass = isVibrating ? (isVibrating === 'once' ? 'animate-[vibrate_0.3s_linear]' : 'animate-[vibrate_0.1s_linear_infinite]') : '';
+              const filterStyle = el.glowColor ? `drop-shadow(0 0 15px ${el.glowColor})` : (el.colorFilter ? `hue-rotate(90deg) drop-shadow(0 0 8px ${el.colorFilter})` : undefined);
+
+              const btnTemplate = (el.type === 'btn' && el.buttonId) ? (gameData.uiButtons || []).find((b: any) => b.id === el.buttonId) : null;
+              let elemSrc = el.url || el.data || btnTemplate?.url || btnTemplate?.data || '';
+              
+              const isShape = elemSrc === 'rect' || elemSrc === 'circle';
+              const finalBgImage = (elemSrc && !isShape) ? `url("${elemSrc}")` : undefined;
+              const finalBgColor = (!elemSrc || isShape) && el.type === 'btn' ? (el.customColor || 'rgba(236,72,153,0.2)') : undefined;
+
+              const isFlippedX = Boolean(el.flipX) || (el.scaleX !== undefined && el.scaleX < 0);
+              const isFlippedY = Boolean(el.flipY) || (el.scaleY !== undefined && el.scaleY < 0);
+              const elementTransform = [
+                el.rotation ? `rotate(${el.rotation}deg)` : '',
+                isFlippedX ? 'scaleX(-1)' : '',
+                isFlippedY ? 'scaleY(-1)' : '',
+                el.scale && el.scale !== 1 ? `scale(${el.scale})` : ''
+              ].filter(Boolean).join(' ') || undefined;
+
+              return (
                 <div
-                  className={`w-full h-full rounded px-3 py-1 shadow-lg text-center animate-bounce flex items-center justify-center ${
-                    el.style?.background === 'transparent' ? 'bg-transparent border-transparent' : 'bg-black/95 border border-yellow-500/80'
-                  }`}
+                  key={el.id}
+                  data-element-id={el.id}
+                  data-btn-id={(el as any).buttonId}
+                  draggable={false}
+                  className={`absolute select-none ${vibrateClass} ${elemSrc === 'circle' ? 'rounded-full' : ''}`}
                   style={{
-                    color: el.style?.color || '#ffff00',
-                    fontSize: el.style?.fontSize || '20px',
-                    fontFamily: el.style?.fontFamily || 'monospace',
-                    fontWeight: el.style?.fontWeight || 'bold',
-                    fontStyle: el.style?.fontStyle || 'normal'
+                    left: el.x,
+                    top: el.y,
+                    width: el.width ? `${el.width}px` : '100px',
+                    height: el.height ? `${el.height}px` : '100px',
+                    backgroundImage: finalBgImage,
+                    backgroundSize: '100% 100%',
+                    backgroundPosition: 'center',
+                    backgroundRepeat: 'no-repeat',
+                    backgroundColor: finalBgColor,
+                    zIndex: finalZ,
+                    cursor: el.type === 'btn' ? 'pointer' : 'default',
+                    opacity: el.opacity !== undefined ? el.opacity : 1,
+                    transform: elementTransform,
+                    filter: filterStyle,
+                    pointerEvents: 'auto',
+                    touchAction: 'none',
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none'
+                  }}
+                  onClick={(e) => {
+                    if (isSwipingActiveRef.current) {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      return;
+                    }
+                    if (el.type === 'btn') {
+                      e.stopPropagation();
+                      handleElementClick(el.id);
+                    }
                   }}
                 >
-                  {el.text}
+                  {el.type === 'joystick' && (
+                    <div 
+                      className="w-full h-full rounded-full flex flex-col items-center justify-center overflow-hidden shadow-2xl relative select-none touch-none" 
+                      style={{ 
+                        visibility: el.hidden ? 'hidden' : 'visible', 
+                        pointerEvents: 'auto',
+                        backgroundColor: el.customColor ? (el.customColor + '22') : 'rgba(15, 23, 42, 0.8)',
+                        border: '2px solid ' + (el.customColor || '#3b82f6'),
+                        boxShadow: '0 0 16px ' + (el.customColor || '#3b82f6') + '55'
+                      }}
+                      onPointerDown={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const cx = rect.left + rect.width / 2;
+                        const cy = rect.top + rect.height / 2;
+                        const maxDist = (rect.width / 2) * 0.75;
+                        const updateJoystick = (ex: number, ey: number) => {
+                          const dx = ex - cx;
+                          const dy = ey - cy;
+                          const dist = Math.min(Math.hypot(dx, dy), maxDist);
+                          const angle = Math.atan2(dy, dx);
+                          const normX = maxDist > 0 ? (Math.cos(angle) * dist) / maxDist : 0;
+                          const normY = maxDist > 0 ? (Math.sin(angle) * dist) / maxDist : 0;
+                          const st = { active: true, x: normX, y: normY, normX, normY, angle: angle * 180 / Math.PI, distance: maxDist > 0 ? dist / maxDist : 0 };
+                          setJoystickStates(prev => ({ ...prev, [el.id]: st }));
+                          joystickStatesRef.current[el.id] = st;
+                        };
+                        updateJoystick(e.clientX, e.clientY);
+                        
+                        const onMove = (ev: PointerEvent) => updateJoystick(ev.clientX, ev.clientY);
+                        const onUp = () => {
+                          const idle = { active: false, x: 0, y: 0, normX: 0, normY: 0, angle: 0, distance: 0 };
+                          setJoystickStates(prev => ({ ...prev, [el.id]: idle }));
+                          joystickStatesRef.current[el.id] = idle;
+                          window.removeEventListener('pointermove', onMove);
+                          window.removeEventListener('pointerup', onUp);
+                        };
+                        window.addEventListener('pointermove', onMove);
+                        window.addEventListener('pointerup', onUp);
+                      }}
+                    >
+                      {el.url ? (
+                        <img src={el.url} className="w-full h-full object-cover opacity-80 pointer-events-none" draggable={false} />
+                      ) : (
+                        <div className="absolute inset-2 rounded-full border border-white/10 pointer-events-none flex items-center justify-center">
+                          <div className="w-2 h-2 rounded-full bg-white/30" />
+                        </div>
+                      )}
+                      <div 
+                        className="absolute rounded-full shadow-lg pointer-events-none flex items-center justify-center" 
+                        style={{
+                          width: '45%',
+                          height: '45%',
+                          backgroundColor: el.knobColor || '#60a5fa',
+                          border: '2px solid ' + (el.customColor || '#93c5fd'),
+                          boxShadow: '0 0 12px ' + (el.knobColor || '#60a5fa') + '99, inset 0 1px 3px rgba(255,255,255,0.6)',
+                          transform: 'translate(' + ((joystickStates[el.id]?.x || 0) * 35) + 'px, ' + ((joystickStates[el.id]?.y || 0) * 35) + 'px)'
+                        }}
+                      >
+                        <div className="w-2.5 h-2.5 rounded-full bg-white/50" />
+                      </div>
+                    </div>
+                  )}
+                  {el.type === 'btn' && (
+                    <button className="w-full h-full flex items-center justify-center bg-transparent border-0 text-white font-bold cursor-pointer select-none">
+                      {el.text || ''}
+                    </button>
+                  )}
                 </div>
-              )}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
 
         {/* Floating Text Popups */}
         {floatingTexts.map(f => (
