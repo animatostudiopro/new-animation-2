@@ -37,6 +37,18 @@
         "height": 170,
         "layerId": "layer_1",
         "zIndex": 100
+      },
+      {
+        "id": "el_1787408703531_24o4av",
+        "type": "btn",
+        "buttonId": "btn_left",
+        "data": "https://cdn-icons-png.flaticon.com/512/271/271220.png",
+        "url": null,
+        "x": 542,
+        "y": 50,
+        "width": 50,
+        "height": 50,
+        "layerId": "layer_1"
       }
     ]
   },
@@ -44,15 +56,41 @@
     "scene_1": [
       {
         "id": "ev_1",
-        "conditions": [],
-        "actions": []
+        "conditions": [
+          {
+            "type": "pressed",
+            "target": "el_1787408703531_24o4av"
+          }
+        ],
+        "actions": [
+          {
+            "type": "spawn_randomly_on_map",
+            "value": "obj_1787408713585_w1b1ya"
+          }
+        ]
       }
     ]
   },
   "sceneAttachments": {
     "scene_1": []
   },
-  "gameObjects": [],
+  "gameObjects": [
+    {
+      "id": "obj_1787408713585_w1b1ya",
+      "name": "New Character",
+      "type": "character",
+      "animations": [
+        {
+          "id": "anim_default",
+          "name": "Animation 1",
+          "frames": [
+            "./assets/images/asset_0_4tf3ukp.png"
+          ],
+          "fps": 12
+        }
+      ]
+    }
+  ],
   "uiButtons": [
     {
       "id": "btn_left",
