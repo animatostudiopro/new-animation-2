@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Camera, Crosshair, Radio, Navigation, Layers2, Orbit, Sparkles, Shield, Gamepad2, Flame, Zap, Skull, Star, Swords, Crown, Timer } from 'lucide-react';
 import gameData from './game-data.json';
 
 // --- Shared Audio Engine ---
@@ -84,45 +85,557 @@ function clampCameraToBounds(
   vWidth: number = 640,
   vHeight: number = 360
 ): { x: number; y: number } {
-  const bgEl = (elements || []).find(el => el && el.type === 'bg' && !el.hidden);
-  if (!bgEl) {
-    // When there is NO environment, camera panning is completely unconstrained
+  const allSceneEls = (elements || []).filter(el => el && !el.hidden && (el.type === 'bg' || el.type === 'env_tile' || el.type === 'env_hazard' || el.type === 'env_weather' || el.type === 'env_light' || el.type === 'obj'));
+  
+  if (allSceneEls.length === 0) {
     return { x: camX, y: camY };
   }
-  const bgX = Number(bgEl.x || 0);
-  const bgY = Number(bgEl.y || 0);
-  const bgScale = Number(bgEl.scale || 1);
-  const bgW = Number(bgEl.width || vWidth) * bgScale;
-  const bgH = Number(bgEl.height || vHeight) * bgScale;
+  
+  let minX = 0, minY = 0, maxX = vWidth, maxY = vHeight;
+  for (const el of allSceneEls) {
+     const ex = Number(el.x || 0);
+     const ey = Number(el.y || 0);
+     const ew = Number(el.width || (el.type === 'bg' ? vWidth : 50)) * Number(el.scale || 1);
+     const eh = Number(el.height || (el.type === 'bg' ? vHeight : 50)) * Number(el.scale || 1);
+     if (ex < minX) minX = ex;
+     if (ey < minY) minY = ey;
+     if (ex + ew > maxX) maxX = ex + ew;
+     if (ey + eh > maxY) maxY = ey + eh;
+  }
+  
+  const marginX = Math.max(vWidth * 0.6, 350);
+  const marginY = Math.max(vHeight * 0.6, 250);
+  const worldMinX = minX - marginX;
+  const worldMaxX = maxX + marginX;
+  const worldMinY = minY - marginY;
+  const worldMaxY = maxY + marginY;
 
   const currentZoom = Math.max(0.1, zoom || 1);
   const halfViewW = (vWidth / 2) / currentZoom;
   const halfViewH = (vHeight / 2) / currentZoom;
 
-  const minWorldX = bgX + halfViewW;
-  const maxWorldX = bgX + bgW - halfViewW;
-  const minWorldY = bgY + halfViewH;
-  const maxWorldY = bgY + bgH - halfViewH;
+  const minCenterWorldX = worldMinX + halfViewW;
+  const maxCenterWorldX = worldMaxX - halfViewW;
+  const minCenterWorldY = worldMinY + halfViewH;
+  const maxCenterWorldY = worldMaxY - halfViewH;
 
-  let worldCenterX = vWidth / 2 - camX;
-  let worldCenterY = vHeight / 2 - camY;
+  let currentWorldCenterX = vWidth / 2 - camX;
+  let currentWorldCenterY = vHeight / 2 - camY;
 
-  if (minWorldX >= maxWorldX) {
-    worldCenterX = bgX + bgW / 2;
-  } else {
-    worldCenterX = Math.max(minWorldX, Math.min(maxWorldX, worldCenterX));
+  if (minCenterWorldX <= maxCenterWorldX) {
+    currentWorldCenterX = Math.max(minCenterWorldX, Math.min(maxCenterWorldX, currentWorldCenterX));
   }
-
-  if (minWorldY >= maxWorldY) {
-    worldCenterY = bgY + bgH / 2;
-  } else {
-    worldCenterY = Math.max(minWorldY, Math.min(maxWorldY, worldCenterY));
+  if (minCenterWorldY <= maxCenterWorldY) {
+    currentWorldCenterY = Math.max(minCenterWorldY, Math.min(maxCenterWorldY, currentWorldCenterY));
   }
 
   return {
-    x: vWidth / 2 - worldCenterX,
-    y: vHeight / 2 - worldCenterY
+    x: vWidth / 2 - currentWorldCenterX,
+    y: vHeight / 2 - currentWorldCenterY
   };
+}
+
+function VirtualJoystickRenderer({
+  id,
+  type = 'movement',
+  name,
+  design = 'classic-ring',
+  color = '#3b82f6',
+  knobColor = '#60a5fa',
+  url,
+  state,
+  onPointerDown,
+  width = 100,
+  height = 100,
+  interactive = true
+}: any) {
+  const isCamera = type === 'camera';
+  const effectiveBaseColor = color || (isCamera ? '#eab308' : '#3b82f6');
+  const effectiveKnobColor = knobColor || (isCamera ? '#fde047' : '#60a5fa');
+  const knobX = state?.knobX || 0;
+  const knobY = state?.knobY || 0;
+  const isActive = state?.active || false;
+  const normalizedDesign = (design === 'gimbal-compass' ? 'compass-gimbal' : design);
+  const currentDesign = normalizedDesign || (url ? 'custom-image' : 'classic-ring');
+  const knobSize = Math.round(width * 0.44);
+
+  const renderClassicRingBase = () => (
+    <div
+      className="absolute inset-0 rounded-full pointer-events-none"
+      style={{
+        backgroundColor: isCamera ? 'rgba(22, 18, 8, 0.85)' : 'rgba(10, 16, 28, 0.85)',
+        border: '2px solid ' + effectiveBaseColor + '88',
+        backdropFilter: 'blur(8px)',
+      }}
+    >
+      <div
+        className="absolute inset-1.5 rounded-full pointer-events-none opacity-40"
+        style={{
+          border: '1.5px dashed ' + effectiveBaseColor,
+        }}
+      />
+      {isCamera ? (
+        <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+          <div className="absolute top-1.5 left-1.5 w-2 h-2 border-t-2 border-l-2" style={{ borderColor: effectiveBaseColor }} />
+          <div className="absolute top-1.5 right-1.5 w-2 h-2 border-t-2 border-r-2" style={{ borderColor: effectiveBaseColor }} />
+          <div className="absolute bottom-1.5 left-1.5 w-2 h-2 border-b-2 border-l-2" style={{ borderColor: effectiveBaseColor }} />
+          <div className="absolute bottom-1.5 right-1.5 w-2 h-2 border-b-2 border-r-2" style={{ borderColor: effectiveBaseColor }} />
+          <div className="absolute w-full h-[1px] opacity-20" style={{ backgroundColor: effectiveBaseColor }} />
+          <div className="absolute h-full w-[1px] opacity-20" style={{ backgroundColor: effectiveBaseColor }} />
+        </div>
+      ) : (
+        <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+          <div className="absolute top-1.5 text-[8px] font-black opacity-60" style={{ color: effectiveBaseColor }}>▲</div>
+          <div className="absolute bottom-1.5 text-[8px] font-black opacity-60" style={{ color: effectiveBaseColor }}>▼</div>
+          <div className="absolute left-1.5 text-[8px] font-black opacity-60" style={{ color: effectiveBaseColor }}>◀</div>
+          <div className="absolute right-1.5 text-[8px] font-black opacity-60" style={{ color: effectiveBaseColor }}>▶</div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderDesignBase = () => {
+    switch (currentDesign) {
+      case 'custom-image':
+        if (url) {
+          return (
+            <div className="absolute inset-0 rounded-full overflow-hidden pointer-events-none">
+              <img src={url} alt={name || 'Joystick'} className="w-full h-full object-cover opacity-85" draggable={false} />
+              <div className="absolute inset-0 rounded-full border-2" style={{ borderColor: effectiveBaseColor + '88' }} />
+            </div>
+          );
+        }
+        return renderClassicRingBase();
+
+      case 'dpad-arrows':
+        return (
+          <div className="absolute inset-0 rounded-full pointer-events-none flex items-center justify-center">
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <circle cx="50" cy="50" r="47" fill="rgba(8, 12, 20, 0.85)" stroke={effectiveBaseColor + '77'} strokeWidth="2" />
+              <polygon points="50,10 44,18 56,18" fill={effectiveBaseColor} opacity="0.85" />
+              <polygon points="50,90 44,82 56,82" fill={effectiveBaseColor} opacity="0.85" />
+              <polygon points="10,50 18,44 18,56" fill={effectiveBaseColor} opacity="0.85" />
+              <polygon points="90,50 82,44 82,56" fill={effectiveBaseColor} opacity="0.85" />
+              <line x1="26" y1="50" x2="74" y2="50" stroke={effectiveBaseColor + '33'} strokeWidth="1.5" strokeDasharray="3 3" />
+              <line x1="50" y1="26" x2="50" y2="74" stroke={effectiveBaseColor + '33'} strokeWidth="1.5" strokeDasharray="3 3" />
+              <circle cx="50" cy="50" r="28" fill="none" stroke={effectiveBaseColor + '44'} strokeWidth="1" />
+              <circle cx="28" cy="28" r="2" fill={effectiveBaseColor + '66'} />
+              <circle cx="72" cy="28" r="2" fill={effectiveBaseColor + '66'} />
+              <circle cx="28" cy="72" r="2" fill={effectiveBaseColor + '66'} />
+              <circle cx="72" cy="72" r="2" fill={effectiveBaseColor + '66'} />
+            </svg>
+          </div>
+        );
+
+      case 'neon-glow':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              backgroundColor: 'rgba(5, 7, 15, 0.9)',
+              border: '2px solid ' + effectiveBaseColor,
+              boxShadow: '0 0 18px ' + effectiveBaseColor + '99, inset 0 0 14px ' + effectiveBaseColor + '44',
+            }}
+          >
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <circle cx="50" cy="50" r="40" fill="none" stroke={effectiveBaseColor} strokeWidth="1" strokeDasharray="4 4" opacity="0.6" />
+              <circle cx="50" cy="50" r="26" fill="none" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.8" />
+              <line x1="50" y1="4" x2="50" y2="12" stroke={effectiveBaseColor} strokeWidth="2" />
+              <line x1="50" y1="88" x2="50" y2="96" stroke={effectiveBaseColor} strokeWidth="2" />
+              <line x1="4" y1="50" x2="12" y2="50" stroke={effectiveBaseColor} strokeWidth="2" />
+              <line x1="88" y1="50" x2="96" y2="50" stroke={effectiveBaseColor} strokeWidth="2" />
+            </svg>
+          </div>
+        );
+
+      case 'minimal-dot':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              backgroundColor: effectiveBaseColor + '0d',
+              backdropFilter: 'blur(10px)',
+              border: '1px solid ' + effectiveBaseColor + '40',
+            }}
+          >
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <circle cx="50" cy="50" r="36" fill="none" stroke={effectiveBaseColor + '25'} strokeWidth="1" />
+              <circle cx="50" cy="12" r="1.5" fill={effectiveBaseColor} opacity="0.6" />
+              <circle cx="50" cy="88" r="1.5" fill={effectiveBaseColor} opacity="0.6" />
+              <circle cx="12" cy="50" r="1.5" fill={effectiveBaseColor} opacity="0.6" />
+              <circle cx="88" cy="50" r="1.5" fill={effectiveBaseColor} opacity="0.6" />
+            </svg>
+          </div>
+        );
+
+      case 'hexagon-grid':
+        return (
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <polygon
+                points="50,4 90,26 90,74 50,96 10,74 10,26"
+                fill="rgba(8, 14, 24, 0.9)"
+                stroke={effectiveBaseColor}
+                strokeWidth="2"
+              />
+              <polygon
+                points="50,20 76,34 76,66 50,80 24,66 24,34"
+                fill="none"
+                stroke={effectiveBaseColor + '44'}
+                strokeWidth="1.2"
+                strokeDasharray="3 3"
+              />
+              <line x1="50" y1="4" x2="50" y2="20" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.7" />
+              <line x1="90" y1="26" x2="76" y2="34" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.7" />
+              <line x1="90" y1="74" x2="76" y2="66" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.7" />
+              <line x1="50" y1="96" x2="50" y2="80" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.7" />
+              <line x1="10" y1="74" x2="24" y2="66" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.7" />
+              <line x1="10" y1="26" x2="24" y2="34" stroke={effectiveBaseColor} strokeWidth="1.5" opacity="0.7" />
+              <circle cx="50" cy="4" r="2.5" fill={effectiveBaseColor} />
+              <circle cx="90" cy="26" r="2.5" fill={effectiveBaseColor} />
+              <circle cx="90" cy="74" r="2.5" fill={effectiveBaseColor} />
+              <circle cx="50" cy="96" r="2.5" fill={effectiveBaseColor} />
+              <circle cx="10" cy="74" r="2.5" fill={effectiveBaseColor} />
+              <circle cx="10" cy="26" r="2.5" fill={effectiveBaseColor} />
+            </svg>
+          </div>
+        );
+
+      case 'compass-gimbal':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              backgroundColor: isCamera ? 'rgba(24, 18, 8, 0.88)' : 'rgba(8, 16, 28, 0.88)',
+              border: '2px solid ' + effectiveBaseColor + '99',
+              boxShadow: '0 0 12px ' + effectiveBaseColor + '33',
+            }}
+          >
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <circle cx="50" cy="50" r="44" fill="none" stroke={effectiveBaseColor + '44'} strokeWidth="1" />
+              <circle cx="50" cy="50" r="32" fill="none" stroke={effectiveBaseColor + '33'} strokeWidth="1" strokeDasharray="2 4" />
+              <line x1="12" y1="50" x2="88" y2="50" stroke={effectiveBaseColor + '44'} strokeWidth="1" />
+              <line x1="50" y1="12" x2="50" y2="88" stroke={effectiveBaseColor + '44'} strokeWidth="1" />
+              <text x="50" y="11" textAnchor="middle" fill={effectiveBaseColor} fontSize="7" fontWeight="bold" fontFamily="monospace">N</text>
+              <text x="50" y="97" textAnchor="middle" fill={effectiveBaseColor} fontSize="7" fontWeight="bold" fontFamily="monospace">S</text>
+              <text x="7" y="52.5" textAnchor="middle" fill={effectiveBaseColor} fontSize="7" fontWeight="bold" fontFamily="monospace">W</text>
+              <text x="93" y="52.5" textAnchor="middle" fill={effectiveBaseColor} fontSize="7" fontWeight="bold" fontFamily="monospace">E</text>
+              <line x1="22" y1="22" x2="27" y2="27" stroke={effectiveBaseColor + '66'} strokeWidth="1.2" />
+              <line x1="78" y1="22" x2="73" y2="27" stroke={effectiveBaseColor + '66'} strokeWidth="1.2" />
+              <line x1="22" y1="78" x2="27" y2="73" stroke={effectiveBaseColor + '66'} strokeWidth="1.2" />
+              <line x1="78" y1="78" x2="73" y2="73" stroke={effectiveBaseColor + '66'} strokeWidth="1.2" />
+            </svg>
+          </div>
+        );
+
+      case 'retro-arcade':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              backgroundColor: 'rgba(10, 10, 14, 0.95)',
+              border: '3px solid ' + effectiveBaseColor,
+              boxShadow: 'inset 0 0 10px rgba(0,0,0,0.8), 0 4px 10px rgba(0,0,0,0.6)',
+            }}
+          >
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <polygon
+                points="35,14 65,14 86,35 86,65 65,86 35,86 14,65 14,35"
+                fill="none"
+                stroke={effectiveBaseColor + '77'}
+                strokeWidth="2"
+              />
+              <rect x="47" y="5" width="6" height="6" fill={effectiveBaseColor} />
+              <rect x="47" y="89" width="6" height="6" fill={effectiveBaseColor} />
+              <rect x="5" y="47" width="6" height="6" fill={effectiveBaseColor} />
+              <rect x="89" y="47" width="6" height="6" fill={effectiveBaseColor} />
+            </svg>
+          </div>
+        );
+
+      case 'glass-frosted':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.03) 100%)',
+              backdropFilter: 'blur(16px)',
+              border: '1.5px solid rgba(255, 255, 255, 0.4)',
+              boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 1px 0 rgba(255, 255, 255, 0.6), inset 0 -2px 6px ' + effectiveBaseColor + '55',
+            }}
+          >
+            <div
+              className="absolute inset-2 rounded-full border border-dashed opacity-40 pointer-events-none"
+              style={{ borderColor: effectiveBaseColor }}
+            />
+          </div>
+        );
+
+      case 'outline-only':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              backgroundColor: 'transparent',
+              border: '1.5px solid ' + effectiveBaseColor,
+            }}
+          >
+            <svg viewBox="0 0 100 100" className="w-full h-full absolute inset-0">
+              <circle cx="50" cy="50" r="38" fill="none" stroke={effectiveBaseColor + '66'} strokeWidth="1" strokeDasharray="3 2" />
+              <circle cx="50" cy="50" r="20" fill="none" stroke={effectiveBaseColor + '44'} strokeWidth="0.75" />
+              <line x1="50" y1="2" x2="50" y2="98" stroke={effectiveBaseColor + '33'} strokeWidth="0.75" />
+              <line x1="2" y1="50" x2="98" y2="50" stroke={effectiveBaseColor + '33'} strokeWidth="0.75" />
+            </svg>
+          </div>
+        );
+
+      case 'gradient-orb':
+        return (
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              background: 'radial-gradient(circle at 40% 40%, ' + effectiveBaseColor + '33 0%, rgba(10, 12, 22, 0.9) 75%)',
+              border: '1.5px solid ' + effectiveBaseColor + '77',
+              boxShadow: '0 0 20px ' + effectiveBaseColor + '44',
+            }}
+          >
+            <div className="absolute inset-1.5 rounded-full border border-white/10 pointer-events-none" />
+          </div>
+        );
+
+      case 'classic-ring':
+      default:
+        return renderClassicRingBase();
+    }
+  };
+
+  const renderKnob = () => {
+    switch (currentDesign) {
+      case 'dpad-arrows':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center shadow-2xl relative overflow-hidden"
+            style={{
+              background: 'radial-gradient(circle at 35% 35%, ' + effectiveKnobColor + ', ' + effectiveBaseColor + ' 75%, #050810 100%)',
+              border: '2px solid ' + effectiveKnobColor,
+              boxShadow: '0 0 14px ' + effectiveBaseColor + '88, inset 0 2px 4px rgba(255,255,255,0.4)',
+            }}
+          >
+            <div className="w-1/2 h-1/2 rounded-full border border-white/40 flex items-center justify-center">
+              {isCamera ? (
+                <Camera size={Math.max(10, Math.round(knobSize * 0.4))} className="text-black drop-shadow" />
+              ) : (
+                <div className="w-2 h-2 rounded-full bg-white/60 shadow" />
+              )}
+            </div>
+          </div>
+        );
+
+      case 'neon-glow':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center relative"
+            style={{
+              background: 'radial-gradient(circle at 35% 35%, #ffffff 0%, ' + effectiveKnobColor + ' 45%, ' + effectiveBaseColor + ' 85%, #000000 100%)',
+              border: '2px solid ' + effectiveKnobColor,
+              boxShadow: '0 0 22px ' + effectiveKnobColor + ', 0 0 8px #ffffff, inset 0 0 10px #ffffff',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.45))} className="text-black drop-shadow" />
+            ) : (
+              <div className="w-2.5 h-2.5 rounded-full bg-white shadow-[0_0_8px_#ffffff]" />
+            )}
+          </div>
+        );
+
+      case 'minimal-dot':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center shadow-lg"
+            style={{
+              backgroundColor: 'rgba(15, 20, 30, 0.85)',
+              border: '1.5px solid ' + effectiveKnobColor,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.5), 0 0 10px ' + effectiveKnobColor + '44',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.4))} style={{ color: effectiveKnobColor }} />
+            ) : (
+              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: effectiveKnobColor, boxShadow: '0 0 6px ' + effectiveKnobColor }} />
+            )}
+          </div>
+        );
+
+      case 'hexagon-grid':
+        return (
+          <div className="w-full h-full flex items-center justify-center relative">
+            <svg viewBox="0 0 100 100" className="w-full h-full">
+              <polygon
+                points="50,6 88,28 88,72 50,94 12,72 12,28"
+                fill={'url(#hexGrad_' + id + ')'}
+                stroke={effectiveKnobColor}
+                strokeWidth="4"
+              />
+              <defs>
+                <radialGradient id={'hexGrad_' + id} cx="40%" cy="35%" r="70%">
+                  <stop offset="0%" stopColor={effectiveKnobColor} />
+                  <stop offset="70%" stopColor={effectiveBaseColor} />
+                  <stop offset="100%" stopColor="#050810" />
+                </radialGradient>
+              </defs>
+            </svg>
+            <div className="absolute inset-0 flex items-center justify-center">
+              {isCamera ? (
+                <Camera size={Math.max(10, Math.round(knobSize * 0.4))} className="text-black drop-shadow" />
+              ) : (
+                <div className="w-2 h-2 rotate-45 border-2 border-white/70" />
+              )}
+            </div>
+          </div>
+        );
+
+      case 'compass-gimbal':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center shadow-xl relative"
+            style={{
+              background: 'radial-gradient(circle at 35% 35%, ' + effectiveKnobColor + ', ' + effectiveBaseColor + ' 70%, #080c14 100%)',
+              border: '2px solid ' + effectiveKnobColor,
+              boxShadow: '0 0 16px ' + effectiveKnobColor + '77, inset 0 2px 4px rgba(255,255,255,0.5)',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.42))} className="text-black drop-shadow" />
+            ) : (
+              <Crosshair size={Math.max(10, Math.round(knobSize * 0.45))} className="text-black drop-shadow opacity-80" />
+            )}
+          </div>
+        );
+
+      case 'retro-arcade':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center shadow-2xl relative"
+            style={{
+              background: 'radial-gradient(circle at 30% 25%, #ffffff 0%, ' + effectiveKnobColor + ' 30%, ' + effectiveBaseColor + ' 80%, #000000 100%)',
+              border: '2px solid #ffffff',
+              boxShadow: '0 6px 14px rgba(0,0,0,0.8), inset 0 3px 6px rgba(255,255,255,0.7)',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.4))} className="text-black drop-shadow" />
+            ) : (
+              <div className="w-2.5 h-2.5 rounded-full bg-white/40 border border-white/60 shadow" />
+            )}
+          </div>
+        );
+
+      case 'glass-frosted':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center relative shadow-xl overflow-hidden"
+            style={{
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.55) 0%, ' + effectiveKnobColor + '99 40%, ' + effectiveBaseColor + ' 100%)',
+              backdropFilter: 'blur(12px)',
+              border: '2px solid rgba(255,255,255,0.7)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.4), inset 0 2px 4px rgba(255,255,255,0.8), 0 0 16px ' + effectiveKnobColor + '66',
+            }}
+          >
+            <div className="absolute top-1 left-2 right-2 h-1/3 rounded-full bg-white/40 blur-[0.5px]" />
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.4))} className="text-black drop-shadow relative z-10" />
+            ) : (
+              <div className="w-2.5 h-2.5 rounded-full bg-white/80 shadow relative z-10" />
+            )}
+          </div>
+        );
+
+      case 'outline-only':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center relative"
+            style={{
+              backgroundColor: 'rgba(10, 15, 25, 0.8)',
+              border: '2px solid ' + effectiveKnobColor,
+              boxShadow: '0 0 10px ' + effectiveKnobColor + '55',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.42))} style={{ color: effectiveKnobColor }} />
+            ) : (
+              <div className="w-2 h-2 rounded-full border border-current" style={{ color: effectiveKnobColor }} />
+            )}
+          </div>
+        );
+
+      case 'gradient-orb':
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center shadow-2xl relative"
+            style={{
+              background: 'radial-gradient(circle at 28% 25%, #ffffff 0%, ' + effectiveKnobColor + ' 25%, ' + effectiveBaseColor + ' 70%, #03050c 100%)',
+              border: '1.5px solid ' + effectiveKnobColor,
+              boxShadow: '0 8px 20px rgba(0,0,0,0.6), 0 0 16px ' + effectiveKnobColor + '88, inset 0 2px 5px rgba(255,255,255,0.6)',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.4))} className="text-black drop-shadow" />
+            ) : (
+              <div className="w-2 h-2 rounded-full bg-white/70 shadow" />
+            )}
+          </div>
+        );
+
+      case 'classic-ring':
+      default:
+        return (
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center shadow-2xl relative"
+            style={{
+              background: 'radial-gradient(circle at 35% 35%, ' + effectiveKnobColor + ', ' + effectiveBaseColor + ' 70%, #050508 100%)',
+              border: '2px solid ' + effectiveKnobColor,
+              boxShadow: '0 0 16px ' + effectiveBaseColor + '99, inset 0 2px 4px rgba(255,255,255,0.5), inset 0 -2px 4px rgba(0,0,0,0.7)',
+            }}
+          >
+            {isCamera ? (
+              <Camera size={Math.max(10, Math.round(knobSize * 0.4))} className="text-black drop-shadow" />
+            ) : (
+              <div className="w-3 h-3 rounded-full border-2 border-white/40 opacity-70" />
+            )}
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div
+      className={'relative select-none touch-none flex items-center justify-center transition-all ' + (isActive ? 'shadow-[0_0_30px_rgba(255,255,255,0.35)]' : 'shadow-xl')}
+      style={{
+        width: width + 'px',
+        height: height + 'px',
+        cursor: interactive ? 'grab' : 'default',
+        pointerEvents: interactive ? 'auto' : 'none'
+      }}
+      onPointerDown={(e) => {
+        if (interactive && onPointerDown) {
+          onPointerDown(e, id);
+        }
+      }}
+    >
+      {renderDesignBase()}
+      <div
+        className={'absolute pointer-events-none transition-transform duration-75 flex items-center justify-center ' + (isActive ? 'scale-110 brightness-125' : 'scale-100')}
+        style={{
+          width: knobSize + 'px',
+          height: knobSize + 'px',
+          transform: 'translate(' + knobX + 'px, ' + knobY + 'px)'
+        }}
+      >
+        {renderKnob()}
+      </div>
+    </div>
+  );
 }
 
 function computeElementZIndex(el: any, layers: any[] = [], opts: any = {}): number {
@@ -405,9 +918,21 @@ const evaluateEventConditions = (
   ctx: {
     activeKeysDown: Set<string>;
     evaluateSingleCondition: (cond: any, evKey: string) => boolean;
+    allEvents?: any[];
   }
 ): boolean => {
   if (!ev) return false;
+
+  // If this is a sub-event (child event), parent conditions must also be satisfied
+  if (ev.parentId && ctx?.allEvents) {
+    const parent = ctx.allEvents.find((e: any) => e.id === ev.parentId);
+    if (parent) {
+      if (!evaluateEventConditions(parent, triggerContext, parent.id, ctx)) {
+        return false;
+      }
+    }
+  }
+
   if (!ev.conditions || ev.conditions.length === 0) return true;
 
   // Gate primary triggers
@@ -509,6 +1034,417 @@ const evaluateEventConditions = (
   return true;
 };
 
+// --- Standalone Game Map Renderer ---
+function GameMapRenderer({ config, mapConfig: propMapConfig, stageElements = [], gameObjects = [], virtualWidth = 800, virtualHeight = 450 }: any) {
+  const mapConfig = config || propMapConfig || {
+    id: 'default_map',
+    name: 'Radar',
+    type: 'radar_circle',
+    width: 170,
+    height: 170,
+    zoom: 0.25,
+    radarColor: '#22c55e',
+    playerBlipColor: '#22c55e',
+    enemyBlipColor: '#ef4444',
+    neutralBlipColor: '#eab308',
+    showTrackingLine: true,
+    trackingLineColor: '#ef4444',
+    showDistanceText: true,
+    distanceUnit: 'm',
+    showGrid: true,
+    radarSweep: true,
+    label: 'RADAR SCAN'
+  };
+  const width = mapConfig.width || 170;
+  const height = mapConfig.height || 170;
+  const cx = width / 2;
+  const cy = height / 2;
+
+  const sourceEl = useMemo(() => {
+    if (mapConfig.trackerSource) {
+      const match = stageElements.find((el: any) => el.id === mapConfig.trackerSource || el.data === mapConfig.trackerSource);
+      if (match) return match;
+    }
+    const playerObj = stageElements.find((el: any) => el.type === 'obj' && (
+      el.name?.toLowerCase().includes('player') ||
+      el.name?.toLowerCase().includes('hero') ||
+      el.data?.toLowerCase().includes('player')
+    ));
+    if (playerObj) return playerObj;
+    return stageElements.find((el: any) => el.type === 'obj') || { x: virtualWidth / 2, y: virtualHeight / 2, width: 50, height: 50 };
+  }, [stageElements, mapConfig.trackerSource, virtualWidth, virtualHeight]);
+
+  const sourcePos = {
+    x: (sourceEl.x || 0) + ((sourceEl.width || 50) / 2),
+    y: (sourceEl.y || 0) + ((sourceEl.height || 50) / 2)
+  };
+
+  const { enemyBlips, otherBlips, closestEnemy } = useMemo(() => {
+    const enemies: any[] = [];
+    const others: any[] = [];
+    let closest: any = null;
+    let minDistance = Infinity;
+
+    stageElements.forEach((el: any) => {
+      if (!el || el.id === sourceEl.id || el.hidden || el.type === 'bg' || el.type === 'game_map' || el.type === 'game_loading') return;
+
+      const ex = (el.x || 0) + ((el.width || 50) / 2);
+      const ey = (el.y || 0) + ((el.height || 50) / 2);
+      const dx = ex - sourcePos.x;
+      const dy = ey - sourcePos.y;
+      const distPx = Math.hypot(dx, dy);
+      const distM = Math.max(1, Math.round(distPx / 5));
+
+      const zoom = mapConfig.zoom || 0.25;
+      const maxRadius = Math.min(cx, cy) - 14;
+      const rawRelX = dx * zoom;
+      const rawRelY = dy * zoom;
+      const rawDist = Math.hypot(rawRelX, rawRelY);
+
+      let blipX = cx + rawRelX;
+      let blipY = cy + rawRelY;
+      let isClamped = false;
+
+      if (mapConfig.type === 'radar_circle' || mapConfig.type === 'compass_dial') {
+        if (rawDist > maxRadius) {
+          const angle = Math.atan2(rawRelY, rawRelX);
+          blipX = cx + Math.cos(angle) * maxRadius;
+          blipY = cy + Math.sin(angle) * maxRadius;
+          isClamped = true;
+        }
+      } else {
+        blipX = Math.max(10, Math.min(width - 10, blipX));
+        blipY = Math.max(10, Math.min(height - 10, blipY));
+      }
+
+      const isEnemy =
+        el.type === 'env_hazard' ||
+        el.name?.toLowerCase().includes('enemy') ||
+        el.name?.toLowerCase().includes('boss') ||
+        el.name?.toLowerCase().includes('monster') ||
+        el.name?.toLowerCase().includes('hazard') ||
+        el.name?.toLowerCase().includes('ghost') ||
+        el.name?.toLowerCase().includes('skull') ||
+        el.name?.toLowerCase().includes('alien') ||
+        el.data?.toLowerCase().includes('enemy');
+
+      // Filter by trackedTargetIds if they exist
+      const isExplicitlyTracked = mapConfig.trackedTargetIds?.includes(el.id);
+      const shouldShowBlip = isExplicitlyTracked || (mapConfig.trackAllEnemies !== false && isEnemy) || (!isEnemy && mapConfig.trackAllEnemies === false);
+
+      if (!shouldShowBlip && !isExplicitlyTracked) return;
+
+      const blipData = {
+        id: el.id,
+        name: el.name || 'Target',
+        x: blipX,
+        y: blipY,
+        distPx,
+        distM,
+        isEnemy: isEnemy || isExplicitlyTracked,
+        isClamped
+      };
+
+      if (blipData.isEnemy) {
+        enemies.push(blipData);
+        if (distPx < minDistance) {
+          minDistance = distPx;
+          closest = blipData;
+        }
+      } else {
+        others.push(blipData);
+      }
+    });
+
+    if (mapConfig.targetEnemyId) {
+      const explicit = enemies.find((e: any) => e.id === mapConfig.targetEnemyId) || others.find((o: any) => o.id === mapConfig.targetEnemyId);
+      if (explicit) closest = explicit;
+    }
+
+    return { 
+      enemyBlips: enemies, 
+      otherBlips: others, 
+      closestEnemy: closest || enemies[0],
+      explicitTargets: enemies.filter((e: any) => mapConfig.trackedTargetIds?.includes(e.id))
+    };
+  }, [stageElements, sourceEl, sourcePos, mapConfig, cx, cy, width, height]);
+
+  const radarColor = mapConfig.radarColor || '#22c55e';
+  const playerColor = mapConfig.playerBlipColor || '#22c55e';
+  const enemyColor = mapConfig.enemyBlipColor || '#ef4444';
+  const lineColor = mapConfig.trackingLineColor || '#ef4444';
+  const neutralColor = mapConfig.neutralBlipColor || '#eab308';
+  const isCircular = mapConfig.type === 'radar_circle' || mapConfig.type === 'compass_dial';
+
+  const targetsForLines = useMemo(() => {
+    if (explicitTargets.length > 0) return explicitTargets;
+    if (closestEnemy) return [closestEnemy];
+    return [];
+  }, [explicitTargets, closestEnemy]);
+
+  return (
+    <div
+      className={`relative overflow-hidden pointer-events-none select-none transition-all shadow-2xl ${isCircular ? 'rounded-full' : 'rounded-2xl'}`}
+      style={{
+        width,
+        height,
+        backgroundColor:
+          mapConfig.type === 'fantasy_parchment'
+            ? 'rgba(41, 27, 15, 0.95)'
+            : mapConfig.type === 'tactical_grid'
+            ? 'rgba(6, 18, 28, 0.92)'
+            : 'rgba(9, 11, 16, 0.88)',
+        border: `2px solid ${radarColor}`,
+        boxShadow: `0 0 20px ${radarColor}33`,
+        opacity: mapConfig.opacity ?? 0.9
+      }}
+    >
+      {mapConfig.showGrid && (
+        <div className="absolute inset-0 bg-[radial-gradient(#ffffff18_1px,transparent_1px)] [background-size:16px_16px] pointer-events-none" />
+      )}
+      {isCircular && (
+        <>
+          <div className="absolute inset-0 m-auto w-3/4 h-3/4 rounded-full border border-white/10 pointer-events-none" />
+          <div className="absolute inset-0 m-auto w-1/2 h-1/2 rounded-full border border-white/15 pointer-events-none" />
+          <div className="absolute inset-0 m-auto w-1/4 h-1/4 rounded-full border border-white/20 pointer-events-none" />
+          <div className="absolute inset-0 m-auto w-full h-[1px] bg-white/10 pointer-events-none" />
+          <div className="absolute inset-0 m-auto h-full w-[1px] bg-white/10 pointer-events-none" />
+        </>
+      )}
+      {mapConfig.type === 'tactical_grid' && (
+        <div className="absolute inset-0 border border-cyan-500/20 bg-[linear-gradient(to_right,#06b6d415_1px,transparent_1px),linear-gradient(to_bottom,#06b6d415_1px,transparent_1px)] bg-[size:20px_20px] pointer-events-none" />
+      )}
+      {mapConfig.radarSweep && (
+        <div
+          className="absolute inset-0 origin-center animate-spin pointer-events-none"
+          style={{
+            animationDuration: '3.5s',
+            background: `conic-gradient(from 0deg, transparent 270deg, ${radarColor}44 360deg)`
+          }}
+        />
+      )}
+      {mapConfig.showTrackingLine && targetsForLines.length > 0 && (
+        <svg className="absolute inset-0 w-full h-full pointer-events-none">
+          {targetsForLines.map((target) => (
+            <React.Fragment key={target.id}>
+              <line
+                x1={cx}
+                y1={cy}
+                x2={target.x}
+                y2={target.y}
+                stroke={lineColor}
+                strokeWidth="2"
+                strokeDasharray="4 3"
+                className="animate-pulse"
+                opacity={target.isClamped ? 0.3 : 0.6}
+              />
+              {!target.isClamped && mapConfig.showDistanceText && (
+                <text
+                  x={(cx + target.x) / 2}
+                  y={(cy + target.y) / 2 - 4}
+                  fill={lineColor}
+                  fontSize="8"
+                  fontWeight="bold"
+                  textAnchor="middle"
+                >
+                  {target.distM}{mapConfig.distanceUnit || 'm'}
+                </text>
+              )}
+            </React.Fragment>
+          ))}
+        </svg>
+      )}
+      {otherBlips.map((blip: any) => (
+        <div
+          key={blip.id}
+          className="absolute w-2 h-2 rounded-full border border-white/60 transform -translate-x-1/2 -translate-y-1/2 shadow-sm"
+          style={{
+            left: `${blip.x}px`,
+            top: `${blip.y}px`,
+            backgroundColor: neutralColor
+          }}
+          title={blip.name}
+        />
+      ))}
+      {enemyBlips.map((blip: any) => {
+        const isTargeted = closestEnemy && closestEnemy.id === blip.id;
+        return (
+          <div
+            key={blip.id}
+            className="absolute transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center pointer-events-none"
+            style={{
+              left: `${blip.x}px`,
+              top: `${blip.y}px`
+            }}
+          >
+            <div
+              className="absolute w-4 h-4 rounded-full animate-ping opacity-75"
+              style={{ backgroundColor: enemyColor }}
+            />
+            <div
+              className={`w-3 h-3 rounded-full border border-white flex items-center justify-center shadow-lg ${
+                isTargeted ? 'ring-2 ring-white scale-110' : ''
+              }`}
+              style={{
+                backgroundColor: enemyColor,
+                boxShadow: `0 0 8px ${enemyColor}`
+              }}
+            >
+              <Skull size={7} className="text-white" />
+            </div>
+          </div>
+        );
+      })}
+      <div
+        className="absolute transform -translate-x-1/2 -translate-y-1/2 z-10 flex items-center justify-center pointer-events-none"
+        style={{ left: `${cx}px`, top: `${cy}px` }}
+      >
+        <div
+          className="w-4 h-4 rounded-full border-2 border-white flex items-center justify-center shadow-lg animate-pulse"
+          style={{
+            backgroundColor: playerColor,
+            boxShadow: `0 0 10px ${playerColor}`
+          }}
+        >
+          <div className="w-1.5 h-1.5 bg-white rounded-full" />
+        </div>
+      </div>
+      {mapConfig.label && (
+        <div className="absolute top-1.5 left-2 text-[8px] font-mono font-bold tracking-widest text-white/80 uppercase">
+          {mapConfig.label}
+        </div>
+      )}
+      {mapConfig.type === 'compass_dial' && (
+        <>
+          <span className="absolute top-1 left-1/2 -translate-x-1/2 text-[8px] font-bold font-mono text-cyan-400">N</span>
+          <span className="absolute bottom-1 left-1/2 -translate-x-1/2 text-[8px] font-bold font-mono text-gray-400">S</span>
+          <span className="absolute right-1 top-1/2 -translate-y-1/2 text-[8px] font-bold font-mono text-gray-400">E</span>
+          <span className="absolute left-1 top-1/2 -translate-y-1/2 text-[8px] font-bold font-mono text-gray-400">W</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+// --- Standalone Game Loading Renderer ---
+function GameLoadingRenderer({ config, loadingConfig: propLoadingConfig, progress = 0, width: customWidth, height: customHeight }: any) {
+  const loadingConfig = config || propLoadingConfig || {
+    id: 'default_loading',
+    name: 'Loading Screen',
+    type: 'fullscreen_splash',
+    position: 'fullscreen',
+    title: 'LOADING GAME',
+    subtitle: 'Preparing simulation world...',
+    barColor: '#06b6d4',
+    trackColor: '#18181b',
+    glowColor: '#06b6d4',
+    iconName: 'gamepad',
+    width: 320,
+    height: 90
+  };
+  const percent = Math.min(100, Math.max(0, Math.round(progress)));
+  const barColor = loadingConfig.barColor || '#06b6d4';
+  const trackColor = loadingConfig.trackColor || '#18181b';
+  const glowColor = loadingConfig.glowColor || '#06b6d4';
+
+  const renderIcon = () => {
+    switch (loadingConfig.iconName) {
+      case 'shield': return <Shield size={28} />;
+      case 'gamepad': return <Gamepad2 size={28} />;
+      case 'sparkles': return <Sparkles size={28} />;
+      case 'flame': return <Flame size={28} />;
+      case 'orbit': return <Orbit size={28} />;
+      case 'zap': return <Zap size={28} />;
+      case 'skull': return <Skull size={28} />;
+      case 'swords': return <Swords size={28} />;
+      case 'crown': return <Crown size={28} />;
+      case 'compass': return <Navigation size={28} />;
+      case 'timer': return <Timer size={28} />;
+      default: return <Star size={28} />;
+    }
+  };
+
+  if (loadingConfig.position === 'fullscreen' || loadingConfig.type === 'fullscreen_splash') {
+    return (
+      <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center p-6 bg-black/95 backdrop-blur-md text-white select-none pointer-events-auto">
+        <div className="max-w-md w-full flex flex-col items-center gap-5 p-8 bg-zinc-900/60 border border-white/10 rounded-3xl shadow-2xl">
+          <div
+            className="w-16 h-16 rounded-2xl flex items-center justify-center border-2 animate-pulse"
+            style={{
+              backgroundColor: `${barColor}22`,
+              borderColor: glowColor,
+              color: barColor,
+              boxShadow: `0 0 30px ${glowColor}55`
+            }}
+          >
+            {renderIcon()}
+          </div>
+          <div className="text-center space-y-1">
+            <h2 className="text-xl font-extrabold tracking-wider text-white uppercase">
+              {loadingConfig.title || 'ANIMATO ARENA'}
+            </h2>
+            <p className="text-xs text-gray-400 max-w-xs">
+              {loadingConfig.subtitle || 'Loading game assets and preparing world simulation...'}
+            </p>
+          </div>
+          <div className="w-full space-y-2">
+            <div
+              className="w-full h-3.5 rounded-full overflow-hidden p-0.5 border"
+              style={{ backgroundColor: trackColor, borderColor: `${barColor}44` }}
+            >
+              <div
+                className="h-full rounded-full transition-all duration-100 ease-out"
+                style={{
+                  width: `${percent}%`,
+                  backgroundColor: barColor,
+                  boxShadow: `0 0 15px ${glowColor}`
+                }}
+              />
+            </div>
+            <div className="flex justify-between text-xs font-mono text-gray-400">
+              <span>LOADING WORLD...</span>
+              <span className="font-bold text-white" style={{ color: glowColor }}>{percent}%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="p-4 rounded-2xl border border-white/10 bg-black/80 backdrop-blur-md shadow-2xl flex flex-col gap-2.5 pointer-events-none select-none"
+      style={{ width: loadingConfig.width || 300 }}
+    >
+      <div className="space-y-1.5">
+        <div className="flex justify-between text-xs font-bold text-white">
+          <span className="truncate flex items-center gap-1.5">
+            <Gamepad2 size={14} className="text-cyan-400" />
+            {loadingConfig.title || 'Loading Game Assets...'}
+          </span>
+          <span className="font-mono" style={{ color: glowColor }}>{percent}%</span>
+        </div>
+        <div
+          className="w-full h-2.5 rounded-full overflow-hidden p-0.5 border border-white/5"
+          style={{ backgroundColor: trackColor }}
+        >
+          <div
+            className="h-full rounded-full transition-all duration-100"
+            style={{
+              width: `${percent}%`,
+              backgroundColor: barColor,
+              boxShadow: `0 0 10px ${glowColor}`
+            }}
+          />
+        </div>
+        {loadingConfig.subtitle && (
+          <div className="text-[10px] text-gray-400 truncate">{loadingConfig.subtitle}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // --- Main Active Game Content ---
 function ActiveGame() {
   const [activeSceneId, setActiveSceneId] = useState<string>(
@@ -520,7 +1456,11 @@ function ActiveGame() {
   const [timers, setTimers] = useState<any[]>(() =>
     (gameData.timers || []).map((t: any) => ({ ...t, time: 0, state: t.state || 'stopped' }))
   );
+  const [gameMaps, setGameMaps] = useState<any[]>(() => gameData.gameMaps || []);
+  const [gameLoadings, setGameLoadings] = useState<any[]>(() => gameData.gameLoadings || []);
+  const [loadingProgressState, setLoadingProgressState] = useState<Record<string, number>>({});
   const [stageElements, setStageElements] = useState<any[]>([]);
+  const smoothCamRef = useRef<{ x: number; y: number; zoom: number }>({ x: 0, y: 0, zoom: 1 });
   const [windowSize, setWindowSize] = useState({
     width: typeof window !== 'undefined' ? window.innerWidth : 640,
     height: typeof window !== 'undefined' ? window.innerHeight : 360
@@ -586,10 +1526,98 @@ function ActiveGame() {
   const [isCameraFollowEnabled, setIsCameraFollowEnabled] = useState(gameData.isCameraFollowEnabled !== undefined ? gameData.isCameraFollowEnabled : true);
   const cameraFollowTargetRef = useRef<string | null>(null);
   useEffect(() => { cameraFollowTargetRef.current = isCameraFollowEnabled ? cameraFollowTarget : null; }, [cameraFollowTarget, isCameraFollowEnabled]);
+  const autoCameraStateRef = useRef<{
+    active: boolean;
+    movementType: string;
+    target?: string;
+    speed: number;
+    radius: number;
+    baseZoom: number;
+    startTime: number;
+    duration?: number;
+  } | null>(null);
   const [attachments, setAttachments] = useState<any[]>(gameData.attachments || []);
-  const [joystickStates, setJoystickStates] = useState<Record<string, { active: boolean, x: number, y: number, angle: number, normX: number, normY: number, distance: number }>>({});
+  const [joystickStates, setJoystickStates] = useState<Record<string, { active: boolean, knobX?: number, knobY?: number, x: number, y: number, angle: number, normX: number, normY: number, distance: number }>>({});
   const joystickStatesRef = useRef<Record<string, any>>({});
   joystickStatesRef.current = joystickStates;
+  const physicsStateRef = useRef<Record<string, { vy: number, vx: number, isGrounded: boolean, lastX?: number, lastY?: number }>>({});
+
+  const handleJoystickPointerDown = (e: React.PointerEvent, elementId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const target = e.currentTarget as HTMLElement;
+    try {
+      target.setPointerCapture(e.pointerId);
+    } catch (_) {}
+
+    const rect = target.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const maxRadius = (rect.width / 2) * 0.75;
+
+    const updateFromPointer = (clientX: number, clientY: number) => {
+      const dx = clientX - centerX;
+      const dy = clientY - centerY;
+      const dist = Math.min(Math.hypot(dx, dy), maxRadius);
+      const angle = Math.atan2(dy, dx);
+      const normX = maxRadius > 0 ? (Math.cos(angle) * dist) / maxRadius : 0;
+      const normY = maxRadius > 0 ? (Math.sin(angle) * dist) / maxRadius : 0;
+      const knobX = Math.cos(angle) * dist;
+      const knobY = Math.sin(angle) * dist;
+      const degAngle = (angle * 180) / Math.PI;
+
+      const newState = {
+        active: true,
+        knobX,
+        knobY,
+        x: normX,
+        y: normY,
+        normX,
+        normY,
+        angle: degAngle,
+        distance: maxRadius > 0 ? dist / maxRadius : 0
+      };
+      joystickStatesRef.current[elementId] = newState;
+      setJoystickStates(prev => ({ ...prev, [elementId]: newState }));
+    };
+
+    updateFromPointer(e.clientX, e.clientY);
+
+    const onPointerMove = (moveEv: PointerEvent) => {
+      if (moveEv.pointerId === e.pointerId) {
+        updateFromPointer(moveEv.clientX, moveEv.clientY);
+      }
+    };
+
+    const onPointerUp = (upEv: PointerEvent) => {
+      if (upEv.pointerId === e.pointerId) {
+        const releasedState = {
+          active: false,
+          knobX: 0,
+          knobY: 0,
+          x: 0,
+          y: 0,
+          normX: 0,
+          normY: 0,
+          angle: 0,
+          distance: 0
+        };
+        joystickStatesRef.current[elementId] = releasedState;
+        setJoystickStates(prev => ({ ...prev, [elementId]: releasedState }));
+        try {
+          target.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+        window.removeEventListener('pointercancel', onPointerUp);
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+  };
   const [screenFlash, setScreenFlash] = useState<{ active: boolean; color: string; duration: number; startedAt: number }>({
     active: false,
     color: '#ffffff',
@@ -707,7 +1735,7 @@ function ActiveGame() {
         type: 'video_ended',
         videoId,
         elementId
-      }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+      }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
         ev.actions?.forEach((act: any) => executeAction(act));
       }
     });
@@ -953,8 +1981,112 @@ function ActiveGame() {
           break;
         }
         
+        case 'auto_camera_movement': {
+          const movementType = (act.movementType || act.value || 'orbit').toLowerCase();
+          if (movementType === 'stop') {
+            autoCameraStateRef.current = null;
+          } else {
+            const speed = Math.max(0.1, Math.min(10, Number(act.speed || 1.0)));
+            const radius = Math.max(20, Math.min(2000, Number(act.radius || act.intensity || 200)));
+            const baseZoom = Math.max(0.1, Math.min(5, Number(act.zoom ? act.zoom / 100 : (act.valueZoom ? act.valueZoom / 100 : 1.0))));
+            const duration = Number(act.duration || 0);
+
+            autoCameraStateRef.current = {
+              active: true,
+              movementType,
+              target: act.target || '',
+              speed,
+              radius,
+              baseZoom,
+              startTime: Date.now(),
+              duration: duration > 0 ? duration : undefined
+            };
+          }
+          break;
+        }
+
         case 'reset_camera': {
+          autoCameraStateRef.current = null;
+          smoothCamRef.current = { x: 0, y: 0, zoom: 1 };
           setGlobalCamera({ zoom: 1, x: 0, y: 0 });
+          break;
+        }
+
+        case 'set_loading_progress': {
+          const targetId = act.target;
+          const prog = Math.max(0, Math.min(100, Number(act.value ?? 100)));
+          if (targetId) {
+            setLoadingProgressState(prev => ({ ...prev, [targetId]: prog }));
+          }
+          setStageElements(prev => prev.map(el => {
+            if (el.type === 'game_loading' && (!targetId || el.loadingId === targetId || el.id === targetId)) {
+              return { ...el, progress: prog };
+            }
+            return el;
+          }));
+          break;
+        }
+
+        case 'start_loading_animation': {
+          const targetId = act.target;
+          const duration = Math.max(0.5, Number(act.value || act.duration || 3.0));
+          const startTime = Date.now();
+          const animInterval = setInterval(() => {
+            const elapsed = (Date.now() - startTime) / 1000;
+            const prog = Math.min(100, Math.round((elapsed / duration) * 100));
+            if (targetId) {
+              setLoadingProgressState(prev => ({ ...prev, [targetId]: prog }));
+            }
+            setStageElements(prev => prev.map(el => {
+              if (el.type === 'game_loading' && (!targetId || el.loadingId === targetId || el.id === targetId)) {
+                return { ...el, progress: prog };
+              }
+              return el;
+            }));
+            if (prog >= 100) {
+              clearInterval(animInterval);
+            }
+          }, 50);
+          break;
+        }
+
+        case 'show_game_element': {
+          if (act.target) {
+            setStageElements(prev => prev.map(el => (el.id === act.target || (el as any).mapId === act.target || (el as any).loadingId === act.target) ? { ...el, hidden: false, opacity: 1 } : el));
+          }
+          break;
+        }
+
+        case 'hide_game_element': {
+          if (act.target) {
+            setStageElements(prev => prev.map(el => (el.id === act.target || (el as any).mapId === act.target || (el as any).loadingId === act.target) ? { ...el, hidden: true, opacity: 0 } : el));
+          }
+          break;
+        }
+
+        case 'configure_map': {
+          const mapId = act.target;
+          const sourceId = act.target2; // Origin Point
+          const followTarget = act.target3; // Target for line
+          const trackedIds = act.trackedTargetIds || (act.target4 ? [act.target4] : undefined);
+          const showLine = act.showTrackingLine !== undefined ? act.showTrackingLine : true;
+          
+          setStageElements(prev => prev.map(el => {
+            if (el.type === 'game_map' && (!mapId || el.id === mapId || el.mapId === mapId)) {
+              const currentConfig = (el as any).mapConfig || {};
+              return {
+                ...el,
+                mapConfig: {
+                  ...currentConfig,
+                  trackerSource: sourceId !== undefined ? sourceId : currentConfig.trackerSource,
+                  targetEnemyId: followTarget !== undefined ? followTarget : currentConfig.targetEnemyId,
+                  trackedTargetIds: trackedIds !== undefined ? trackedIds : currentConfig.trackedTargetIds,
+                  showTrackingLine: showLine
+                }
+              };
+            }
+            return el;
+          }));
           break;
         }
 
@@ -1874,7 +3006,7 @@ function ActiveGame() {
         targetId: elementId,
         targetData: btnEl?.data,
         targetBtnId: (btnEl as any)?.buttonId
-      }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+      }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
         ev.actions?.forEach((act: any) => executeAction(act));
       }
     });
@@ -1895,7 +3027,7 @@ function ActiveGame() {
           type: 'key_down',
           key,
           code
-        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
           ev.actions?.forEach((act: any) => executeAction(act));
         }
       });
@@ -1914,7 +3046,7 @@ function ActiveGame() {
           type: 'key_up',
           key,
           code
-        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
           ev.actions?.forEach((act: any) => executeAction(act));
         }
       });
@@ -2020,7 +3152,7 @@ function ActiveGame() {
             targetId: finalTargetId,
             targetData: finalTargetData,
             targetBtnId: finalTargetBtnId
-          }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+          }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
             ev.actions?.forEach((act: any) => executeAction(act));
           }
         });
@@ -2042,7 +3174,7 @@ function ActiveGame() {
               targetId: finalTargetId,
               targetData: finalTargetData,
               targetBtnId: finalTargetBtnId
-            }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+            }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
               ev.actions?.forEach((act: any) => executeAction(act));
             }
           });
@@ -2064,7 +3196,7 @@ function ActiveGame() {
           targetId: finalTargetId,
           targetData: finalTargetData,
           targetBtnId: finalTargetBtnId
-        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
           ev.actions?.forEach((act: any) => executeAction(act));
         }
       });
@@ -2108,7 +3240,7 @@ function ActiveGame() {
           targetId: start.targetId,
           targetData: start.targetData,
           targetBtnId: start.targetBtnId
-        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+        }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
           ev.actions?.forEach((act: any) => executeAction(act));
         }
       });
@@ -2198,6 +3330,64 @@ function ActiveGame() {
     } else if (cond.type === 'video_playing') {
       const videoEl = stageElementsRef.current.find((el: any) => el.type === 'video' && (el.videoId === cond.target || el.id === cond.target || !cond.target));
       if (!videoEl) return false;
+    } else if (cond.type === 'loading_progress') {
+      const targetId = cond.target;
+      const targetEl = stageElementsRef.current.find((el: any) => el.type === 'game_loading' && (!targetId || el.loadingId === targetId || el.id === targetId));
+      if (!targetEl) return false;
+      const currentProg = Number((targetEl as any).progress ?? 0);
+      const targetProg = Number(cond.value ?? 100);
+      const op = cond.operator || '>=';
+      if (op === '>=') {
+        if (currentProg < targetProg) return false;
+      } else if (op === '==') {
+        if (Math.abs(currentProg - targetProg) > 1) return false;
+      } else if (op === '<=') {
+        if (currentProg > targetProg) return false;
+      }
+    } else if (cond.type === 'map_target_in_range') {
+      const mapId = cond.target;
+      const mapEl = stageElementsRef.current.find((el: any) => el.type === 'game_map' && (!mapId || el.mapId === mapId || el.id === mapId));
+      if (!mapEl) return false;
+      const mapConfig = (gameData.gameMaps || []).find((m: any) => m.id === (mapEl as any).mapId) || mapEl;
+      if (!mapConfig) return false;
+
+      const trackerId = cond.target2 || mapConfig.trackerSource;
+      const targetId = cond.target3 || mapConfig.targetEnemyId;
+
+      let t1 = null;
+      if (trackerId) t1 = stageElementsRef.current.find((el: any) => el.id === trackerId || el.data === trackerId);
+      if (!t1) t1 = stageElementsRef.current.find((el: any) => el.type === 'obj' && (el.name?.toLowerCase().includes('player') || el.name?.toLowerCase().includes('hero') || el.data?.toLowerCase().includes('player')));
+      if (!t1) t1 = stageElementsRef.current.find((el: any) => el.type === 'obj');
+
+      let t2 = null;
+      if (targetId) t2 = stageElementsRef.current.find((el: any) => el.id === targetId || el.data === targetId);
+      if (!t2 && t1) {
+        const sourcePos = { x: (t1.x || 0) + (t1.width || 50)/2, y: (t1.y || 0) + (t1.height || 50)/2 };
+        let minDistance = Infinity;
+        let closest = null;
+        stageElementsRef.current.forEach((el: any) => {
+          if (!el || el.id === t1.id || el.hidden || el.type === 'bg' || el.type === 'game_map' || el.type === 'game_loading') return;
+          const isEnemy = el.type === 'env_hazard' || el.name?.toLowerCase().includes('enemy') || el.name?.toLowerCase().includes('boss') || el.name?.toLowerCase().includes('monster') || el.name?.toLowerCase().includes('hazard') || el.name?.toLowerCase().includes('ghost') || el.name?.toLowerCase().includes('skull') || el.name?.toLowerCase().includes('alien') || el.data?.toLowerCase().includes('enemy');
+          const isExplicitlyTracked = mapConfig.trackedTargetIds?.includes(el.id);
+          if (isEnemy || isExplicitlyTracked) {
+             const ex = (el.x || 0) + (el.width || 50) / 2;
+             const ey = (el.y || 0) + (el.height || 50) / 2;
+             const dist = Math.hypot(ex - sourcePos.x, ey - sourcePos.y);
+             if (dist < minDistance) {
+               minDistance = dist;
+               closest = el;
+             }
+          }
+        });
+        t2 = closest;
+      }
+
+      if (!t1 || !t2) return false;
+      const dx = ((t1.x || 0) + (t1.width || 50)/2) - ((t2.x || 0) + (t2.width || 50)/2);
+      const dy = ((t1.y || 0) + (t1.height || 50)/2) - ((t2.y || 0) + (t2.height || 50)/2);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const range = Number(cond.value || 300);
+      if (dist > range) return false;
     } else if (cond.type === 'loop') {
       const loopKey = 'loop_' + evKey + '_' + (cond.target || 'def');
       if (!timerValuesRef.current[loopKey]) timerValuesRef.current[loopKey] = 0;
@@ -2218,7 +3408,7 @@ function ActiveGame() {
     sceneEvents.forEach((ev: any) => {
       if (evaluateEventConditions(ev, {
         type: 'scene_start'
-      }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+      }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
         ev.actions?.forEach((act: any) => executeAction(act));
       }
     });
@@ -2234,8 +3424,127 @@ function ActiveGame() {
       lastTime = now;
       timerValuesRef.current.scene_timer += dt;
 
-      // --- CAMERA FOLLOW LOGIC ---
-      if (cameraFollowTargetRef.current && stageElementsRef.current) {
+      // --- Loading Progress Auto-Increment ---
+      setStageElements(prev => prev.map(el => {
+        if (el.type === 'game_loading') {
+          const lConfig = { ...(gameData.loadings?.find((l: any) => l.id === el.loadingId) || {}), ...(el.loadingConfig || {}) };
+          if (lConfig.autoIncrement !== false) {
+            const currentProgress = el.progress || 0;
+            if (currentProgress < 100) {
+              const inc = (100 / (lConfig.autoDuration || 3)) * dt;
+              return { ...el, progress: Math.min(100, currentProgress + inc) };
+            }
+          }
+        }
+        return el;
+      }));
+
+      // Check if any camera joystick is actively engaged by user
+      const isAnyCameraJoyActive = Object.entries(joystickStatesRef.current).some(([joyId, st]) => {
+        if (!st?.active || st.distance < 0.05) return false;
+        const joyEl = (stageElementsRef.current || []).find((el: any) => el.id === joyId);
+        if (!joyEl) return false;
+        const joyConfig = gameData.joysticks?.find((j: any) => j.id === joyEl.joystickId) || joyEl;
+        return (
+          joyEl.joystickType === 'camera' ||
+          joyEl.type === 'camera' ||
+          joyConfig.type === 'camera' ||
+          joyEl.interactionType === 'pan' ||
+          joyEl.interactionType === 'pan_camera' ||
+          joyConfig.interactionType === 'pan' ||
+          joyConfig.interactionType === 'pan_camera'
+        );
+      });
+
+      // --- CAMERA FOLLOW & AUTO CAMERA MOVEMENT LOGIC ---
+      if (!isAnyCameraJoyActive && autoCameraStateRef.current?.active) {
+        const ac = autoCameraStateRef.current;
+        if (ac.duration && (now - ac.startTime) > ac.duration * 1000) {
+          autoCameraStateRef.current = null;
+        } else {
+          const t = ((now - ac.startTime) / 1000) * ac.speed;
+          let cx = VIRTUAL_WIDTH / 2;
+          let cy = VIRTUAL_HEIGHT / 2;
+
+          if (ac.target) {
+            const targetEl = stageElementsRef.current.find(el => el.id === ac.target || el.data === ac.target);
+            if (targetEl) {
+              cx = (targetEl.x || 0) + (targetEl.width || 50) / 2;
+              cy = (targetEl.y || 0) + (targetEl.height || 50) / 2;
+            }
+          } else {
+            const envEls = (stageElementsRef.current || []).filter(e => e && !e.hidden && (e.type === 'bg' || e.type === 'env_tile' || e.type === 'env_hazard' || e.type === 'obj'));
+            if (envEls.length > 0) {
+              let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+              envEls.forEach(e => {
+                minX = Math.min(minX, e.x || 0);
+                minY = Math.min(minY, e.y || 0);
+                maxX = Math.max(maxX, (e.x || 0) + (e.width || 50));
+                maxY = Math.max(maxY, (e.y || 0) + (e.height || 50));
+              });
+              if (minX !== Infinity && maxX !== -Infinity) {
+                cx = (minX + maxX) / 2;
+                cy = (minY + maxY) / 2;
+              }
+            }
+          }
+
+          let offX = 0;
+          let offY = 0;
+          let zoom = ac.baseZoom;
+
+          switch (ac.movementType) {
+            case 'runners':
+              offX = Math.sin(t * 2.0) * (ac.radius * 0.6) + (ac.radius * 0.3);
+              offY = Math.cos(t * 1.5) * (ac.radius * 0.25);
+              zoom = ac.baseZoom * (1.1 + Math.sin(t * 3.0) * 0.08);
+              break;
+            case 'cinematic':
+              offX = Math.sin(t * 0.7) * (ac.radius * 1.3);
+              offY = Math.cos(t * 0.5) * (ac.radius * 0.6);
+              zoom = ac.baseZoom * (1 + Math.sin(t * 0.4) * 0.2);
+              break;
+            case 'pan_horizontal':
+              offX = Math.sin(t * 1.2) * (ac.radius * 1.5);
+              offY = 0;
+              zoom = ac.baseZoom;
+              break;
+            case 'pan_vertical':
+              offX = 0;
+              offY = Math.sin(t * 1.2) * (ac.radius * 1.2);
+              zoom = ac.baseZoom;
+              break;
+            case 'zoom_pulse':
+              offX = Math.sin(t * 0.8) * 30;
+              offY = Math.cos(t * 0.8) * 20;
+              zoom = ac.baseZoom * (1 + Math.sin(t * 2.0) * 0.35);
+              break;
+            case 'spiral': {
+              const r = ac.radius * (0.4 + 0.6 * Math.abs(Math.sin(t * 0.5)));
+              offX = Math.cos(t * 2.0) * r;
+              offY = Math.sin(t * 2.0) * r;
+              zoom = ac.baseZoom * (0.9 + 0.3 * Math.cos(t * 0.5));
+              break;
+            }
+            case 'orbit':
+            default:
+              offX = Math.cos(t * 1.5) * ac.radius;
+              offY = Math.sin(t * 1.5) * (ac.radius * 0.6);
+              zoom = ac.baseZoom * (1 + Math.sin(t * 0.8) * 0.15);
+              break;
+          }
+
+          const targetCamX = (VIRTUAL_WIDTH / 2) - (cx + offX);
+          const targetCamY = (VIRTUAL_HEIGHT / 2) - (cy + offY);
+          const clamped = clampCameraToBounds(targetCamX, targetCamY, zoom, stageElementsRef.current || [], VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+          const lerpFactor = Math.min(1, Math.max(0.04, ac.speed * 4 * dt));
+          const smoothX = smoothCamRef.current.x + (clamped.x - smoothCamRef.current.x) * lerpFactor;
+          const smoothY = smoothCamRef.current.y + (clamped.y - smoothCamRef.current.y) * lerpFactor;
+          const smoothZoom = smoothCamRef.current.zoom + (zoom - smoothCamRef.current.zoom) * lerpFactor;
+          smoothCamRef.current = { x: smoothX, y: smoothY, zoom: smoothZoom };
+          setGlobalCamera({ zoom: smoothZoom, x: smoothX, y: smoothY });
+        }
+      } else if (!isAnyCameraJoyActive && cameraFollowTargetRef.current && stageElementsRef.current) {
         const targetEl = stageElementsRef.current.find(el => el.id === cameraFollowTargetRef.current || el.data === cameraFollowTargetRef.current);
         if (targetEl) {
           const targetCX = (targetEl.x || 0) + (targetEl.width || 50) / 2;
@@ -2244,9 +3553,12 @@ function ActiveGame() {
           setGlobalCamera(cam => {
             const targetX = (VIRTUAL_WIDTH / 2) - targetCX;
             const targetY = (VIRTUAL_HEIGHT / 2) - targetCY;
-            const nextX = cam.x + (targetX - cam.x) * 5 * dt;
-            const nextY = cam.y + (targetY - cam.y) * 5 * dt;
+            const followLerp = Math.min(1, Math.max(0.05, 6 * dt));
+            const nextX = smoothCamRef.current.x + (targetX - smoothCamRef.current.x) * followLerp;
+            const nextY = smoothCamRef.current.y + (targetY - smoothCamRef.current.y) * followLerp;
             const clamped = clampCameraToBounds(nextX, nextY, cam.zoom, stageElementsRef.current || [], VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+            smoothCamRef.current.x = clamped.x;
+            smoothCamRef.current.y = clamped.y;
             return { ...cam, x: clamped.x, y: clamped.y };
           });
         }
@@ -2262,7 +3574,7 @@ function ActiveGame() {
         sceneEvents.forEach((ev: any) => {
           if (evaluateEventConditions(ev, {
             type: 'key_held_tick'
-          }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+          }, ev.id || ('ev_' + activeSceneId), { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
             ev.actions?.forEach((act: any) => executeAction(act));
           }
         });
@@ -2315,9 +3627,48 @@ function ActiveGame() {
                 const targetIdx = prevElements.findIndex((el: any) => el.id === targetId || el.data === targetId);
                 if (targetIdx >= 0) {
                   const target = prevElements[targetIdx];
+                  const gObj = (gameData.gameObjects || []).find((g: any) => g.id === target.data) || target;
+                  const assignedPlatform = prevElements.find((el: any) =>
+                    (el.type === 'env_tile' || el.isPlatform) &&
+                    (el.assignedCharacterId === target.id || el.assignedCharacterId === target.data)
+                  );
+                  const hasGravity = Boolean(gObj.hasGravity || target.hasGravity || assignedPlatform);
+
                   if (interactionType === 'move') {
-                    target.x = (target.x || 0) + joyState.normX * speed * dt;
-                    target.y = (target.y || 0) + joyState.normY * speed * dt;
+                    const bounds = (() => {
+                      const envEls = prevElements.filter((e: any) => e && !e.hidden && (e.type === 'bg' || e.type === 'env_tile' || e.type === 'env_hazard' || e.isPlatform));
+                      if (envEls.length === 0) return { minX: 0, minY: 0, maxX: VIRTUAL_WIDTH, maxY: VIRTUAL_HEIGHT };
+                      let minX = 0, minY = 0, maxX = VIRTUAL_WIDTH, maxY = VIRTUAL_HEIGHT;
+                      envEls.forEach((e: any) => {
+                        minX = Math.min(minX, e.x || 0);
+                        minY = Math.min(minY, e.y || 0);
+                        maxX = Math.max(maxX, (e.x || 0) + (e.width || 50));
+                        maxY = Math.max(maxY, (e.y || 0) + (e.height || 50));
+                      });
+                      return { minX, minY, maxX, maxY };
+                    })();
+
+                    const nextX = (target.x || 0) + joyState.normX * speed * dt;
+                    target.x = Math.max(bounds.minX, Math.min(bounds.maxX - (target.width || 50), nextX));
+
+                    if (hasGravity) {
+                      const pState = physicsStateRef.current[target.id] || physicsStateRef.current[target.data] || { vy: 0, vx: 0, isGrounded: false };
+                      if (joyState.normY < -0.35 && pState.isGrounded) {
+                        pState.vy = -520; 
+                        if (Math.abs(joyState.normX) > 0.2) {
+                          pState.vx = joyState.normX * speed * 1.5;
+                        } else {
+                          pState.vx = 0;
+                        }
+                        pState.isGrounded = false;
+                        physicsStateRef.current[target.id] = pState;
+                        if (target.data) physicsStateRef.current[target.data] = pState;
+                      }
+                    } else {
+                      const nextY = (target.y || 0) + joyState.normY * speed * dt;
+                      target.y = Math.max(bounds.minY, Math.min(bounds.maxY - (target.height || 50), nextY));
+                    }
+
                     const shouldFlip = joyEl.flipOnMove !== false && joyConfig.flipOnMove !== false;
                     if (shouldFlip) {
                       if (joyState.normX < -0.15) {
@@ -2375,6 +3726,127 @@ function ActiveGame() {
           }
         });
 
+        // --- GRAVITY & PLATFORM PHYSICS LOOP ---
+        prevElements.forEach((obj: any) => {
+          if (obj.type !== 'obj' && obj.type !== 'character' && obj.type !== 'enemy') return;
+
+          const isAttached = activeAtts.some((att: any) => att.childElementId === obj.id || att.childElementId === obj.data);
+          if (isAttached) return;
+
+          const gObj = (gameData.gameObjects || []).find((g: any) => g.id === obj.data) || obj;
+          const assignedPlatform = prevElements.find((el: any) =>
+            (el.type === 'env_tile' || el.isPlatform) &&
+            (el.assignedCharacterId === obj.id || el.assignedCharacterId === obj.data)
+          );
+          const hasGravity = Boolean(gObj.hasGravity || obj.hasGravity || assignedPlatform);
+          if (!hasGravity) return;
+
+          const state = physicsStateRef.current[obj.id] || { vy: 0, vx: 0, isGrounded: false };
+          const objX = obj.x || 0;
+          const objW = obj.width || 50;
+          const objH = obj.height || 50;
+
+          // Apply horizontal velocity decay
+          if (state.isGrounded) {
+            state.vx *= 0.8;
+          } else {
+            state.vx *= 0.98;
+          }
+          if (Math.abs(state.vx) < 0.1) state.vx = 0;
+
+          let nextY = obj.y || 0;
+          let nextX = (obj.x || 0) + state.vx * dt;
+          let isGrounded = false;
+          let groundedPlatform: any = null;
+
+          if (assignedPlatform) {
+            const platX = assignedPlatform.x || 0;
+            const platY = assignedPlatform.y || 0;
+            const platW = assignedPlatform.width || 50;
+            const platH = assignedPlatform.height || 50;
+
+            const isOverPlatform = (objX + objW > platX) && (objX < platX + platW);
+            if (isOverPlatform && ((obj.y || 0) + objH <= platY + 25 || state.isGrounded) && state.vy >= 0) {
+              nextY = platY - objH;
+              state.vy = 0;
+              isGrounded = true;
+              groundedPlatform = assignedPlatform;
+
+              const platState = physicsStateRef.current[assignedPlatform.id];
+              if (platState) {
+                if (platState.lastX !== undefined) {
+                  const dx = (assignedPlatform.x || 0) - platState.lastX;
+                  nextX += dx;
+                }
+                if (platState.lastY !== undefined) {
+                  const dy = (assignedPlatform.y || 0) - platState.lastY;
+                  nextY += dy;
+                }
+              }
+            } else {
+              state.vy += 850 * dt;
+              if (state.vy > 1000) state.vy = 1000;
+              nextY = (obj.y || 0) + state.vy * dt;
+              isGrounded = false;
+            }
+          } else {
+            state.vy += 800 * dt;
+            if (state.vy > 1000) state.vy = 1000;
+
+            nextY = (obj.y || 0) + state.vy * dt;
+            const objPrevBottom = (obj.y || 0) + objH;
+            const objNextBottom = nextY + objH;
+
+            const colliders = prevElements.filter((el: any) => {
+              if (el.id === obj.id) return false;
+              if (el.type === 'env_tile' || el.isPlatform) return true;
+              if (el.type === 'env_hazard') return true;
+              if (el.type === 'obj') {
+                const baseEl = (gameData.gameObjects || []).find((g: any) => g.id === el.data) || el;
+                if (baseEl.isPlatform || el.isPlatform) return true;
+              }
+              return false;
+            });
+
+            for (const tile of colliders) {
+              const tileX = tile.x || 0;
+              const tileY = tile.y || 0;
+              const tileW = tile.width || 50;
+              const tileH = tile.height || 50;
+
+              if (objX + objW > tileX && objX < tileX + tileW) {
+                if (state.vy > 0 && objPrevBottom <= tileY + 18 && objNextBottom >= tileY) {
+                  nextY = tileY - objH;
+                  state.vy = 0;
+                  isGrounded = true;
+                  groundedPlatform = tile;
+                  break;
+                }
+              }
+            }
+
+            if (isGrounded && groundedPlatform) {
+              const platState = physicsStateRef.current[groundedPlatform.id];
+              if (platState && platState.lastX !== undefined) {
+                const dx = (groundedPlatform.x || 0) - platState.lastX;
+                nextX += dx;
+              }
+            }
+          }
+
+          state.isGrounded = isGrounded;
+          state.lastX = nextX;
+          state.lastY = nextY;
+          physicsStateRef.current[obj.id] = state;
+          if (obj.data) physicsStateRef.current[obj.data] = state;
+
+          if (nextY !== obj.y || nextX !== obj.x) {
+            obj.y = nextY;
+            obj.x = nextX;
+            hasChanges = true;
+          }
+        });
+
         const nextElements = prevElements.map((el) => {
           let updatedEl = { ...el };
           let changed = false;
@@ -2396,7 +3868,7 @@ function ActiveGame() {
                 hasChanges = true;
                 return null;
              }
-          } else if (!isFollowingThis && el.type === 'obj') {
+          } else if (el.clampToStage && !isFollowingThis && el.type === 'obj') {
              const oldX = el.x;
              const oldY = el.y;
              updatedEl.x = Math.max(viewLeft, Math.min(viewRight - (el.width || 0), el.x));
@@ -2447,7 +3919,7 @@ function ActiveGame() {
 
         if (evaluateEventConditions(ev, {
           type: 'tick'
-        }, evKey, { activeKeysDown: activeKeysDown.current, evaluateSingleCondition })) {
+        }, evKey, { activeKeysDown: activeKeysDown.current, evaluateSingleCondition, allEvents: sceneEvents })) {
           const hasPeriodic = ev.conditions?.some((c: any) => c.type === 'every_x_seconds');
           if (hasPeriodic) {
             ev.conditions?.forEach((c: any) => {
@@ -2670,6 +4142,31 @@ function ActiveGame() {
                       }}
                     />
                   )}
+
+                  {el.type === 'env_weather' && (
+                    <div className="absolute inset-0 w-full h-full pointer-events-none overflow-hidden">
+                      {el.data?.fx === 'lightning' && (
+                        <>
+                          <div className="absolute inset-0 bg-white opacity-0 animate-[lightningFlash_5s_infinite]" />
+                          <div className="absolute left-1/2 top-0 w-1 h-full bg-cyan-100 opacity-0 animate-[lightningBolt_5s_infinite]" />
+                        </>
+                      )}
+                      {el.data?.fx === 'rain' && (
+                        <div className="absolute inset-0 w-full h-full flex flex-wrap content-start">
+                          {[...Array(40)].map((_, i) => (
+                            <div key={i} className="w-[2px] h-8 bg-blue-400/40 mx-2 animate-[rainFall_1.5s_linear_infinite]" style={{ animationDelay: `${Math.random() * 2}s`, left: `${Math.random() * 100}%` }} />
+                          ))}
+                        </div>
+                      )}
+                      {el.data?.fx === 'snow' && (
+                        <div className="absolute inset-0 w-full h-full flex flex-wrap content-start">
+                          {[...Array(30)].map((_, i) => (
+                            <div key={i} className="w-2 h-2 bg-white/80 rounded-full mx-4 animate-[snowDrift_4s_ease-in-out_infinite]" style={{ animationDelay: `${Math.random() * 4}s`, left: `${Math.random() * 100}%` }} />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2680,7 +4177,7 @@ function ActiveGame() {
             id="hud_ui_layer"
             className="absolute inset-0 w-full h-full pointer-events-none z-[60000]"
           >
-            {stageElements.filter(el => el.type === 'btn' || el.type === 'joystick').map((el, i) => {
+            {stageElements.filter(el => (el.type === 'btn' || el.type === 'joystick' || el.type === 'game_map' || el.type === 'game_loading') && !el.hidden).map((el, i) => {
               const finalZ = computeElementZIndex(el, gameData.layers || [], {});
 
               const isVibrating = el.vibrating;
@@ -2691,7 +4188,7 @@ function ActiveGame() {
               let elemSrc = el.url || el.data || btnTemplate?.url || btnTemplate?.data || '';
               
               const isShape = elemSrc === 'rect' || elemSrc === 'circle';
-              const finalBgImage = (elemSrc && !isShape) ? `url("${elemSrc}")` : undefined;
+              const finalBgImage = (elemSrc && !isShape && el.type === 'btn') ? `url("${elemSrc}")` : undefined;
               const finalBgColor = (!elemSrc || isShape) && el.type === 'btn' ? (el.customColor || 'rgba(236,72,153,0.2)') : undefined;
 
               const isFlippedX = Boolean(el.flipX) || (el.scaleX !== undefined && el.scaleX < 0);
@@ -2709,12 +4206,12 @@ function ActiveGame() {
                   data-element-id={el.id}
                   data-btn-id={(el as any).buttonId}
                   draggable={false}
-                  className={`absolute select-none ${vibrateClass} ${elemSrc === 'circle' ? 'rounded-full' : ''}`}
+                  className={`absolute select-none ${vibrateClass} ${elemSrc === 'circle' && el.type === 'btn' ? 'rounded-full' : ''}`}
                   style={{
                     left: el.x,
                     top: el.y,
-                    width: el.width ? `${el.width}px` : '100px',
-                    height: el.height ? `${el.height}px` : '100px',
+                    width: el.width ? `${el.width}px` : (el.type === 'game_loading' ? '320px' : el.type === 'game_map' ? '170px' : '100px'),
+                    height: el.height ? `${el.height}px` : (el.type === 'game_loading' ? '90px' : el.type === 'game_map' ? '170px' : '100px'),
                     backgroundImage: finalBgImage,
                     backgroundSize: '100% 100%',
                     backgroundPosition: 'center',
@@ -2725,8 +4222,8 @@ function ActiveGame() {
                     opacity: el.opacity !== undefined ? el.opacity : 1,
                     transform: elementTransform,
                     filter: filterStyle,
-                    pointerEvents: 'auto',
-                    touchAction: 'none',
+                    pointerEvents: (el.type === 'btn' || el.type === 'joystick' || el.type === 'game_loading') ? 'auto' : 'none',
+                    touchAction: el.type === 'joystick' ? 'none' : 'auto',
                     userSelect: 'none',
                     WebkitUserSelect: 'none'
                   }}
@@ -2743,71 +4240,48 @@ function ActiveGame() {
                   }}
                 >
                   {el.type === 'joystick' && (
-                    <div 
-                      className="w-full h-full rounded-full flex flex-col items-center justify-center overflow-hidden shadow-2xl relative select-none touch-none" 
-                      style={{ 
-                        visibility: el.hidden ? 'hidden' : 'visible', 
-                        pointerEvents: 'auto',
-                        backgroundColor: el.customColor ? (el.customColor + '22') : 'rgba(15, 23, 42, 0.8)',
-                        border: '2px solid ' + (el.customColor || '#3b82f6'),
-                        boxShadow: '0 0 16px ' + (el.customColor || '#3b82f6') + '55'
-                      }}
-                      onPointerDown={(e) => {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const cx = rect.left + rect.width / 2;
-                        const cy = rect.top + rect.height / 2;
-                        const maxDist = (rect.width / 2) * 0.75;
-                        const updateJoystick = (ex: number, ey: number) => {
-                          const dx = ex - cx;
-                          const dy = ey - cy;
-                          const dist = Math.min(Math.hypot(dx, dy), maxDist);
-                          const angle = Math.atan2(dy, dx);
-                          const normX = maxDist > 0 ? (Math.cos(angle) * dist) / maxDist : 0;
-                          const normY = maxDist > 0 ? (Math.sin(angle) * dist) / maxDist : 0;
-                          const st = { active: true, x: normX, y: normY, normX, normY, angle: angle * 180 / Math.PI, distance: maxDist > 0 ? dist / maxDist : 0 };
-                          setJoystickStates(prev => ({ ...prev, [el.id]: st }));
-                          joystickStatesRef.current[el.id] = st;
-                        };
-                        updateJoystick(e.clientX, e.clientY);
-                        
-                        const onMove = (ev: PointerEvent) => updateJoystick(ev.clientX, ev.clientY);
-                        const onUp = () => {
-                          const idle = { active: false, x: 0, y: 0, normX: 0, normY: 0, angle: 0, distance: 0 };
-                          setJoystickStates(prev => ({ ...prev, [el.id]: idle }));
-                          joystickStatesRef.current[el.id] = idle;
-                          window.removeEventListener('pointermove', onMove);
-                          window.removeEventListener('pointerup', onUp);
-                        };
-                        window.addEventListener('pointermove', onMove);
-                        window.addEventListener('pointerup', onUp);
-                      }}
-                    >
-                      {el.url ? (
-                        <img src={el.url} className="w-full h-full object-cover opacity-80 pointer-events-none" draggable={false} />
-                      ) : (
-                        <div className="absolute inset-2 rounded-full border border-white/10 pointer-events-none flex items-center justify-center">
-                          <div className="w-2 h-2 rounded-full bg-white/30" />
-                        </div>
-                      )}
-                      <div 
-                        className="absolute rounded-full shadow-lg pointer-events-none flex items-center justify-center" 
-                        style={{
-                          width: '45%',
-                          height: '45%',
-                          backgroundColor: el.knobColor || '#60a5fa',
-                          border: '2px solid ' + (el.customColor || '#93c5fd'),
-                          boxShadow: '0 0 12px ' + (el.knobColor || '#60a5fa') + '99, inset 0 1px 3px rgba(255,255,255,0.6)',
-                          transform: 'translate(' + ((joystickStates[el.id]?.x || 0) * 35) + 'px, ' + ((joystickStates[el.id]?.y || 0) * 35) + 'px)'
-                        }}
-                      >
-                        <div className="w-2.5 h-2.5 rounded-full bg-white/50" />
-                      </div>
-                    </div>
+                    <VirtualJoystickRenderer
+                      id={el.id}
+                      type={(gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.type) || el.joystickType || 'movement'}
+                      name={(gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.name) || 'Joystick'}
+                      design={el.design || (gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.design) || 'classic-ring'}
+                      color={el.customColor || (gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.color) || ((gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.type === 'camera' || el.joystickType === 'camera') ? '#eab308' : '#3b82f6')}
+                      knobColor={el.knobColor || (gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.knobColor) || ((gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.type === 'camera' || el.joystickType === 'camera') ? '#fde047' : '#60a5fa')}
+                      url={el.url || (gameData.joysticks?.find((j: any) => j.id === el.joystickId)?.url)}
+                      state={joystickStates[el.id]}
+                      onPointerDown={handleJoystickPointerDown}
+                      width={el.width}
+                      height={el.height}
+                      interactive={true}
+                    />
                   )}
                   {el.type === 'btn' && (
                     <button className="w-full h-full flex items-center justify-center bg-transparent border-0 text-white font-bold cursor-pointer select-none">
                       {el.text || ''}
                     </button>
+                  )}
+                  {el.type === 'game_map' && (
+                    <GameMapRenderer
+                      config={{
+                        ...((gameData.gameMaps || []).find((m: any) => m.id === (el as any).mapId) || {}),
+                        ...((el as any).mapConfig || {})
+                      }}
+                      stageElements={stageElements}
+                      gameObjects={gameData.gameObjects || []}
+                      virtualWidth={VIRTUAL_WIDTH}
+                      virtualHeight={VIRTUAL_HEIGHT}
+                    />
+                  )}
+                  {el.type === 'game_loading' && (
+                    <GameLoadingRenderer
+                      config={{
+                        ...((gameData.gameLoadings || []).find((l: any) => l.id === (el as any).loadingId) || {}),
+                        ...((el as any).loadingConfig || {})
+                      }}
+                      progress={loadingProgressState[(el as any).loadingId] !== undefined ? loadingProgressState[(el as any).loadingId] : ((el as any).progress || 0)}
+                      width={el.width}
+                      height={el.height}
+                    />
                   )}
                 </div>
               );

@@ -3,183 +3,89 @@
     {
       "id": "scene_1",
       "name": "Scene 1"
+    },
+    {
+      "id": "scene_1787392128629_fpqz6n",
+      "name": "Scene 2"
     }
   ],
   "sceneElements": {
     "scene_1": [
       {
-        "id": "env_tile_1787367424754_llfdhn",
-        "type": "env_tile",
-        "data": {
-          "color": "#1f2937",
-          "name": "Asphalt Road",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M0 0h16v16H0z' fill='%231f2937'/%3E%3Ccircle cx='4' cy='4' r='1' fill='%23374151'/%3E%3Ccircle cx='12' cy='10' r='1' fill='%23111827'/%3E%3Cpath d='M0 8h16v1H0z' fill='%23374151' fill-opacity='0.2'/%3E%3C/svg%3E"
-        },
-        "x": 0,
-        "y": 620,
-        "width": 2200,
-        "height": 180,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787367424754_09p51k",
-        "type": "env_tile",
-        "data": {
-          "color": "#9ca3af",
-          "name": "Sidewalk Curb",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 0,
-        "y": 580,
-        "width": 2200,
-        "height": 40,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787367424754_xc4wgz",
-        "type": "env_tile",
-        "data": {
-          "color": "#374151",
-          "name": "Building Ledge 1",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 150,
-        "y": 440,
-        "width": 280,
-        "height": 40,
-        "isPlatform": true,
-        "assignedCharacterId": "el_1787367536977_fnpn8h",
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787367424754_fc9mx7",
-        "type": "env_tile",
-        "data": {
-          "color": "#374151",
-          "name": "Building Ledge 2",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 550,
-        "y": 320,
-        "width": 320,
-        "height": 40,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_tile_1787367424754_h2xaxt",
-        "type": "env_tile",
-        "data": {
-          "color": "#374151",
-          "name": "Rooftop Platform",
-          "texture": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Cpath d='M0 0h20v20H0z' fill='%239ca3af'/%3E%3Cpath d='M0 0h20v1H0zm0 0v20h1V0z' fill='%236b7280' fill-opacity='0.6'/%3E%3Ccircle cx='10' cy='10' r='1' fill='%23d1d5db' fill-opacity='0.5'/%3E%3C/svg%3E"
-        },
-        "x": 1000,
-        "y": 200,
-        "width": 400,
-        "height": 50,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_light_1787367424754_s17jx2",
-        "type": "env_light",
-        "data": {
-          "color": "rgba(255,220,120,0.6)",
-          "name": "Streetlamp Glow"
-        },
-        "x": 200,
-        "y": 450,
-        "width": 220,
-        "height": 220,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_light_1787367424754_b8eo77",
-        "type": "env_light",
-        "data": {
-          "color": "rgba(255,220,120,0.6)",
-          "name": "Streetlamp Glow 2"
-        },
-        "x": 900,
-        "y": 450,
-        "width": 220,
-        "height": 220,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "env_weather_1787367424754_54a7i9",
-        "type": "env_weather",
-        "data": {
-          "fx": "fog",
-          "name": "City Haze"
-        },
-        "x": 0,
-        "y": 0,
-        "width": 2200,
-        "height": 800,
-        "isPlatform": true,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "el_1787367452004_xl3x2i",
-        "type": "joystick",
-        "joystickId": "joy_cam_1",
-        "joystickType": "camera",
-        "name": "Virtual Joystick (Camera)",
-        "design": "outline-only",
-        "customColor": "#eab308",
-        "knobColor": "#fde047",
-        "interactionType": "pan",
-        "attachedObjectId": "",
-        "speed": 160,
-        "flipOnMove": true,
-        "x": 235,
-        "y": 179,
-        "width": 100,
-        "height": 100,
-        "layerId": "layer_1"
-      },
-      {
-        "id": "el_1787367536977_fnpn8h",
+        "id": "el_1787388443729_d4tg6u",
         "type": "obj",
-        "data": "obj_1787367526780_ynp8eo",
-        "x": 218,
-        "y": 360,
+        "data": "obj_1787388442969_5t2be6",
+        "x": 318,
+        "y": 39,
         "width": 80,
         "height": 80,
-        "layerId": "layer_1",
-        "isPlatform": true
+        "layerId": "layer_1"
       },
       {
-        "id": "el_1787367613205_b27lx5",
-        "type": "joystick",
-        "joystickId": "joy_move_1",
-        "joystickType": "movement",
-        "name": "Virtual Joystick (Move)",
-        "design": "outline-only",
-        "customColor": "#3b82f6",
-        "knobColor": "#60a5fa",
-        "interactionType": "move",
-        "attachedObjectId": "el_1787367536977_fnpn8h",
-        "speed": 160,
-        "flipOnMove": true,
-        "x": 25,
-        "y": 169,
-        "width": 100,
-        "height": 100,
+        "id": "el_1787388473616_2to0lz",
+        "type": "obj",
+        "data": "obj_1787388472318_7p04uo",
+        "x": 50,
+        "y": 273,
+        "width": 80,
+        "height": 80,
         "layerId": "layer_1"
+      },
+      {
+        "id": "map_el_1787393259104_njt6",
+        "type": "game_map",
+        "mapId": "map_1787393241064_snpq",
+        "name": "Custom Map 7",
+        "x": 20,
+        "y": 20,
+        "width": 170,
+        "height": 170,
+        "layerId": "layer_1",
+        "zIndex": 100
       }
-    ]
+    ],
+    "scene_1787392128629_fpqz6n": []
   },
   "sceneEvents": {
     "scene_1": [
       {
         "id": "ev_1",
+        "conditions": [
+          {
+            "type": "always",
+            "_uiCollapsed": false
+          }
+        ],
+        "actions": [
+          {
+            "type": "configure_map",
+            "target": "map_el_1787388405442_ees0",
+            "target3": "obj_1787388472318_7p04uo",
+            "target2": "obj_1787388442969_5t2be6",
+            "_uiCollapsed": true
+          }
+        ]
+      },
+      {
+        "id": "ev_1787392108156_8oujpw",
+        "conditions": [
+          {
+            "type": "loading_progress",
+            "operator": "==",
+            "value": 50
+          }
+        ],
+        "actions": [
+          {
+            "type": "goto_scene",
+            "target": "scene_1787392128629_fpqz6n"
+          }
+        ]
+      }
+    ],
+    "scene_1787392128629_fpqz6n": [
+      {
+        "id": "ev_1787392128629_3et2ux",
         "conditions": [],
         "actions": []
       }
@@ -190,11 +96,34 @@
   },
   "gameObjects": [
     {
-      "id": "obj_1787367526780_ynp8eo",
+      "id": "obj_1787388442969_5t2be6",
       "name": "New Character",
       "type": "character",
-      "hasGravity": true,
-      "isPlatform": true
+      "animations": [
+        {
+          "id": "anim_default",
+          "name": "Animation 1",
+          "frames": [
+            "./assets/images/asset_0_3qb5gma.png"
+          ],
+          "fps": 12
+        }
+      ]
+    },
+    {
+      "id": "obj_1787388472318_7p04uo",
+      "name": "New Enemy",
+      "type": "enemy",
+      "animations": [
+        {
+          "id": "anim_default",
+          "name": "Animation 1",
+          "frames": [
+            "./assets/images/asset_1_jfqd7g6.png"
+          ],
+          "fps": 12
+        }
+      ]
     }
   ],
   "uiButtons": [
@@ -226,13 +155,13 @@
   ],
   "activeLayerId": "layer_1",
   "stageBgColor": "#111111",
-  "aspectRatio": "16/9",
+  "aspectRatio": "landscape",
   "activeSceneId": "scene_1",
   "projectSounds": [],
   "projectVideos": [],
   "customCSS": "",
-  "VIRTUAL_WIDTH": 360,
-  "VIRTUAL_HEIGHT": 640,
+  "VIRTUAL_WIDTH": 640,
+  "VIRTUAL_HEIGHT": 360,
   "variables": [],
   "timers": [],
   "attachments": [],
@@ -243,8 +172,7 @@
       "type": "movement",
       "color": "#3b82f6",
       "knobColor": "#60a5fa",
-      "interactionType": "move",
-      "design": "outline-only"
+      "interactionType": "move"
     },
     {
       "id": "joy_cam_1",
@@ -252,8 +180,300 @@
       "type": "camera",
       "color": "#eab308",
       "knobColor": "#fde047",
-      "interactionType": "pan",
-      "design": "outline-only"
+      "interactionType": "pan"
+    }
+  ],
+  "gameMaps": [
+    {
+      "id": "map_radar_1",
+      "name": "Tactical Radar HUD",
+      "type": "radar_circle",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#ef4444",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": true,
+      "radarColor": "#22c55e",
+      "enemyBlipColor": "#ef4444",
+      "playerBlipColor": "#22c55e",
+      "neutralBlipColor": "#eab308",
+      "zoom": 0.55,
+      "opacity": 0.9,
+      "width": 170,
+      "height": 170,
+      "position": "top-right",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": true,
+      "showBorder": true,
+      "label": "RADAR-01"
+    },
+    {
+      "id": "map_minimap_1",
+      "name": "Modern Combat Minimap",
+      "type": "minimap_rect",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#38bdf8",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": false,
+      "radarColor": "#38bdf8",
+      "enemyBlipColor": "#f43f5e",
+      "playerBlipColor": "#38bdf8",
+      "neutralBlipColor": "#fbbf24",
+      "zoom": 0.2,
+      "opacity": 0.85,
+      "width": 200,
+      "height": 140,
+      "position": "top-right",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": true,
+      "showBorder": true,
+      "label": "ZONE OVERVIEW"
+    },
+    {
+      "id": "map_tactical_1",
+      "name": "Holographic Blueprint Grid",
+      "type": "tactical_grid",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#06b6d4",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": true,
+      "radarColor": "#06b6d4",
+      "enemyBlipColor": "#ff0055",
+      "playerBlipColor": "#00ffff",
+      "neutralBlipColor": "#facc15",
+      "zoom": 0.22,
+      "opacity": 0.92,
+      "width": 180,
+      "height": 180,
+      "position": "top-left",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": true,
+      "showBorder": true,
+      "label": "HOLO-GRID"
+    },
+    {
+      "id": "map_compass_1",
+      "name": "Directional Compass Radar",
+      "type": "compass_dial",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#eab308",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": false,
+      "radarColor": "#eab308",
+      "enemyBlipColor": "#ef4444",
+      "playerBlipColor": "#10b981",
+      "neutralBlipColor": "#eab308",
+      "zoom": 0.3,
+      "opacity": 0.88,
+      "width": 150,
+      "height": 150,
+      "position": "top-right",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": false,
+      "showBorder": true,
+      "label": "COMPASS"
+    },
+    {
+      "id": "map_satellite_1",
+      "name": "Satellite Sensor Grid",
+      "type": "satellite_view",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#a855f7",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": true,
+      "radarColor": "#a855f7",
+      "enemyBlipColor": "#ec4899",
+      "playerBlipColor": "#a855f7",
+      "neutralBlipColor": "#38bdf8",
+      "zoom": 0.18,
+      "opacity": 0.9,
+      "width": 190,
+      "height": 150,
+      "position": "bottom-right",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": true,
+      "showBorder": true,
+      "label": "ORBITAL-SAT"
+    },
+    {
+      "id": "map_fantasy_1",
+      "name": "Fantasy RPG Parchment",
+      "type": "fantasy_parchment",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#d97706",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": false,
+      "radarColor": "#b45309",
+      "enemyBlipColor": "#dc2626",
+      "playerBlipColor": "#15803d",
+      "neutralBlipColor": "#b45309",
+      "zoom": 0.25,
+      "opacity": 0.95,
+      "width": 180,
+      "height": 160,
+      "position": "top-right",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": false,
+      "showBorder": true,
+      "label": "WORLD MAP"
+    },
+    {
+      "id": "map_1787393241064_snpq",
+      "name": "Custom Map 7",
+      "type": "radar_circle",
+      "trackerSource": "",
+      "trackAllEnemies": true,
+      "showTrackingLine": true,
+      "trackingLineColor": "#ef4444",
+      "showDistanceText": true,
+      "distanceUnit": "m",
+      "radarSweep": true,
+      "radarColor": "#22c55e",
+      "enemyBlipColor": "#ef4444",
+      "playerBlipColor": "#22c55e",
+      "neutralBlipColor": "#eab308",
+      "zoom": 0.25,
+      "opacity": 0.9,
+      "width": 170,
+      "height": 170,
+      "position": "top-right",
+      "x": 20,
+      "y": 20,
+      "visibleOnStart": true,
+      "showGrid": true,
+      "showBorder": true,
+      "label": "RADAR-01"
+    }
+  ],
+  "gameLoadings": [
+    {
+      "id": "load_bar_1",
+      "name": "Neon Progress Bar",
+      "type": "progress_bar",
+      "title": "Loading Level Data...",
+      "subtitle": "Preparing stage assets and enemy AI...",
+      "progress": 100,
+      "autoIncrement": true,
+      "autoDuration": 3,
+      "barColor": "#06b6d4",
+      "trackColor": "#18181b",
+      "glowColor": "#06b6d4",
+      "iconName": "gamepad",
+      "showPercentage": true,
+      "dismissOnComplete": true,
+      "position": "center",
+      "width": 320,
+      "height": 90,
+      "visibleOnStart": true
+    },
+    {
+      "id": "load_radial_1",
+      "name": "Radial HUD Ring",
+      "type": "radial_spinner",
+      "title": "Synchronizing World...",
+      "subtitle": "Calibrating physics and shaders",
+      "progress": 100,
+      "autoIncrement": true,
+      "autoDuration": 2.5,
+      "barColor": "#a855f7",
+      "trackColor": "#18181b",
+      "glowColor": "#c084fc",
+      "iconName": "orbit",
+      "showPercentage": true,
+      "dismissOnComplete": true,
+      "position": "center",
+      "width": 220,
+      "height": 220,
+      "visibleOnStart": false
+    },
+    {
+      "id": "load_icon_1",
+      "name": "Pulsing Shield Icon Loader",
+      "type": "icon_spinner",
+      "title": "Entering Combat Zone",
+      "subtitle": "Connecting player to battlefield...",
+      "progress": 100,
+      "autoIncrement": true,
+      "autoDuration": 3.5,
+      "barColor": "#22c55e",
+      "trackColor": "#18181b",
+      "glowColor": "#4ade80",
+      "iconName": "shield",
+      "showPercentage": true,
+      "dismissOnComplete": true,
+      "position": "center",
+      "width": 260,
+      "height": 160,
+      "visibleOnStart": false
+    },
+    {
+      "id": "load_splash_1",
+      "name": "Fullscreen Cinematic Splash",
+      "type": "fullscreen_splash",
+      "title": "ANIMATO LEGENDS",
+      "subtitle": "Tip: Use joysticks or WASD to navigate and evade enemy hazards!",
+      "progress": 100,
+      "autoIncrement": true,
+      "autoDuration": 4,
+      "barColor": "#eab308",
+      "trackColor": "#27272a",
+      "glowColor": "#facc15",
+      "iconName": "swords",
+      "showPercentage": true,
+      "dismissOnComplete": true,
+      "position": "fullscreen",
+      "width": 600,
+      "height": 350,
+      "visibleOnStart": false
+    },
+    {
+      "id": "load_cyber_1",
+      "name": "Cyberpunk 8-Bit Scanline",
+      "type": "cyber_loader",
+      "title": "BOOTING_SYSTEM_v2.0",
+      "subtitle": "INITIALIZING_NEURAL_LINK...",
+      "progress": 100,
+      "autoIncrement": true,
+      "autoDuration": 2.8,
+      "barColor": "#f43f5e",
+      "trackColor": "#09090b",
+      "glowColor": "#fb7185",
+      "iconName": "zap",
+      "showPercentage": true,
+      "dismissOnComplete": true,
+      "position": "center",
+      "width": 340,
+      "height": 110,
+      "visibleOnStart": false
     }
   ],
   "cameraFollowTarget": null,

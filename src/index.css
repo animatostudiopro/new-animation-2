@@ -26,6 +26,32 @@ html, body, #root {
   100% { opacity: 0; transform: translate(-50%, -35px) scale(1.15); }
 }
 
+@keyframes lightningFlash {
+  0%, 90%, 100% { opacity: 0; }
+  92%, 95% { opacity: 0.8; }
+}
+
+@keyframes lightningBolt {
+  0%, 100% { opacity: 0; transform: scaleY(0); }
+  5%, 15% { opacity: 1; transform: scaleY(1); }
+  20% { opacity: 0; transform: scaleY(0); }
+}
+
+@keyframes rainFall {
+  0% { transform: translateY(-20px); opacity: 0; }
+  10% { opacity: 0.6; }
+  90% { opacity: 0.6; }
+  100% { transform: translateY(400px); opacity: 0; }
+}
+
+@keyframes snowDrift {
+  0% { transform: translate(0, -20px) rotate(0deg); opacity: 0; }
+  10% { opacity: 0.8; }
+  50% { transform: translate(15px, 180px) rotate(180deg); }
+  90% { opacity: 0.8; }
+  100% { transform: translate(0, 360px) rotate(360deg); opacity: 0; }
+}
+
 .animate-float-up {
   animation: floatUp 1.2s ease-out forwards;
 }
