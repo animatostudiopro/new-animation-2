@@ -1,101 +1,111 @@
-name: Auto Video Render & Publish Pipeline
+# Animato AutoPoster — cloud render & publish.
+#
+# Installed and kept up to date automatically by the Animato app.
+# Edits made here are overwritten on the next update; change
+# server/bootstrap/workflow.yml in the app instead.
+#
+# One run renders and publishes ONE episode. The app's server decides when
+# the next episode runs, so nothing here sleeps or re-triggers itself.
+
+name: Animato Auto Render & Publish
+
+run-name: "Animato · ${{ github.event.client_payload.job.name || inputs.category || 'manual run' }} · Part ${{ github.event.client_payload.part_number || inputs.part_number || '1' }} [${{ github.event.client_payload.campaign_id || inputs.campaign_id || 'manual' }}]"
 
 on:
-  # 1. Scheduled Automated Cron (Runs daily at 12:00 PM UTC / 8:00 AM EDT - phone can be OFF!)
-  schedule:
-    - cron: '0 12 * * *'
-
-  # 2. Webhook Dispatch (Triggered directly from the Animato Web App UI)
+  # Sent by the Animato app. The payload deliberately has fewer than
+  # 10 top-level fields (GitHub rejects more with HTTP 422).
   repository_dispatch:
     types: [render_video]
 
-  # 3. Manual Run with custom options directly inside GitHub Actions UI
+  # Manual test run from the Actions tab.
   workflow_dispatch:
     inputs:
       category:
-        description: 'Content Category'
-        required: true
-        default: 'cooking'
+        description: Content category
         type: choice
-        options:
-          - cooking
-          - tech
-          - stories
+        options: [stories, cooking, tech]
+        default: stories
       topic:
-        description: 'Custom Topic / Prompt (Optional)'
-        required: false
+        description: Topic / prompt (optional)
+        type: string
         default: ''
-        type: string
       gender:
-        description: 'Narrator & Character Gender'
-        required: true
-        default: 'female'
+        description: Narrator voice
         type: choice
-        options:
-          - female
-          - male
+        options: [female, male]
+        default: female
       part_number:
-        description: 'Story Part / Episode Number'
-        required: true
-        default: '1'
+        description: Part / episode number
         type: string
-      aspect_ratio:
-        description: 'Video Aspect Ratio'
-        required: true
-        default: '9:16'
-        type: choice
-        options:
-          - '9:16'
-          - '16:9'
+        default: '1'
       auto_post_youtube:
-        description: 'Auto-Publish directly to YouTube'
-        required: true
-        default: false
-        type: boolean
+        description: Publish to YouTube (needs YOUTUBE_* repository secrets)
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
+      campaign_id:
+        description: Automation ID (optional, links the run to an automation in the app)
+        type: string
+        default: ''
+      app_url:
+        description: App URL (optional, for status updates)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time per automation; different automations run in parallel.
+  group: animato-${{ github.event.client_payload.campaign_id || inputs.campaign_id || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   render_and_publish:
-    name: Headless Video Render & Publish
+    name: Render & publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: ⚙️ Setup Node.js 22
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
 
-      - name: 🎬 Install FFmpeg
+      - name: Set up Python (for the neural voice engine)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install FFmpeg, fonts and voice engine
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core > /dev/null
+          python -m pip install --quiet --disable-pip-version-check edge-tts
+          ffmpeg -hide_banner -version | head -n 1
+          edge-tts --help > /dev/null && echo "edge-tts ready"
 
-      - name: 📦 Install Project Dependencies
-        run: npm ci || npm install --legacy-peer-deps
-
-      - name: 🚀 Execute Headless Cloud Renderer
+      - name: Render & publish episode
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID || '592242596648-am9pri2j11vmu44fdc6oau5p34aklkj8.apps.googleusercontent.com' }}
+          # Secrets come from the app's dispatch payload (read inside the script
+          # from the event file and masked). These repository secrets are only
+          # a fallback for manual runs.
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          CATEGORY: ${{ github.event.inputs.category || github.event.client_payload.category || 'cooking' }}
-          PROMPT: ${{ github.event.inputs.topic || github.event.client_payload.topic || '' }}
-          CHARACTER_GENDER: ${{ github.event.inputs.gender || github.event.client_payload.gender || 'female' }}
-          PART_NUMBER: ${{ github.event.inputs.part_number || github.event.client_payload.part_number || '1' }}
-          ASPECT_RATIO: ${{ github.event.inputs.aspect_ratio || github.event.client_payload.aspect_ratio || '9:16' }}
-          AUTO_POST_YOUTUBE: ${{ github.event.inputs.auto_post_youtube || github.event.client_payload.auto_post_youtube || 'false' }}
-        run: npx tsx scripts/github_cloud_renderer.ts
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: node --experimental-strip-types animato-cloud/renderer.mts
 
-      - name: 💾 Upload Rendered MP4 Video Artifact
+      - name: Keep the rendered video as a run artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: animato-video-${{ github.event.inputs.category || github.event.client_payload.category || 'render' }}-${{ github.run_id }}
+          name: animato-video-${{ github.run_id }}
           path: |
             output/rendered_video.mp4
             output/video_metadata.json
-          retention-days: 30
+          retention-days: 7
+          if-no-files-found: ignore
