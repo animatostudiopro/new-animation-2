@@ -1,0 +1,101 @@
+name: Auto Video Render & Publish Pipeline
+
+on:
+  # 1. Scheduled Automated Cron (Runs daily at 12:00 PM UTC / 8:00 AM EDT - phone can be OFF!)
+  schedule:
+    - cron: '0 12 * * *'
+
+  # 2. Webhook Dispatch (Triggered directly from the Animato Web App UI)
+  repository_dispatch:
+    types: [render_video]
+
+  # 3. Manual Run with custom options directly inside GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      category:
+        description: 'Content Category'
+        required: true
+        default: 'cooking'
+        type: choice
+        options:
+          - cooking
+          - tech
+          - stories
+      topic:
+        description: 'Custom Topic / Prompt (Optional)'
+        required: false
+        default: ''
+        type: string
+      gender:
+        description: 'Narrator & Character Gender'
+        required: true
+        default: 'female'
+        type: choice
+        options:
+          - female
+          - male
+      part_number:
+        description: 'Story Part / Episode Number'
+        required: true
+        default: '1'
+        type: string
+      aspect_ratio:
+        description: 'Video Aspect Ratio'
+        required: true
+        default: '9:16'
+        type: choice
+        options:
+          - '9:16'
+          - '16:9'
+      auto_post_youtube:
+        description: 'Auto-Publish directly to YouTube'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  render_and_publish:
+    name: Headless Video Render & Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: 🎬 Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+
+      - name: 📦 Install Project Dependencies
+        run: npm ci || npm install --legacy-peer-deps
+
+      - name: 🚀 Execute Headless Cloud Renderer
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID || '592242596648-am9pri2j11vmu44fdc6oau5p34aklkj8.apps.googleusercontent.com' }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          CATEGORY: ${{ github.event.inputs.category || github.event.client_payload.category || 'cooking' }}
+          PROMPT: ${{ github.event.inputs.topic || github.event.client_payload.topic || '' }}
+          CHARACTER_GENDER: ${{ github.event.inputs.gender || github.event.client_payload.gender || 'female' }}
+          PART_NUMBER: ${{ github.event.inputs.part_number || github.event.client_payload.part_number || '1' }}
+          ASPECT_RATIO: ${{ github.event.inputs.aspect_ratio || github.event.client_payload.aspect_ratio || '9:16' }}
+          AUTO_POST_YOUTUBE: ${{ github.event.inputs.auto_post_youtube || github.event.client_payload.auto_post_youtube || 'false' }}
+        run: npx tsx scripts/github_cloud_renderer.ts
+
+      - name: 💾 Upload Rendered MP4 Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: animato-video-${{ github.event.inputs.category || github.event.client_payload.category || 'render' }}-${{ github.run_id }}
+          path: |
+            output/rendered_video.mp4
+            output/video_metadata.json
+          retention-days: 30
