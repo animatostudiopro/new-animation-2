@@ -388,6 +388,33 @@ const liveKeys = () => {
 
 class AllKeysRejected extends Error {}
 
+/** The human-readable reason inside an OpenRouter error body. */
+function openrouterReason(text: string): string {
+  try {
+    const e = JSON.parse(text);
+    return String(e?.error?.metadata?.raw || e?.error?.message || e?.message || e?.raw || text).slice(0, 220);
+  } catch {
+    return String(text || '').slice(0, 220);
+  }
+}
+
+/**
+ * Is the key itself valid? /key is not moderated, so it separates a bad key
+ * from a blocked request. Unknown (network) counts as valid: never retire a
+ * key on a guess.
+ */
+const keyValidity = new Map<string, boolean>();
+async function keyIsValid(key: string): Promise<boolean> {
+  if (keyValidity.has(key)) return keyValidity.get(key)!;
+  let ok = true;
+  try {
+    const r = await fetch(`${CFG.openrouterBase}/key`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15000) });
+    if (r.status === 401 || r.status === 403) ok = false;
+  } catch {}
+  keyValidity.set(key, ok);
+  return ok;
+}
+
 /**
  * POST to OpenRouter with automatic key failover.
  * 401/403 (rejected) and 402 (no credit) retire the key for this run;
@@ -415,9 +442,20 @@ async function openrouterPost(route: string, body: any, timeoutMs: number): Prom
       return { status: res.status, text };
     }
     last = { status: res.status, text };
-    if (res.status === 401 || res.status === 403 || res.status === 402) {
+    if (res.status === 403) {
+      // 403 = OpenRouter BLOCKED THIS REQUEST (moderation flag, guardrail, prompt-injection
+      // filter) — not a bad key. Only retire the key if the key itself is refused.
+      if (await keyIsValid(key)) {
+        keyCursor = orKeys.indexOf(key);
+        return last; // caller softens the prompt / tries the next model
+      }
+      deadKeys.set(key, 403);
+      log(`OpenRouter key ${tail(key)} is disabled (HTTP 403) — switching to the next key (${liveKeys().length} left).`);
+      continue;
+    }
+    if (res.status === 401 || res.status === 402) {
       deadKeys.set(key, res.status);
-      log(`OpenRouter key ${tail(key)} ${res.status === 402 ? 'has no credit' : 'was rejected'} (HTTP ${res.status}) — switching to the next key (${liveKeys().length} left).`);
+      log(`OpenRouter key ${tail(key)} ${res.status === 402 ? 'has no credit' : 'is invalid or disabled'} (HTTP ${res.status}) — switching to the next key (${liveKeys().length} left).`);
       continue;
     }
     if (res.status === 429 && /upstream|provider|temporarily/i.test(text)) {
@@ -569,6 +607,7 @@ ${categoryBrief(pastStory, headlines)}${avoid}
 RULES
 - Total narration: ${L.words} words across ${L.scenes} scenes. Each scene is 1-3 spoken sentences (8-40 words).
 - Write for the ear: short sentences, concrete words, no emojis, no hashtags, no stage directions, no "In this video".
+- Suitable for a general YouTube audience (PG-13): tension and mystery are great; no gore, no graphic violence, no self-harm, nothing sexual.
 - Every scene gets its own image that shows exactly what is being said at that moment.
 
 PERFORMANCE TAGS (the presenter is an animated character; its face and head follow tags you write INSIDE "narration")
@@ -596,6 +635,25 @@ Return ONLY this JSON (no markdown):
     { "narration": "[emotion] spoken words with [gesture] tags where they land", "shot": "scene|panel|full", "emotion": "main emotion of the scene", "imagePrompt": "...", "searchQuery": "3-6 word real-photo search query" }
   ]
 }`;
+}
+
+/** Same request in softer words, for providers whose moderation flags horror/crime vocabulary. */
+function saferScriptPrompt(p: string): string {
+  const swaps: [RegExp, string][] = [
+    [/\b(blood(y|ied)?|gore|gory|guts|bleeding)\b/gi, 'dark'],
+    [/\b(corpse|dead body|cadaver)\b/gi, 'shadowy figure'],
+    [/\b(murder(ed|er|ing|s)?|kill(ed|er|ing|s)?|slaughter(ed)?|stab(bed|bing)?|strangl(ed|ing))\b/gi, 'crime'],
+    [/\b(suicide|self-harm)\b/gi, 'loss'],
+    [/\b(knife|knives|gun|pistol|rifle|weapon|axe|machete)\b/gi, 'object'],
+    [/\b(demon(ic)?|possessed|satanic)\b/gi, 'unexplained'],
+    [/\b(naked|nude)\b/gi, 'alone'],
+    [/\b(torture(d)?|gruesome|mutilat\w*)\b/gi, 'terrible']
+  ];
+  let out = p;
+  for (const [re, to] of swaps) out = out.replace(re, to);
+  return `${out}
+
+SAFE MODE: write it for a general audience (PG-13). Suspense, mystery and emotion only — no gore, no graphic violence, no self-harm, nothing sexual, no real people.`;
 }
 
 function extractJson(text: string): any {
@@ -664,6 +722,9 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
   const prompt = buildPrompt(pastStory, pastTitles, headlines);
   const models = await freeModels();
   let lastError = '';
+  let blockedCount = 0;
+  let blockedReason = '';
+  let safePrompt: string | null = null;
   let nearMiss: { script: Script; words: number } | null = null;
   if (!CFG.offline && !orKeys.length) throw new PipelineError('script_failed', 'No OpenRouter API key was provided to the runner.');
   if (!CFG.offline) {
@@ -677,16 +738,27 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
             max_tokens: IS_SHORTS ? 3000 : 6000,
             messages: [
               { role: 'system', content: 'You are an award-winning short-form video writer and director. Your videos have strong hooks, make complete sense, and keep viewers watching to the last second. You answer with one valid JSON object and nothing else.' },
-              { role: 'user', content: prompt }
+              { role: 'user', content: safePrompt || prompt }
             ]
           };
           if (model.jsonMode) body.response_format = { type: 'json_object' };
           const res = await openrouterPost('/chat/completions', body, 150000);
           const text = res.text;
           if (res.status < 200 || res.status >= 300) {
-            let reason = text.slice(0, 180);
-            try { const e = JSON.parse(text); reason = String(e?.error?.metadata?.raw || e?.error?.message || e?.raw || reason).slice(0, 180); } catch {}
+            const reason = openrouterReason(text);
             lastError = `${model.id}: HTTP ${res.status || 'network'} ${reason}`;
+            if (res.status === 403) {
+              blockedCount++;
+              blockedReason = reason;
+              if (!safePrompt) {
+                // Moderation / guardrail flag: rewrite the request in softer words and retry.
+                safePrompt = saferScriptPrompt(prompt);
+                log(`OpenRouter blocked the request on ${model.id} (${reason}) — retrying with a toned-down prompt.`);
+                continue;
+              }
+              log(`OpenRouter blocked the request on ${model.id} again (${reason}) — trying the next model.`);
+              break;
+            }
             log(`OpenRouter ${lastError} — trying the next model.`);
             break; // try the next model straight away
           }
@@ -727,6 +799,7 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
     nearMiss.script.sources = headlines.slice(0, 3).map((h) => `${h.title} (${h.source})`);
     return nearMiss.script;
   }
+  if (blockedCount && blockedReason) lastError = `OpenRouter's safety filter blocked ${blockedCount} request(s): ${blockedReason}; last: ${lastError}`;
   log(`⚠️ AI script generation failed (${lastError}).`);
   return { ...templateScript(), aiError: lastError };
 }
@@ -1513,8 +1586,8 @@ async function main() {
   // 1. Script
   const script = await generateScript(pastStory, pastTitles);
   if (script.usedFallbackTemplate && !CFG.allowFallbackPublish) {
-    // Keys work but every free model was busy / rate-limited: retry later (no pause).
-    throw new PipelineError('script_retry', `The free AI models were busy or rate-limited on all ${orKeys.length} OpenRouter keys (${script.aiError || 'unknown error'}). Nothing was posted; the next attempt runs automatically.`);
+    // Keys work but every free model was busy / rate-limited / filtered: retry later (no pause).
+    throw new PipelineError('script_retry', `No free AI model produced a script this time (${script.aiError || 'unknown error'}). Your OpenRouter keys are fine; nothing was posted and the next attempt runs automatically.`);
   }
   const fullText = script.scenes.map((s) => s.narration).join(' ');
   await reportStatus('running', '2/5 Recording the voice-over', 22, `Script ready: "${script.title}" (${script.scenes.length} scenes${script.model ? `, ${script.model}` : ''}).`);
