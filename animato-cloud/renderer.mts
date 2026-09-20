@@ -4,8 +4,9 @@
  * One run = one episode:
  *   1. read the job from the repository_dispatch payload
  *   2. ask the app whether the automation still exists / isn't paused
- *   3. write the episode as timed scenes with the best FREE OpenRouter model
- *      (grounded in real headlines for tech/news)
+ *   3. write the episode as timed scenes with free Google Gemini models
+ *      (10 rotating keys, instant failover) and Groq as the fallback —
+ *      grounded in fresh, never-repeated headlines for tech/news
  *   4. narrate it with a neural voice, keeping word-level timings
  *   5. find an image for every scene (AI images for stories/cooking, real
  *      photos first for tech/news)
@@ -16,6 +17,8 @@
  *   8. report the episode back to the app, which schedules the next one
  *
  * No npm dependencies: Node 22 built-ins, FFmpeg, Chrome, Python edge-tts.
+ * The presenter is the CSS character designed in the app (only its small
+ * JSON spec travels in the job; the stage draws it).
  * Run with:  node --experimental-strip-types animato-cloud/renderer.mts
  */
 
@@ -26,6 +29,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { LlmPool, extractJsonObject } from './llm.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -77,6 +81,18 @@ function resolveFormat(): { format: 'shorts' | 'video'; aspect: string } {
 }
 
 const rawGender = pick(JOB.gender, INPUTS.gender, ENV.CHARACTER_GENDER, 'female').toLowerCase();
+function keyList(...values: any[]): string[] {
+  return Array.from(new Set(values
+    .flatMap((v) => (Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)))
+    .map((k) => String(k).trim())
+    .filter((k) => k.length > 8)));
+}
+const listOf = (v: string): string[] | undefined => { const l = String(v || '').split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean); return l.length ? l : undefined; };
+function parseSpec(v: any): any | null {
+  if (!v) return null;
+  if (typeof v === 'object') return v;
+  try { const o = JSON.parse(String(v)); return o && typeof o === 'object' ? o : null; } catch { return null; }
+}
 const FMT = resolveFormat();
 
 const CFG = {
@@ -96,16 +112,14 @@ const CFG = {
   ytRefreshToken: pick(AUTH.youtube_refresh_token, ENV.YOUTUBE_REFRESH_TOKEN),
   ytClientId: pick(AUTH.youtube_client_id, ENV.YOUTUBE_CLIENT_ID, DEFAULT_YT_CLIENT_ID),
   ytClientSecret: pick(AUTH.youtube_client_secret, ENV.YOUTUBE_CLIENT_SECRET),
-  openrouterKey: pick(AUTH.openrouter_api_key, ENV.OPENROUTER_API_KEY),
-  // Every key the app sent (comma-separated) + repository secrets; tried in turn.
-  openrouterKeys: Array.from(new Set(
-    [AUTH.openrouter_api_keys, AUTH.openrouter_api_key, ENV.OPENROUTER_API_KEYS, ENV.OPENROUTER_API_KEY]
-      .flatMap((v) => (Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)))
-      .map((k) => String(k).trim())
-      .filter((k) => k.length > 8)
-  )) as string[],
+  // Script writer keys the app sent (comma-separated) + repository secrets; rotated with instant failover.
+  geminiKeys: keyList(AUTH.gemini_api_keys, AUTH.gemini_api_key, ENV.GEMINI_API_KEYS, ENV.GEMINI_API_KEY),
+  groqKeys: keyList(AUTH.groq_api_keys, AUTH.groq_api_key, ENV.GROQ_API_KEYS, ENV.GROQ_API_KEY),
+  geminiModels: listOf(pick(JOB.gemini_models, ENV.GEMINI_MODELS)),
+  groqModels: listOf(pick(JOB.groq_models, ENV.GROQ_MODELS)),
   nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
-  openrouterModels: pick(JOB.models, ENV.OPENROUTER_MODELS, ENV.OPENROUTER_MODEL),
+  characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
+  usedHeadlines: String(pick(JOB.used_headlines)).split('\n').map((x) => x.trim()).filter(Boolean),
   pollinationsKey: pick(AUTH.pollinations_key, ENV.POLLINATIONS_API_KEY),
   pexelsKey: pick(AUTH.pexels_key, ENV.PEXELS_API_KEY),
   pixabayKey: pick(AUTH.pixabay_key, ENV.PIXABAY_API_KEY),
@@ -117,7 +131,8 @@ const CFG = {
   // Test hooks (never set in production).
   dryRun: ENV.ANIMATO_DRY_RUN === 'true',
   offline: ENV.ANIMATO_OFFLINE === 'true',
-  openrouterBase: pick(ENV.OPENROUTER_BASE_URL, 'https://openrouter.ai/api/v1'),
+  geminiBase: pick(ENV.GEMINI_BASE_URL, 'https://generativelanguage.googleapis.com/v1beta'),
+  groqBase: pick(ENV.GROQ_BASE_URL, 'https://api.groq.com/openai/v1'),
   googleTokenUrl: pick(ENV.GOOGLE_TOKEN_URL, 'https://oauth2.googleapis.com/token'),
   nvidiaBase: pick(ENV.NVIDIA_GENAI_BASE, 'https://ai.api.nvidia.com/v1/genai'),
   youtubeUploadBase: pick(ENV.YOUTUBE_UPLOAD_BASE, 'https://www.googleapis.com/upload/youtube/v3'),
@@ -127,7 +142,7 @@ const CFG = {
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, CFG.openrouterKey, ...CFG.openrouterKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -227,7 +242,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const clampNum = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
 // ---------------------------------------------------------------------------
-// 1. Script — best free OpenRouter model, written as timed scenes
+// 1. Script — free Gemini models (Groq fallback), written as timed scenes
 // ---------------------------------------------------------------------------
 /** A performance cue placed before the `index`-th spoken word of a scene. */
 interface Cue { index: number; tag: string }
@@ -238,8 +253,9 @@ interface Scene { narration: string; shot: 'scene' | 'panel' | 'full'; emotion: 
 // before the word where a change should land. They are removed from the voice
 // and captions and turned into cues timed to that exact word.
 // ---------------------------------------------------------------------------
-const EMOTION_TAGS = ['neutral', 'happy', 'excited', 'sad', 'crying', 'serious', 'worried', 'scared', 'surprised', 'angry', 'calm', 'curious'];
-const GESTURE_TAGS = ['look_image', 'look_left', 'look_right', 'look_up', 'think', 'nod', 'shake_head', 'lean_in'];
+const EMOTION_TAGS = ['neutral', 'happy', 'excited', 'sad', 'crying', 'serious', 'worried', 'scared', 'surprised', 'angry', 'calm', 'curious', 'laugh'];
+const GESTURE_TAGS = ['look_image', 'look_left', 'look_right', 'look_up', 'think', 'nod', 'shake_head', 'lean_in',
+  'point', 'explain', 'count', 'wave', 'shrug', 'hands_up', 'hand_chest', 'fist'];
 const TAG_ALIASES: Record<string, string> = {
   joy: 'happy', joyful: 'happy', smile: 'happy', smiling: 'happy', cheerful: 'happy', warm: 'happy', amused: 'happy', hopeful: 'happy', proud: 'happy', relieved: 'happy',
   excitement: 'excited', thrilled: 'excited', enthusiastic: 'excited', energetic: 'excited',
@@ -250,7 +266,11 @@ const TAG_ALIASES: Record<string, string> = {
   anger: 'angry', furious: 'angry', frustrated: 'angry', mad: 'angry',
   focused: 'serious', grave: 'serious', stern: 'serious', urgent: 'serious', dramatic: 'serious', mysterious: 'serious', determined: 'serious',
   relaxed: 'calm', gentle: 'calm', soft: 'calm', thoughtful: 'curious', intrigued: 'curious', wonder: 'curious',
-  look_at_image: 'look_image', look_at_picture: 'look_image', look_picture: 'look_image', look_screen: 'look_image', point: 'look_image', show: 'look_image', look_side: 'look_image',
+  look_at_image: 'look_image', look_at_picture: 'look_image', look_picture: 'look_image', look_screen: 'look_image', show: 'look_image', look_side: 'look_image',
+  pointing: 'point', point_image: 'point', point_at_image: 'point', point_screen: 'point', gesture: 'explain', explaining: 'explain', open_hands: 'explain', present: 'explain', presenting: 'explain',
+  one: 'count', step: 'count', counting: 'count', number: 'count', hello: 'wave', hi: 'wave', goodbye: 'wave', bye: 'wave', waving: 'wave',
+  shrugging: 'shrug', dunno: 'shrug', whoa: 'hands_up', hands_up: 'hands_up', raise_hands: 'hands_up', heart: 'hand_chest', hand_on_heart: 'hand_chest', chest: 'hand_chest',
+  fist_pump: 'fist', clenched: 'fist', laughing: 'laugh', laughs: 'laugh', haha: 'laugh', giggle: 'laugh', chuckle: 'laugh', chuckles: 'laugh', grin: 'happy',
   glance_left: 'look_left', glance_right: 'look_right', look_away: 'look_left', thinking: 'think', ponder: 'think', hmm: 'think',
   shake: 'shake_head', head_shake: 'shake_head', no: 'shake_head', yes: 'nod', nodding: 'nod', lean: 'lean_in', lean_forward: 'lean_in', whisper: 'lean_in'
 };
@@ -292,6 +312,7 @@ const MOOD_WORDS: [RegExp, string][] = [
   [/\b(suddenly|can't believe|unbelievable|shocking|out of nowhere|no way|wait,|what\?)/i, 'surprised'],
   [/\b(warning|danger(ous)?|crisis|killed|war|storm|flood|crash|urgent|arrested|attack|emergency|record low|collapsed?)\b/i, 'serious'],
   [/\b(worried|nervous|strange|wrong|weird|uneasy|missing|nobody|locked|alone)\b/i, 'worried'],
+  [/\b(haha|hilarious|laughed|so funny|joked?)\b/i, 'laugh'],
   [/\b(amazing|incredible|delicious|perfect|love|finally|won|win|best|beautiful|great news|good news|sunny|celebrat|crispy|golden|easy)\b/i, 'happy'],
   [/\b(furious|outrage|angry|betrayed|unfair|lied)\b/i, 'angry']
 ];
@@ -362,186 +383,74 @@ interface Script {
   model?: string;
   aiError?: string;
   sources?: string[];
+  sourceHeadline?: string;
 }
-
-const STRONG_FAMILIES: [RegExp, number][] = [
-  [/deepseek/i, 100], [/qwen/i, 92], [/glm|z-ai/i, 90], [/kimi|moonshot/i, 90], [/gpt-oss/i, 86],
-  [/inkling(?!-small)/i, 84], [/nemotron-3-ultra|nemotron.*ultra/i, 80], [/llama-4|llama-3\.3/i, 78],
-  [/gemma-4|gemma/i, 74], [/mistral|magistral/i, 72], [/gemini/i, 88], [/claude/i, 90]
-];
-const NOT_FOR_WRITING = /(code|coder|-fin\b|fin:|sante|medical|-vl\b|-vl:|vision|safety|guard|embed|rerank|ocr|audio|omni|math|laguna|nex-n|lightning|nano|\b[1-4](\.\d)?b\b|lfm)/i;
 
 // ---------------------------------------------------------------------------
-// OpenRouter key pool: start from a different key each run (spreads the free
-// daily limits), skip keys that are rejected / out of credit for the rest of
-// the run, and move to the next key when one is rate-limited.
+// Script writer pool: Gemini (keys rotated per run, instant failover) → Groq.
+// An exhausted model is never retried in the same run (see llm.ts).
 // ---------------------------------------------------------------------------
-const orKeys = CFG.openrouterKeys;
-const deadKeys = new Map<string, number>();      // key -> HTTP status that killed it
-let keyCursor = orKeys.length ? parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}:${CFG.runId}`).digest('hex').slice(0, 6), 16) % orKeys.length : 0;
-const tail = (k: string) => `…${k.slice(-4)}`;
-const liveKeys = () => {
-  const out: string[] = [];
-  for (let i = 0; i < orKeys.length; i++) { const k = orKeys[(keyCursor + i) % orKeys.length]; if (!deadKeys.has(k)) out.push(k); }
-  return out;
-};
-
-class AllKeysRejected extends Error {}
-
-/** The human-readable reason inside an OpenRouter error body. */
-function openrouterReason(text: string): string {
-  try {
-    const e = JSON.parse(text);
-    return String(e?.error?.metadata?.raw || e?.error?.message || e?.message || e?.raw || text).slice(0, 220);
-  } catch {
-    return String(text || '').slice(0, 220);
-  }
-}
-
-/**
- * Is the key itself valid? /key is not moderated, so it separates a bad key
- * from a blocked request. Unknown (network) counts as valid: never retire a
- * key on a guess.
- */
-const keyValidity = new Map<string, boolean>();
-async function keyIsValid(key: string): Promise<boolean> {
-  if (keyValidity.has(key)) return keyValidity.get(key)!;
-  let ok = true;
-  try {
-    const r = await fetch(`${CFG.openrouterBase}/key`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15000) });
-    if (r.status === 401 || r.status === 403) ok = false;
-  } catch {}
-  keyValidity.set(key, ok);
-  return ok;
-}
-
-/**
- * POST to OpenRouter with automatic key failover.
- * 401/403 (rejected) and 402 (no credit) retire the key for this run;
- * 429 (rate limit) tries up to 4 other keys, then lets the caller move on
- * to the next model.
- */
-async function openrouterPost(route: string, body: any, timeoutMs: number): Promise<{ status: number; text: string }> {
-  let limited = 0;
-  let last = { status: 0, text: '' };
-  for (const key of liveKeys()) {
-    let res: Response;
-    try {
-      res = await fetch(`${CFG.openrouterBase}${route}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': CFG.appUrl || 'https://animato.studio', 'X-Title': 'Animato AutoPoster' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch (err: any) {
-      return { status: 0, text: String(err?.message || err) };
-    }
-    const text = await res.text();
-    if (res.ok) {
-      keyCursor = orKeys.indexOf(key); // keep using the key that works
-      return { status: res.status, text };
-    }
-    last = { status: res.status, text };
-    if (res.status === 403) {
-      // 403 = OpenRouter BLOCKED THIS REQUEST (moderation flag, guardrail, prompt-injection
-      // filter) — not a bad key. Only retire the key if the key itself is refused.
-      if (await keyIsValid(key)) {
-        keyCursor = orKeys.indexOf(key);
-        return last; // caller softens the prompt / tries the next model
-      }
-      deadKeys.set(key, 403);
-      log(`OpenRouter key ${tail(key)} is disabled (HTTP 403) — switching to the next key (${liveKeys().length} left).`);
-      continue;
-    }
-    if (res.status === 401 || res.status === 402) {
-      deadKeys.set(key, res.status);
-      log(`OpenRouter key ${tail(key)} ${res.status === 402 ? 'has no credit' : 'is invalid or disabled'} (HTTP ${res.status}) — switching to the next key (${liveKeys().length} left).`);
-      continue;
-    }
-    if (res.status === 429 && /upstream|provider|temporarily/i.test(text)) {
-      // The model itself is busy for everyone; another key will not help — try the next model.
-      return last;
-    }
-    if (res.status === 429 && ++limited <= 4) {
-      log(`OpenRouter key ${tail(key)} is rate-limited — trying the next key.`);
-      continue;
-    }
-    return last; // model-level problem (400/404/5xx or still 429): caller tries the next model
-  }
-  if (!liveKeys().length) throw new AllKeysRejected(`All ${orKeys.length} OpenRouter API keys were rejected (${Array.from(deadKeys.entries()).map(([k, st]) => `${tail(k)}: HTTP ${st}`).join(', ')}).`);
-  return last;
-}
-
-async function freeModels(): Promise<{ id: string; jsonMode: boolean }[]> {
-  if (CFG.openrouterModels) {
-    return CFG.openrouterModels.split(',').map((s) => s.trim()).filter(Boolean).map((id) => ({ id, jsonMode: true }));
-  }
-  const fallback = ['deepseek/deepseek-v4-flash-0731:free', 'qwen/qwen3.8-27b:free', 'z-ai/glm-5.2:free', 'openrouter/free'].map((id) => ({ id, jsonMode: id !== 'openrouter/free' }));
-  if (CFG.offline) return fallback;
-  try {
-    const res = await fetch(`${CFG.openrouterBase}/models`, { headers: liveKeys()[0] ? { Authorization: `Bearer ${liveKeys()[0]}` } : {}, signal: AbortSignal.timeout(20000) });
-    if (!res.ok) return fallback;
-    const data: any = await res.json();
-    const models = (data?.data || [])
-      .filter((m: any) => m?.id && (String(m.id).endsWith(':free') || (Number(m?.pricing?.prompt) === 0 && Number(m?.pricing?.completion) === 0)))
-      .filter((m: any) => m.id !== 'openrouter/free' && !NOT_FOR_WRITING.test(m.id));
-    const score = (m: any) => {
-      const fam = STRONG_FAMILIES.find(([re]) => re.test(m.id));
-      let s = fam ? fam[1] : 50;
-      if (/small|mini|flash-lite/i.test(m.id)) s -= 12;
-      if ((m.context_length || 0) >= 64000) s += 3;
-      return s;
-    };
-    const ranked = models
-      .sort((a: any, b: any) => score(b) - score(a))
-      .slice(0, 6)
-      .map((m: any) => ({ id: m.id, jsonMode: (m.supported_parameters || []).includes('response_format') }));
-    ranked.push({ id: 'openrouter/free', jsonMode: false });
-    log(`Free models available (best first): ${ranked.map((m: any) => m.id).join(', ')}`);
-    return ranked.length > 1 ? ranked : fallback;
-  } catch (err: any) {
-    log(`Could not list OpenRouter models (${err?.message}); using the built-in list.`);
-    return fallback;
-  }
-}
+const LLM = new LlmPool({
+  geminiKeys: CFG.geminiKeys,
+  groqKeys: CFG.groqKeys,
+  geminiModels: CFG.geminiModels,
+  groqModels: CFG.groqModels,
+  geminiBase: CFG.geminiBase,
+  groqBase: CFG.groqBase,
+  log: (m) => log(m),
+  seed: parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}:${CFG.runId}`).digest('hex').slice(0, 6), 16)
+});
 
 function stripTags(s: string): string {
   return s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Real, recent headlines for tech/news so the video is grounded in facts. */
-async function recentHeadlines(pastTitles: string[]): Promise<{ title: string; source: string; date: string }[]> {
+/** Loose key for "is this the same story?" comparisons. */
+const storyKey = (t: string) => String(t || '').toLowerCase().replace(/\s+-\s+[^-]+$/, '').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 3).slice(0, 8).sort().join(' ');
+function sameStory(a: string, b: string): boolean {
+  const A = new Set(storyKey(a).split(' ')), B = storyKey(b).split(' ');
+  if (!A.size || !B.length) return false;
+  const shared = B.filter((w) => A.has(w)).length;
+  return shared >= Math.max(3, Math.ceil(Math.min(A.size, B.length) * 0.6));
+}
+
+/** Real, recent headlines for tech/news — freshest first, never one we already covered. */
+async function recentHeadlines(pastTitles: string[], pastSources: string[]): Promise<{ title: string; source: string; date: string; link: string }[]> {
   if (CFG.offline) return [];
   const topicBySub: Record<string, string> = {
     'latest smartphone': 'smartphone launch', 'ai reasoning models': 'new AI model released', 'silicon & processors': 'new processor chip announced',
-    gadgets: 'new gadget launch', world: 'world news', 'business & money': 'business news', 'science & health': 'science discovery',
+    gadgets: 'new gadget launch', 'ai tools': 'new AI tool launched', world: 'world news', 'business & money': 'business news', 'science & health': 'science discovery',
     entertainment: 'entertainment news', sports: 'sports news'
   };
-  const base = CFG.topic || topicBySub[CFG.subGenre.toLowerCase()] || (CFG.category === 'tech' ? 'technology launch' : 'top news');
-  const url = `${CFG.newsBase}?q=${encodeURIComponent(`${base} when:3d`)}&hl=en-US&gl=US&ceid=US:en`;
-  try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 AnimatoAutoPoster/3.0' }, signal: AbortSignal.timeout(20000) });
-    if (!res.ok) return [];
-    const xml = await res.text();
-    const seen = pastTitles.map((t) => t.toLowerCase());
-    const items: { title: string; source: string; date: string }[] = [];
-    for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
-      const block = m[1];
-      const title = stripTags((block.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '');
-      const source = stripTags((block.match(/<source[^>]*>([\s\S]*?)<\/source>/) || [])[1] || '');
-      const date = stripTags((block.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || '');
-      if (!title) continue;
-      const clean = source && title.endsWith(` - ${source}`) ? title.slice(0, -(source.length + 3)) : title;
-      if (seen.some((s) => s.includes(clean.toLowerCase().slice(0, 40)))) continue;
-      items.push({ title: clean, source, date });
-      if (items.length >= 10) break;
+  const base = CFG.topic || topicBySub[CFG.subGenre.toLowerCase()] || (CFG.category === 'tech' ? 'new AI tool launched' : 'breaking news');
+  const seen = [...pastTitles, ...pastSources, ...CFG.usedHeadlines];
+  const items: { title: string; source: string; date: string; link: string; ts: number }[] = [];
+  // Freshest window first; widen only if everything recent was already covered.
+  for (const window of CFG.category === 'news' ? ['when:1d', 'when:2d', 'when:4d'] : ['when:2d', 'when:5d', 'when:10d']) {
+    const url = `${CFG.newsBase}?q=${encodeURIComponent(`${base} ${window}`)}&hl=en-US&gl=US&ceid=US:en`;
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 AnimatoAutoPoster/4.0' }, signal: AbortSignal.timeout(20000) });
+      if (!res.ok) continue;
+      const xml = await res.text();
+      for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+        const block = m[1];
+        const title = stripTags((block.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '');
+        const source = stripTags((block.match(/<source[^>]*>([\s\S]*?)<\/source>/) || [])[1] || '');
+        const date = stripTags((block.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || '');
+        const link = stripTags((block.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || '');
+        if (!title) continue;
+        const clean = source && title.endsWith(` - ${source}`) ? title.slice(0, -(source.length + 3)) : title;
+        if (seen.some((s) => sameStory(s, clean)) || items.some((x) => sameStory(x.title, clean))) continue;
+        items.push({ title: clean, source, date, link, ts: Date.parse(date) || 0 });
+      }
+    } catch (err: any) {
+      log(`Headline lookup failed (${err?.message}).`);
     }
-    log(`Found ${items.length} recent headlines for "${base}".`);
-    return items;
-  } catch (err: any) {
-    log(`Headline lookup failed (${err?.message}).`);
-    return [];
+    if (items.length >= 6) break;
   }
+  items.sort((a, b) => b.ts - a.ts);
+  log(`Found ${items.length} fresh headlines for "${base}" (skipped anything already covered).`);
+  return items.slice(0, 10).map(({ ts, ...h }) => h);
 }
 
 function lengthSpec() {
@@ -551,48 +460,53 @@ function lengthSpec() {
 }
 
 function categoryBrief(pastStory: string, headlines: { title: string; source: string; date: string }[]): string {
-  const L = lengthSpec();
   const topic = CFG.topic ? `\nCreator's direction: "${CFG.topic}".` : '';
   const sub = CFG.subGenre ? `\nSub-genre: ${CFG.subGenre}.` : '';
   const news = headlines.length
-    ? `\nREAL HEADLINES FROM THE LAST FEW DAYS (use ONLY these facts; do not invent numbers, prices, specs, quotes or dates):\n${headlines.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source}${h.date ? `, ${h.date.slice(0, 16)}` : ''})` : ''}`).join('\n')}\nPick the single most interesting story above and build the whole video around it. Mention the source naturally once.`
+    ? `\nFRESH HEADLINES (newest first; none of these has been covered on this channel before). Use ONLY facts stated here — do not invent numbers, prices, specs, quotes, names or dates:\n${headlines.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source}${h.date ? `, ${h.date.slice(0, 16)}` : ''})` : ''}`).join('\n')}\nPick the single most important/interesting story (prefer #1-#3, the newest) and build the whole video around it. Mention the source naturally once. Put the exact headline you used in "sourceHeadline".`
     : '';
   switch (CFG.category) {
     case 'cooking':
       return `FORMAT: a narrated cooking tutorial${sub}${topic}
 - Pick ONE specific, genuinely good dish (different from the previous videos listed below).
 - Scene 1 is the HOOK: a mouth-watering promise or a surprising tip, max 14 words ("The secret to crispy fried rice is day-old rice, and here's why.").
-- Then: ingredients with exact amounts, then clear numbered-feeling steps with times/temperatures, one pro tip, and a satisfying final plating moment.
+- Then: ingredients with exact amounts, then clear step-by-step instructions with times/temperatures, one pro tip, and a satisfying final plating moment.
 - End with a one-line call to action (ask a question viewers will answer in the comments).
-- Use shot "panel" for ingredient and step scenes (the presenter looks at the photo), "scene" for the hook and the final dish.
+- Use shot "panel" for ingredient and step scenes (the presenter points at the photo), "scene" for the hook and the final dish.
 - imagePrompt: professional food photography of exactly that step (hands, pan, ingredients), appetising natural light, shallow depth of field.`;
     case 'tech':
-      return `FORMAT: a tech explainer/review short${sub}${topic}${news}
-- Scene 1 is the HOOK: the most surprising fact about it, max 14 words.
-- Then: what it is, what is genuinely new, who it is for, one honest downside, and a clear verdict.
-- Speak like a trusted reviewer, not an ad. Never state a spec or price that is not in the headlines.
-- Use shot "panel" for most scenes (photo of the product/company/concept beside the presenter).
-- searchQuery: a real-photo query naming the actual product/company (e.g. "Pixel 10 Pro phone"); imagePrompt: a clean product-style photo of the same thing.${headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real product or AI trend and stay factual.'}`;
+      return `FORMAT: a tech / AI tool tutorial-review${sub}${topic}${news}
+- Cover ONE real, newly released or trending AI tool, app, model or gadget${headlines.length ? ' from the headlines above' : ''}.
+- Scene 1 is the HOOK (max 14 words): the most useful or surprising thing it does for the viewer ("This free AI tool turns a photo into a 3D model in seconds.").
+- Then, tutorial style: WHAT it is (one line) → the problem it solves / who it helps → WHERE to get it (official website, app store or platform by name — never invent a URL) → HOW to use it in 3-5 concrete steps ("Open…", "Upload…", "Type a prompt like…", "Export…") → one pro tip → one honest limitation → a clear verdict.
+- Talk like a friendly expert showing a friend, not an ad. Never state a spec, price, date or feature that is not in the headlines or widely known.
+- Use shot "panel" for most scenes: the presenter points at the image of the tool/step.
+- searchQuery: a real-photo query naming the actual product/company (e.g. "Pixel 10 Pro phone"). imagePrompt: a clean, modern illustration or UI-style screen of exactly that step (e.g. "a laptop screen showing an AI image generator with a prompt box, clean UI, soft studio light") — no brand logos, no readable text.${headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real AI tool and stay factual.'}`;
     case 'news':
       return `FORMAT: a 60-second news explainer${sub}${topic}${news}
 - Scene 1 is the HOOK: what happened, in max 14 words, in plain language.
-- Then: the key facts, why it matters to the viewer, and what happens next. Neutral, accurate, no speculation, no opinions.
+- Then: the key facts (who, what, where, when), why it matters to the viewer, and what happens next. Neutral, accurate, no speculation, no opinions.
+- It must be a story that is NOT in the list of previous video titles below.
 - Use shot "panel" for fact scenes; searchQuery must name the real place/person/organisation/event for a real news photo.${headlines.length ? '' : '\n- No headlines were available: explain one important, well-established recent development without inventing details.'}`;
     default: {
       const tone = /horror|suspense|scary/i.test(CFG.subGenre) ? 'slow-building dread, grounded realism, sensory detail (sounds, cold air, shadows); scary, never gory'
-        : /mystery/i.test(CFG.subGenre) ? 'a gripping mystery with clues the viewer can follow, urban atmosphere'
+        : /mystery/i.test(CFG.subGenre) ? 'a gripping mystery with clues the viewer can follow'
         : /twist/i.test(CFG.subGenre) ? 'a clean setup, subtle misdirection and a twist that recontextualises everything'
+        : /love|romance/i.test(CFG.subGenre) ? 'warm, emotional, bittersweet and hopeful'
         : 'gripping, emotional, cinematic';
       const cont = pastStory
-        ? `\nTHE STORY SO FAR:\n${pastStory}\nThis is Part ${CFG.partNumber}. Continue DIRECTLY from the last cliffhanger with the same characters and setting. No "previously on" recap; the hook itself should pull the viewer straight back in.`
-        : `\nThis is Part 1 of a series: introduce ONE protagonist (give them a name) and ONE unsettling situation.`;
-      return `FORMAT: episodic short story, told by a narrator${sub}${topic}${cont}
+        ? `\nTHE STORY SO FAR:\n${pastStory}\nThis is Part ${CFG.partNumber}. Continue DIRECTLY from the last cliffhanger with the same characters (same names, same looks) and setting. No "previously on" recap; the hook itself pulls the viewer straight back in.`
+        : `\nThis is Part 1 of a series: introduce ONE protagonist with a first name and ONE gripping situation.`;
+      return `FORMAT: episodic short story told by a NARRATOR in the THIRD PERSON${sub}${topic}${cont}
+- The presenter is the storyteller, NEVER a character in the story. Tell it about the characters by name: "This is the story of Anna. She lived alone above an old bakery…", "Marcus had never believed in luck. Then…". Use he/she/they and names — never "I", "me" or "my" for the protagonist. The narrator may speak to the viewer ("you") only for suspense or the final question.
 - Tone: ${tone}.
-- Scene 1 is the HOOK (max 14 words): a shocking statement or impossible detail that makes it impossible to scroll away ("My sister has been dead for three years. Tonight she called me.").
-- Structure: hook → quick setup (who, where, what feels wrong) → 2-3 escalating beats with concrete details → a cliffhanger ending that raises one urgent question, teasing Part ${CFG.partNumber + 1}.
-- Short, spoken sentences. Present tense or first person is great. Every scene must move the story forward and make sense.
+- Scene 1 is the HOOK (max 16 words): an impossible detail or burning question about the protagonist that makes scrolling away impossible ("Anna's sister died three years ago. Tonight, Anna's phone lit up with her name.").
+- Keep it engaging EVERY scene: open a question, pay it off, open a bigger one. Concrete sensory details, rising stakes, no filler, no summarising.
+- Structure: hook → quick setup (who, where, what feels wrong) → 2-4 escalating beats → a cliffhanger that raises one urgent question, teasing Part ${CFG.partNumber + 1}.
+- Short, spoken sentences, past tense. Every scene must move the story forward and make sense.
 - Use shot "scene" for most scenes, "full" for the 1-2 most dramatic reveals, "panel" only for a key object/clue close-up.
-- imagePrompt: a cinematic film still of EXACTLY what that scene describes (subject, place, lighting, camera angle), consistent with "visualStyle" and "characters".
+- "characters": a fixed visual description of each named character (age, hair, clothes), reused in every imagePrompt that shows them.
+- imagePrompt: a cinematic film still of EXACTLY what that scene describes — who (named character + their fixed description), where (the specific place), what is happening at that moment, lighting, camera angle. No text in the image.
 - Title must end with "(Part ${CFG.partNumber})".`;
     }
   }
@@ -610,12 +524,14 @@ RULES
 - Suitable for a general YouTube audience (PG-13): tension and mystery are great; no gore, no graphic violence, no self-harm, nothing sexual.
 - Every scene gets its own image that shows exactly what is being said at that moment.
 
-PERFORMANCE TAGS (the presenter is an animated character; its face and head follow tags you write INSIDE "narration")
+PERFORMANCE TAGS (the presenter is an animated character with a face, head, arms and hands; it performs tags you write INSIDE "narration")
 - Put a tag right before the word where the change should land. Tags are never spoken or shown as captions.
-- Emotion tags (the face keeps it until the next emotion tag): [neutral] [calm] [happy] [excited] [curious] [serious] [worried] [scared] [surprised] [sad] [crying] [angry]
-- Gesture tags (one-off moves): [look_image] turn and look at the picture on screen, [look_left] [look_right] glance aside, [look_up] [think] ponder, [nod] agree/emphasise, [shake_head] disagree/deny, [lean_in] get closer for a secret or key point.
-- Start EVERY scene with an emotion tag, and change emotion whenever the feeling of the words changes, exactly like a real presenter would. Example: "[serious] Heavy rain flooded the coast overnight. [look_image] This is Main Street this morning. [happy] But the good news? [nod] The weekend looks sunny."
-- Use [look_image] in scenes that show or describe something the viewer should look at (1-2 per scene where it fits), and 1-3 tags per scene overall. Never use a tag that contradicts the words.
+- Emotion tags (the face keeps it until the next emotion tag): [neutral] [calm] [happy] [excited] [curious] [serious] [worried] [scared] [surprised] [sad] [crying] [angry] [laugh]
+- Head/eye tags: [look_image] turn and look at the picture, [look_left] [look_right] glance aside, [look_up], [think] ponder, [nod], [shake_head], [lean_in] for a secret or key point.
+- Hand/body tags: [point] point at the picture on screen, [explain] open-palm explaining gesture, [count] hold up a finger for a step or item, [wave] wave hello/goodbye, [shrug] "who knows?", [hands_up] "whoa!", [hand_chest] heartfelt/sad, [fist] determined/emphasis.
+- Start EVERY scene with an emotion tag and change emotion whenever the feeling of the words changes, exactly like a real presenter. Use [laugh] only for genuinely funny moments and [crying] only for truly heartbreaking ones.
+- Example: "[serious] Heavy rain flooded the coast overnight. [point] This is Main Street this morning. [happy] But the good news? [nod] The weekend looks sunny." / tutorial: "[explain] First, open the app. [count] Step one: upload your photo."
+- Use 2-4 tags per scene overall, including a hand/body tag in most scenes; [point] or [look_image] whenever the words refer to what is on screen; [wave] in the first or last scene. Never use a tag that contradicts the words.
 
 YOUTUBE PACKAGING
 - "title": max 70 characters, curiosity + the main keyword, honest (no false clickbait), Title Case.
@@ -630,7 +546,8 @@ Return ONLY this JSON (no markdown):
   "hashtags": ["..."],
   "tags": ["..."],
   "visualStyle": "one consistent look for every image, e.g. 'dark cinematic film still, cold blue shadows, 35mm, moody practical lighting'",
-  "characters": "physical description of recurring people for consistent images (or empty)",
+  "characters": "fixed physical description of each recurring named person for consistent images (or empty)",
+  "sourceHeadline": "the exact headline used (tech/news only, else empty)",
   "scenes": [
     { "narration": "[emotion] spoken words with [gesture] tags where they land", "shot": "scene|panel|full", "emotion": "main emotion of the scene", "imagePrompt": "...", "searchQuery": "3-6 word real-photo search query" }
   ]
@@ -656,13 +573,7 @@ function saferScriptPrompt(p: string): string {
 SAFE MODE: write it for a general audience (PG-13). Suspense, mystery and emotion only — no gore, no graphic violence, no self-harm, nothing sexual, no real people.`;
 }
 
-function extractJson(text: string): any {
-  const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```json/gi, '```').replace(/```/g, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end <= start) throw new Error('no JSON object in model output');
-  return JSON.parse(cleaned.slice(start, end + 1));
-}
+const extractJson = extractJsonObject;
 
 function cleanHashtag(h: any): string {
   return String(h || '').toLowerCase().replace(/^#/, '').replace(/[^a-z0-9]/g, '').slice(0, 30);
@@ -713,93 +624,65 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
     characters: String(parsed.characters || '').slice(0, 300),
     scenes,
     usedFallbackTemplate: false,
-    model
+    model,
+    sourceHeadline: String(parsed.sourceHeadline || '').slice(0, 300)
   };
 }
 
-async function generateScript(pastStory: string, pastTitles: string[]): Promise<Script> {
-  const headlines = (CFG.category === 'tech' || CFG.category === 'news') ? await recentHeadlines(pastTitles) : [];
+async function generateScript(pastStory: string, pastTitles: string[], pastSources: string[]): Promise<Script> {
+  const headlines = (CFG.category === 'tech' || CFG.category === 'news') ? await recentHeadlines(pastTitles, pastSources) : [];
   const prompt = buildPrompt(pastStory, pastTitles, headlines);
-  const models = await freeModels();
-  let lastError = '';
-  let blockedCount = 0;
-  let blockedReason = '';
-  let safePrompt: string | null = null;
+  const system = 'You are an award-winning short-form video writer and director. Your videos open with an irresistible hook, make complete sense, stay engaging every single second and end with a reason to follow. You answer with one valid JSON object and nothing else.';
   let nearMiss: { script: Script; words: number } | null = null;
-  if (!CFG.offline && !orKeys.length) throw new PipelineError('script_failed', 'No OpenRouter API key was provided to the runner.');
+  let lastError = '';
+  const withSources = (sc: Script) => {
+    const used = headlines.find((h) => sc.sourceHeadline && sameStory(h.title, sc.sourceHeadline)) || (headlines.length ? headlines.find((h) => sc.scenes.some((x) => sameStory(h.title, x.narration))) : null);
+    sc.sources = (used ? [used] : headlines.slice(0, 1)).map((h) => `${h.title} (${h.source})`);
+    return sc;
+  };
+  if (!CFG.offline && !LLM.hasKeys) throw new PipelineError('script_failed', 'No Gemini or Groq API key was provided to the runner.');
   if (!CFG.offline) {
-    log(`OpenRouter: ${orKeys.length} key(s) available, starting with ${tail(liveKeys()[0] || '????')}.`);
-    for (const model of models) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
+    log(`Script writer: ${CFG.geminiKeys.length} Gemini key(s) → ${CFG.groqKeys.length} Groq key(s) as fallback.`);
+    const t0 = Date.now();
+    for await (const a of LLM.attempts({
+      system,
+      user: prompt,
+      saferUser: saferScriptPrompt(prompt),
+      temperature: CFG.category === 'stories' ? 0.95 : 0.7,
+      maxTokens: IS_SHORTS ? 6000 : 10000,
+      json: true,
+      timeoutMs: 100000
+    })) {
+      const label = `${a.provider}/${a.model}`;
+      try {
+        const parsed = extractJson(a.text);
+        let script: Script;
         try {
-          const body: any = {
-            model: model.id,
-            temperature: CFG.category === 'stories' ? 0.95 : 0.7,
-            max_tokens: IS_SHORTS ? 3000 : 6000,
-            messages: [
-              { role: 'system', content: 'You are an award-winning short-form video writer and director. Your videos have strong hooks, make complete sense, and keep viewers watching to the last second. You answer with one valid JSON object and nothing else.' },
-              { role: 'user', content: safePrompt || prompt }
-            ]
-          };
-          if (model.jsonMode) body.response_format = { type: 'json_object' };
-          const res = await openrouterPost('/chat/completions', body, 150000);
-          const text = res.text;
-          if (res.status < 200 || res.status >= 300) {
-            const reason = openrouterReason(text);
-            lastError = `${model.id}: HTTP ${res.status || 'network'} ${reason}`;
-            if (res.status === 403) {
-              blockedCount++;
-              blockedReason = reason;
-              if (!safePrompt) {
-                // Moderation / guardrail flag: rewrite the request in softer words and retry.
-                safePrompt = saferScriptPrompt(prompt);
-                log(`OpenRouter blocked the request on ${model.id} (${reason}) — retrying with a toned-down prompt.`);
-                continue;
-              }
-              log(`OpenRouter blocked the request on ${model.id} again (${reason}) — trying the next model.`);
-              break;
-            }
-            log(`OpenRouter ${lastError} — trying the next model.`);
-            break; // try the next model straight away
-          }
-          const data = JSON.parse(text);
-          const msg = data?.choices?.[0]?.message || {};
-          const content = String(msg.content || msg.reasoning || '');
-          const parsed = extractJson(content);
-          let script: Script;
+          script = normaliseScript(parsed, label);
+        } catch (validation: any) {
           try {
-            script = normaliseScript(parsed, model.id);
-          } catch (validation: any) {
-            // Keep a slightly-short but well-formed script as a fallback candidate.
-            try {
-              const near = normaliseScript(parsed, model.id, true);
-              const words = near.scenes.reduce((n, s) => n + s.narration.split(' ').length, 0);
-              if (!nearMiss || words > nearMiss.words) nearMiss = { script: near, words };
-            } catch {}
-            throw validation;
-          }
-          script.sources = headlines.slice(0, 3).map((h) => `${h.title} (${h.source})`);
-          log(`Script by ${model.id}: "${script.title}" — ${script.scenes.length} scenes, ${script.scenes.reduce((n, s) => n + s.narration.split(' ').length, 0)} words, ${script.scenes.reduce((n, s) => n + s.cues.length, 0)} performance cues.`);
-          return script;
-        } catch (err: any) {
-          if (err instanceof PipelineError) throw err;
-          if (err instanceof AllKeysRejected) {
-            throw new PipelineError('script_failed', `${err.message} Add a working key in the app's OPENROUTER_API_KEYS setting (openrouter.ai/keys).`);
-          }
-          lastError = `${model.id}: ${err?.message}`;
-          log(`Script attempt ${attempt} with ${model.id} failed — ${err?.message}`);
+            const near = normaliseScript(parsed, label, true);
+            const words = near.scenes.reduce((n, x) => n + x.narration.split(' ').length, 0);
+            if (!nearMiss || words > nearMiss.words) nearMiss = { script: near, words };
+          } catch {}
+          throw validation;
         }
+        withSources(script);
+        log(`Script by ${label} in ${((Date.now() - t0) / 1000).toFixed(1)}s: "${script.title}" — ${script.scenes.length} scenes, ${script.scenes.reduce((n, x) => n + x.narration.split(' ').length, 0)} words, ${script.scenes.reduce((n, x) => n + x.cues.length, 0)} performance cues.`);
+        return script;
+      } catch (err: any) {
+        lastError = `${label}: ${err?.message}`;
+        log(`${label} answered but the script was unusable (${err?.message}) — asking the next model.`);
       }
     }
+    if (!lastError) lastError = LLM.lastErrors.slice(-3).join(' | ') || 'no model answered';
   } else {
     lastError = 'offline test mode';
   }
   if (nearMiss) {
     log(`Using the best AI script (${nearMiss.words} words — a little shorter than asked) from ${nearMiss.script.model}.`);
-    nearMiss.script.sources = headlines.slice(0, 3).map((h) => `${h.title} (${h.source})`);
-    return nearMiss.script;
+    return withSources(nearMiss.script);
   }
-  if (blockedCount && blockedReason) lastError = `OpenRouter's safety filter blocked ${blockedCount} request(s): ${blockedReason}; last: ${lastError}`;
   log(`⚠️ AI script generation failed (${lastError}).`);
   return { ...templateScript(), aiError: lastError };
 }
@@ -809,23 +692,24 @@ function templateScript(): Script {
     const tagged = parseTaggedNarration(narration);
     return { narration: tagged.text, cues: tagged.cues, shot, emotion, imagePrompt, searchQuery };
   };
+  const nora = 'Nora, a woman in her thirties with short dark hair and a yellow raincoat';
   return {
     title: `The Lighthouse Signal (Part ${CFG.partNumber})`,
     description: 'An episodic mystery told in parts. What would you do next?',
     hashtags: ['scarystories', 'mystery', 'storytime'],
     tags: ['scary story', 'mystery story', 'lighthouse'],
     visualStyle: 'dark cinematic film still, cold blue shadows, 35mm, moody lighting',
-    characters: 'a woman in her thirties with short dark hair and a yellow raincoat',
+    characters: nora,
     usedFallbackTemplate: true,
     scenes: [
-      s('[serious] For seventy years, nobody has kept the lighthouse on Blackwood Point. [surprised] Tonight, its light came on.', 'scene', 'tense', 'an old stone lighthouse on a cliff at night, its lamp glowing blue through thick fog', 'lighthouse fog night'),
-      s('[worried] I walked up the cliff path with a flashlight [look_left] and a very bad feeling.', 'scene', 'tense', 'a woman with a flashlight walking up a foggy cliff path at night', 'foggy cliff path night'),
-      s('[serious] The rusted door was already open. [lean_in] The air inside smelled of salt and old stone.', 'scene', 'scared', 'a rusted iron door hanging open at the base of a lighthouse, darkness inside', 'old rusted door dark'),
-      s('[worried] On the spiral stairs, [look_image] I found footprints. Fresh. Still wet. [scared] Going up.', 'panel', 'scared', 'wet footprints on old stone spiral stairs lit by a flashlight beam', 'spiral staircase stone'),
-      s('[scared] Every step I climbed echoed twice, [look_up] as if someone above me was climbing too.', 'scene', 'scared', 'looking up a narrow spiral staircase into darkness, flashlight beam', 'spiral staircase looking up'),
-      s('[surprised] At the top, the great glass lens was turning on its own, humming like it was alive.', 'full', 'shocked', 'a huge glowing lighthouse lens turning in a dark lantern room', 'lighthouse lens'),
-      s('[serious] And scratched into the glass, in fresh sharp letters, was today\'s date. [scared] And my name.', 'full', 'shocked', 'letters scratched into glass, close up, eerie blue light', 'scratched glass close up'),
-      s('[worried] Someone knew I would come. [calm] Part two tomorrow. [curious] Would you have gone up those stairs?', 'scene', 'tense', 'a woman frozen in a dark lantern room, blue light on her face', 'woman dark room blue light')
+      s('[serious] For seventy years, nobody had kept the lighthouse on Blackwood Point. [surprised] Then one night, its light came on.', 'scene', 'tense', 'an old stone lighthouse on a cliff at night, its lamp glowing blue through thick fog', 'lighthouse fog night'),
+      s('[worried] This is the story of Nora, [look_left] the only person in town who went up to look.', 'scene', 'tense', `${nora} walking up a foggy cliff path at night with a flashlight`, 'foggy cliff path night'),
+      s('[serious] The rusted door was already open. [lean_in] Inside, the air smelled of salt and old stone.', 'scene', 'scared', 'a rusted iron door hanging open at the base of a lighthouse, darkness inside', 'old rusted door dark'),
+      s('[worried] On the spiral stairs, [point] Nora found footprints. Fresh. Still wet. [scared] Going up.', 'panel', 'scared', 'wet footprints on old stone spiral stairs lit by a flashlight beam', 'spiral staircase stone'),
+      s('[scared] Every step she climbed echoed twice, [look_up] as if someone above her was climbing too.', 'scene', 'scared', `${nora} looking up a narrow spiral staircase into darkness, flashlight beam`, 'spiral staircase looking up'),
+      s('[surprised] At the top, the great glass lens was turning on its own, [hands_up] humming like it was alive.', 'full', 'shocked', 'a huge glowing lighthouse lens turning in a dark lantern room', 'lighthouse lens'),
+      s('[serious] Scratched into the glass, in fresh sharp letters, was that night\'s date. [scared] And Nora\'s name.', 'full', 'shocked', 'letters scratched into glass, close up, eerie blue light', 'scratched glass close up'),
+      s('[worried] Someone knew she would come. [calm] Part two is next. [curious] Would you have climbed those stairs? [wave]', 'scene', 'tense', `${nora} frozen in a dark lantern room, blue light on her face`, 'woman dark room blue light')
     ]
   };
 }
@@ -1142,6 +1026,19 @@ async function stockImage(query: string, file: string): Promise<'stock' | null> 
   return null;
 }
 
+/** The fixed look of every named character who appears in this scene (keeps people consistent across images). */
+function castFor(script: Script, scene: Scene): string {
+  if (!script.characters) return '';
+  const parts = script.characters.split(/[;\n]+|\.\s+(?=[A-Z][a-z]+[:,( ])/).map((x) => x.trim()).filter(Boolean);
+  const text = `${scene.imagePrompt} ${scene.narration}`.toLowerCase();
+  const hits = parts.filter((p) => {
+    const name = (p.match(/^([A-Z][a-zA-Z'-]+)/) || [])[1];
+    return name ? text.includes(name.toLowerCase()) : false;
+  });
+  if (hits.length) return `Characters: ${hits.join('; ')}`;
+  return CFG.category === 'stories' && parts.length === 1 && /\b(she|he|her|his|they)\b/.test(text) ? `Character: ${parts[0]}` : '';
+}
+
 async function gatherImages(script: Script): Promise<{ files: (string | null)[]; aiCount: number }> {
   const style = script.visualStyle || (CFG.category === 'cooking' ? 'professional food photography, natural light, shallow depth of field' : 'cinematic film still, dramatic lighting, 35mm');
   const realPhotosFirst = CFG.category === 'tech' || CFG.category === 'news';
@@ -1162,7 +1059,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
       if (await toJpeg(path.join(testDir!, testImages[i % testImages.length]), out)) files[i] = out;
       return;
     }
-    const prompt = [s.imagePrompt || s.narration, script.characters && CFG.category === 'stories' ? `Characters: ${script.characters}` : '', style, 'no text, no watermark, no captions'].filter(Boolean).join('. ');
+    const prompt = [s.imagePrompt || s.narration, castFor(script, s), CFG.category === 'stories' ? `The moment: ${s.narration.slice(0, 220)}` : '', style, 'photorealistic detail, no text, no watermark, no captions'].filter(Boolean).join('. ');
     const order = realPhotosFirst ? ['stock', 'ai'] : ['ai', 'stock'];
     for (const source of order) {
       if (Date.now() > deadline) break;
@@ -1178,7 +1075,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
   if (realPhotosFirst || CFG.pollinationsKey || CFG.nvidiaKey) {
     // Stock searches and keyed AI (NVIDIA / Pollinations key) run in parallel.
     const queue = script.scenes.map((_, i) => i);
-    await Promise.all(Array.from({ length: 3 }, async () => { while (queue.length) await fetchOne(queue.shift()!); }));
+    await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await fetchOne(queue.shift()!); }));
   } else {
     // Anonymous AI images are rate-limited: go in order so early scenes are ready first.
     for (let i = 0; i < script.scenes.length; i++) await fetchOne(i);
@@ -1205,49 +1102,6 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
 // ---------------------------------------------------------------------------
 // 4. Character rig from the app (the character designed in the editor)
 // ---------------------------------------------------------------------------
-const MIME_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/svg+xml': 'svg' };
-
-async function fetchRig(): Promise<{ rig: any; assetDir: string } | null> {
-  const res = await appRequest('GET', `${campaignPath()}/rig`, undefined, 30000);
-  if (!res || res.status !== 200 || !res.data?.rig) {
-    log(res?.status === 404
-      ? 'No character uploaded for this automation yet — using the default presenter. (Open the automation\'s project in the app once; your character uploads automatically.)'
-      : `Could not load this automation's character (${res ? `HTTP ${res.status}` : 'app unreachable'}) — using the default presenter.`);
-    return null;
-  }
-  const assetDir = path.join(WORK_DIR, 'rig');
-  fs.mkdirSync(assetDir, { recursive: true });
-  const ids: string[] = Array.isArray(res.data.assets) ? res.data.assets : [];
-  const urlFor = new Map<string, string>();
-  let failed = 0;
-  const queue = [...ids];
-  await Promise.all(Array.from({ length: 6 }, async () => {
-    while (queue.length) {
-      const id = queue.shift()!;
-      try {
-        const r = await fetch(`${CFG.appUrl}/api/automation/assets/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(60000) });
-        if (!r.ok) { failed++; continue; }
-        const mime = (r.headers.get('content-type') || 'image/png').split(';')[0];
-        const name = `${id}.${MIME_EXT[mime] || 'png'}`;
-        fs.writeFileSync(path.join(assetDir, name), Buffer.from(await r.arrayBuffer()));
-        urlFor.set(id, `/rig/${name}`);
-      } catch { failed++; }
-    }
-  }));
-  if (failed > ids.length * 0.2) {
-    log(`⚠️ ${failed}/${ids.length} character images could not be downloaded — using the default presenter.`);
-    return null;
-  }
-  const resolve = (v: any): any => {
-    if (typeof v === 'string' && v.startsWith('asset:')) return urlFor.get(v.slice(6)) || null;
-    if (Array.isArray(v)) return v.map(resolve);
-    if (v && typeof v === 'object') { const o: any = {}; for (const k of Object.keys(v)) o[k] = resolve(v[k]); return o; }
-    return v;
-  };
-  log(`Character rig: ${ids.length} images, ${res.data.rig.characters?.length || 0} character(s).`);
-  return { rig: resolve(res.data.rig), assetDir };
-}
-
 // ---------------------------------------------------------------------------
 // 5. Render in headless Chrome with the app's engine (falls back to FFmpeg)
 // ---------------------------------------------------------------------------
@@ -1302,7 +1156,7 @@ function audioArgs(narration: string, music: string | null, firstInput: number):
 
 async function renderWithStage(opts: {
   narration: Narration; scenes: Scene[]; times: { start: number; end: number }[]; cues: { t: number; tag: string }[]; images: (string | null)[];
-  title: string; badge: string; endCard: string; rig: any | null; music: string | null; duration: number;
+  title: string; badge: string; endCard: string; music: string | null; duration: number;
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const chrome = findChrome();
   if (!chrome) return { ok: false, character: 'none', reason: 'Chrome not found on the runner' };
@@ -1310,14 +1164,6 @@ async function renderWithStage(opts: {
   if (!fs.existsSync(stageJs)) return { ok: false, character: 'none', reason: 'stage.js missing' };
 
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
-  const avatarBase = `/avatar/${CFG.gender}`;
-  // The default presenter ships as one JSON pack per gender: {manifest, images: {file: dataURL}}.
-  const avatarPack = JSON.parse(fs.readFileSync(path.join(HERE, 'assets', `avatar-${CFG.gender}.json`), 'utf8'));
-  const manifest = avatarPack.manifest;
-  const avatarImages: Record<string, Buffer> = {};
-  for (const [file, dataUrl] of Object.entries(avatarPack.images as Record<string, string>)) {
-    avatarImages[file] = Buffer.from(String(dataUrl).replace(/^data:[^,]+,/, ''), 'base64');
-  }
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
   const job = {
     width: W, height: H, fps: FPS, duration: opts.duration, category: CFG.category,
@@ -1327,8 +1173,10 @@ async function renderWithStage(opts: {
     wordsReliable: opts.narration.wordsReliable,
     segments: opts.scenes.map((s, i) => ({ start: opts.times[i].start, end: opts.times[i].end, text: s.narration, image: opts.images[i] ? `/img/${path.basename(opts.images[i]!)}` : null, shot: s.shot, emotion: s.emotion })),
     cues: opts.cues,
-    rig: opts.rig,
-    defaultAvatar: { base: avatarBase, manifest },
+    // The presenter: the CSS character spec designed in the app (the stage draws it).
+    characterSpec: CFG.characterSpec,
+    gender: CFG.gender,
+    format: CFG.format,
     fontUrl: '/font/Poppins-Bold.ttf'
   };
 
@@ -1367,15 +1215,7 @@ async function renderWithStage(opts: {
       if (p === '/stage.js') return serveFile(res, stageJs);
       if (p === '/job.json') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(job)); return; }
       if (p === '/font/Poppins-Bold.ttf') return serveFile(res, path.join(HERE, 'assets/fonts/Poppins-Bold.ttf'));
-      if (p.startsWith(`${avatarBase}/`)) {
-        const img = avatarImages[path.basename(p)];
-        if (!img) { res.writeHead(404); res.end(); return; }
-        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
-        res.end(img);
-        return;
-      }
       if (p.startsWith('/img/')) return serveFile(res, path.join(WORK_DIR, path.basename(p)));
-      if (p.startsWith('/rig/')) return serveFile(res, path.join(WORK_DIR, 'rig', path.basename(p)));
       if (p.startsWith('/audio/narration')) return serveFile(res, opts.narration.audioPath);
       res.writeHead(404); res.end(); return;
     }
@@ -1405,7 +1245,7 @@ async function renderWithStage(opts: {
           reportStatus('running', `4/5 Rendering the video (${pct}%)`, Math.round(60 + pct * 0.25), '');
         }
       } else if (p === '/done') {
-        finished?.({ ok: true, character: msg.character === 'app' ? `your editor character${msg.heads ? '' : ' (no head group found: face animates, head does not tilt)'}` : `default presenter${msg.note ? ` — ${msg.note}` : ''}` });
+        finished?.({ ok: true, character: msg.character });
       } else if (p === '/fail') {
         finished?.({ ok: false, reason: msg.error || 'stage failed' });
       }
@@ -1563,6 +1403,7 @@ async function main() {
 
   let pastStory = CFG.previousScript ? `PART ${CFG.partNumber - 1}:\n${CFG.previousScript}` : '';
   let pastTitles: string[] = [];
+  let pastSources: string[] = [];
   if (CFG.campaignId && CFG.appUrl) {
     const camp = await appRequest('GET', campaignPath());
     if (camp?.status === 404) { log('This automation was deleted in the app — nothing to do.'); return 0; }
@@ -1575,6 +1416,10 @@ async function main() {
     const hist = await appRequest('GET', `${campaignPath()}/history`);
     const episodes: any[] = Array.isArray(hist?.data?.storyHistory) ? hist!.data.storyHistory : [];
     pastTitles = episodes.map((e) => String(e.title || '')).filter(Boolean);
+    pastSources = [
+      ...episodes.flatMap((e) => (Array.isArray(e.sources) ? e.sources : [])),
+      ...(Array.isArray(hist?.data?.usedHeadlines) ? hist!.data.usedHeadlines : [])
+    ].map((x: any) => String(x || '')).filter(Boolean);
     if (CFG.category === 'stories' && episodes.length) {
       pastStory = episodes.filter((e) => Number(e.partNumber) < CFG.partNumber).slice(-4)
         .map((e) => `PART ${e.partNumber} — ${e.title}:\n${String(e.script || '').slice(0, 1600)}`).join('\n\n') || pastStory;
@@ -1589,10 +1434,10 @@ async function main() {
   }
 
   // 1. Script
-  const script = await generateScript(pastStory, pastTitles);
+  const script = await generateScript(pastStory, pastTitles, pastSources);
   if (script.usedFallbackTemplate && !CFG.allowFallbackPublish) {
     // Keys work but every free model was busy / rate-limited / filtered: retry later (no pause).
-    throw new PipelineError('script_retry', `No free AI model produced a script this time (${script.aiError || 'unknown error'}). Your OpenRouter keys are fine; nothing was posted and the next attempt runs automatically.`);
+    throw new PipelineError('script_retry', `No free AI model produced a script this time (${script.aiError || 'unknown error'}). Nothing was posted; the next attempt runs automatically with the next free model/key.`);
   }
   const fullText = script.scenes.map((s) => s.narration).join(' ');
   await reportStatus('running', '2/5 Recording the voice-over', 22, `Script ready: "${script.title}" (${script.scenes.length} scenes${script.model ? `, ${script.model}` : ''}).`);
@@ -1610,15 +1455,16 @@ async function main() {
   await reportStatus('running', '3/5 Finding an image for every scene', 38, `Voice-over recorded (${narration.duration.toFixed(0)}s, ${narration.engine}).`);
 
   // 3. Images, character rig, music
-  const [{ files: images, aiCount }, rigData, music] = await Promise.all([imagesPromise, fetchRig(), findMusic()]);
-  await reportStatus('running', '4/5 Rendering the video', 58, `${images.filter(Boolean).length} scene images ready; character: ${rigData ? 'from the editor' : 'default presenter'}.`);
+  const [{ files: images, aiCount }, music] = await Promise.all([imagesPromise, findMusic()]);
+  const presenter = CFG.characterSpec ? `${CFG.characterSpec.name || 'custom'} (designed in the app)` : `default ${CFG.gender} presenter`;
+  await reportStatus('running', '4/5 Rendering the video', 58, `${images.filter(Boolean).length} scene images ready; character: ${presenter}.`);
 
   // 4. Render
   const badge = CFG.category === 'stories' ? `PART ${CFG.partNumber}${CFG.subGenre ? ` · ${CFG.subGenre.toUpperCase()}` : ''}`
     : CFG.category === 'cooking' ? 'RECIPE' : CFG.category === 'tech' ? 'TECH' : CFG.category === 'news' ? 'NEWS' : CFG.category.toUpperCase();
   const endCard = CFG.category === 'stories' ? `Part ${CFG.partNumber + 1} next — follow!` : 'Follow for more';
   const title = script.title.replace(/\s*\(part \d+\)\s*$/i, '');
-  const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, rig: rigData?.rig || null, music, duration });
+  const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration });
   let characterMode = stage.character;
   if (!stage.ok) {
     log(`⚠️ Character renderer unavailable (${stage.reason}). Rendering scenes + captions without the character.`);
@@ -1664,14 +1510,15 @@ async function main() {
     youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published,
     privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
     usedFallbackTemplate: script.usedFallbackTemplate, voice: narration.engine, character: characterMode,
-    durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl
+    durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl,
+    sources: script.sources || [], model: script.model || ''
   });
   if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) {
     console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
   await reportStatus('completed', published ? 'Published to YouTube' : 'Video rendered', 100,
-    (published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`) + ` Character: ${characterMode}.`,
+    published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
     { youtubeUrl: published?.url || '' });
   log(`Done in ${secs}s.`);
   return 0;

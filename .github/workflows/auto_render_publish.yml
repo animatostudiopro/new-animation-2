@@ -116,8 +116,8 @@ jobs:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           # Optional: better / faster scene images.
           POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
