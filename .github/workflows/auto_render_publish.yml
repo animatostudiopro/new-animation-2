@@ -23,8 +23,13 @@ on:
       category:
         description: Content category
         type: choice
-        options: [stories, cooking, tech]
+        options: [stories, cooking, tech, news]
         default: stories
+      format:
+        description: Publish as a YouTube Short (vertical) or a regular video (landscape)
+        type: choice
+        options: [shorts, video]
+        default: shorts
       topic:
         description: Topic / prompt (optional)
         type: string
@@ -64,7 +69,7 @@ jobs:
   render_and_publish:
     name: Render & publish
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -88,6 +93,21 @@ jobs:
           ffmpeg -hide_banner -version | head -n 1
           edge-tts --help > /dev/null && echo "edge-tts ready"
 
+      - name: Check Chrome (draws the animated character)
+        run: |
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$CHROME" ]; then
+            echo "Chrome is not preinstalled on this runner - installing Chrome for Testing"
+            npx --yes @puppeteer/browsers@2 install chrome@stable --path "$HOME/.cache/puppeteer" > chrome-install.log 2>&1 || cat chrome-install.log
+            CHROME="$(find "$HOME/.cache/puppeteer/chrome" -path '*chrome-linux64/chrome' -type f 2>/dev/null | head -n 1)"
+          fi
+          if [ -n "$CHROME" ]; then
+            echo "CHROME_PATH=$CHROME" >> "$GITHUB_ENV"
+            "$CHROME" --version || true
+          else
+            echo "::warning::Chrome is unavailable - the video will render without the animated character."
+          fi
+
       - name: Render & publish episode
         env:
           # Secrets come from the app's dispatch payload (read inside the script
@@ -97,6 +117,10 @@ jobs:
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Optional: better / faster scene images.
+          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: node --experimental-strip-types animato-cloud/renderer.mts
 
       - name: Keep the rendered video as a run artifact
