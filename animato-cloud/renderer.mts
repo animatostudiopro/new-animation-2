@@ -102,7 +102,7 @@ const CFG = {
     [AUTH.openrouter_api_keys, AUTH.openrouter_api_key, ENV.OPENROUTER_API_KEYS, ENV.OPENROUTER_API_KEY]
       .flatMap((v) => (Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)))
       .map((k) => String(k).trim())
-      .filter((k) => k.length > 20)
+      .filter((k) => k.length > 8)
   )) as string[],
   nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
   openrouterModels: pick(JOB.models, ENV.OPENROUTER_MODELS, ENV.OPENROUTER_MODEL),
@@ -420,6 +420,10 @@ async function openrouterPost(route: string, body: any, timeoutMs: number): Prom
       log(`OpenRouter key ${tail(key)} ${res.status === 402 ? 'has no credit' : 'was rejected'} (HTTP ${res.status}) — switching to the next key (${liveKeys().length} left).`);
       continue;
     }
+    if (res.status === 429 && /upstream|provider|temporarily/i.test(text)) {
+      // The model itself is busy for everyone; another key will not help — try the next model.
+      return last;
+    }
     if (res.status === 429 && ++limited <= 4) {
       log(`OpenRouter key ${tail(key)} is rate-limited — trying the next key.`);
       continue;
@@ -680,10 +684,11 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
           const res = await openrouterPost('/chat/completions', body, 150000);
           const text = res.text;
           if (res.status < 200 || res.status >= 300) {
-            lastError = `${model.id}: HTTP ${res.status || 'network'} ${text.slice(0, 180)}`;
-            log(`OpenRouter ${lastError}`);
-            if (res.status === 429) await sleep(3000);
-            break; // try the next model
+            let reason = text.slice(0, 180);
+            try { const e = JSON.parse(text); reason = String(e?.error?.metadata?.raw || e?.error?.message || e?.raw || reason).slice(0, 180); } catch {}
+            lastError = `${model.id}: HTTP ${res.status || 'network'} ${reason}`;
+            log(`OpenRouter ${lastError} — trying the next model.`);
+            break; // try the next model straight away
           }
           const data = JSON.parse(text);
           const msg = data?.choices?.[0]?.message || {};
@@ -803,6 +808,8 @@ function alignWords(boundaries: Word[], script: string): Word[] {
   return out;
 }
 
+let LAST_TTS_ERROR = '';
+
 async function synthesizeNarration(script: string): Promise<Narration> {
   const text = cleanForSpeech(script);
   const textFile = path.join(WORK_DIR, 'script.txt');
@@ -810,12 +817,21 @@ async function synthesizeNarration(script: string): Promise<Narration> {
   const python = ENV.PYTHON || 'python3';
   const voices = (VOICES[CFG.gender][CFG.category] || VOICES[CFG.gender].default);
 
+  let lastTtsError = '';
   if (!CFG.offline) {
-    for (const voice of voices) {
+    // Each voice at the category's pace, then at normal pace; short pause between
+    // attempts so a transient Edge TTS hiccup does not cost the run.
+    const attempts: { voice: string; rate: string }[] = [];
+    for (const voice of voices) attempts.push({ voice, rate: RATE[CFG.category] || '+0%' });
+    attempts.push({ voice: voices[0], rate: '+0%' }, { voice: voices[1] || voices[0], rate: '+0%' });
+    for (let a = 0; a < attempts.length; a++) {
+      const { voice, rate } = attempts[a];
+      if (a > 0) await sleep(Math.min(8000, 2000 * a));
       const mp3 = path.join(WORK_DIR, 'narration.mp3');
       const wordsFile = path.join(WORK_DIR, 'words.json');
       for (const f of [mp3, wordsFile]) { try { fs.unlinkSync(f); } catch {} }
-      const r = await run(python, [path.join(HERE, 'tts.py'), '--text-file', textFile, '--voice', voice, '--rate', RATE[CFG.category] || '+0%', '--out-audio', mp3, '--out-words', wordsFile], { timeoutMs: 180000 });
+      // "--rate=-3%" (with "="): a value starting with "-" would otherwise be read as a new option.
+      const r = await run(python, [path.join(HERE, 'tts.py'), `--text-file=${textFile}`, `--voice=${voice}`, `--rate=${rate}`, `--out-audio=${mp3}`, `--out-words=${wordsFile}`], { timeoutMs: 180000 });
       const duration = fs.existsSync(mp3) ? await probeDuration(mp3) : 0;
       if (r.code === 0 && duration > 2) {
         let words: Word[] = [];
@@ -831,9 +847,11 @@ async function synthesizeNarration(script: string): Promise<Narration> {
         log(`Narration: ${voice}, ${duration.toFixed(1)}s, ${words.length} timed words${reliable ? '' : ' (estimated)'}.`);
         return { audioPath: mp3, duration, words, wordsReliable: reliable, engine: `edge-tts:${voice}`, neural: true };
       }
-      log(`edge-tts with ${voice} failed (exit ${r.code}): ${r.stderr.trim().split('\n').slice(-2).join(' | ')}`);
+      lastTtsError = r.stderr.trim().split('\n').filter(Boolean).slice(-2).join(' | ') || `exit ${r.code}`;
+      log(`edge-tts with ${voice} (${rate}) failed (exit ${r.code}): ${lastTtsError}`);
     }
   }
+  LAST_TTS_ERROR = lastTtsError;
 
   // Offline fallback: ffmpeg's built-in flite voice.
   const wav = path.join(WORK_DIR, 'narration_flite.wav');
@@ -915,8 +933,26 @@ const NVIDIA_MODELS = [
   { id: 'black-forest-labs/flux.1-schnell', body: { mode: 'base', cfg_scale: 0, steps: 4, samples: 1 } }
 ];
 
+/** Tone a prompt down for safety filters (horror/crime scenes) while keeping the scene. */
+function softenPrompt(p: string): string {
+  const swaps: [RegExp, string][] = [
+    [/\b(blood(y|ied)?|gore|gory|guts|wound(s|ed)?|bleeding)\b/gi, 'dark stains'],
+    [/\b(corpse|dead body|body bag|cadaver|remains)\b/gi, 'silhouette'],
+    [/\b(murder(ed|er|ing)?|kill(ed|er|ing|s)?|slaughter(ed)?|stab(bed|bing)?|strangl(ed|ing))\b/gi, 'mystery'],
+    [/\b(knife|knives|gun|pistol|rifle|weapon|axe|machete)\b/gi, 'shadowy object'],
+    [/\b(demon(ic)?|possessed|satanic|occult)\b/gi, 'eerie'],
+    [/\b(naked|nude|undressed)\b/gi, 'dressed'],
+    [/\b(scream(ing|ed)?|terrified|horrif(ied|ying)|gruesome|disturbing)\b/gi, 'tense'],
+    [/\b(child|girl|boy|kid)\b/gi, 'person']
+  ];
+  let out = p;
+  for (const [re, to] of swaps) out = out.replace(re, to);
+  return `${out}. Atmospheric, suspenseful, tasteful, no violence, no gore, cinematic lighting`;
+}
+
 async function nvidiaImage(prompt: string, seed: number, file: string): Promise<boolean> {
   if (!CFG.nvidiaKey || nvidiaDisabled) return false;
+  let softened = false;
   const shaped = orientation === 'portrait' ? { width: 768, height: 1344 } : orientation === 'landscape' ? { width: 1344, height: 768 } : { width: 1024, height: 1024 };
   for (const model of NVIDIA_MODELS) {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -927,7 +963,7 @@ async function nvidiaImage(prompt: string, seed: number, file: string): Promise<
         res = await fetch(`${CFG.nvidiaBase}/${model.id}`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${CFG.nvidiaKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ prompt: (prompt + framing).slice(0, 2000), ...size, seed: seed % 4294967295, ...model.body }),
+          body: JSON.stringify({ prompt: ((softened ? softenPrompt(prompt) : prompt) + framing).slice(0, 2000), ...size, seed: seed % 4294967295, ...model.body }),
           signal: AbortSignal.timeout(120000)
         });
       } catch (err: any) {
@@ -958,6 +994,11 @@ async function nvidiaImage(prompt: string, seed: number, file: string): Promise<
       const b64 = art?.base64 || data?.image || data?.b64_json || data?.data?.[0]?.b64_json;
       const finish = String(art?.finishReason || art?.finish_reason || data?.finish_reason || 'SUCCESS').toUpperCase();
       if (!b64 || (finish !== 'SUCCESS' && finish !== 'STOP')) {
+        if (/FILTER|SAFETY|MODERAT|BLOCK/.test(finish) && !softened) {
+          softened = true; // retry this model with a toned-down prompt
+          log(`NVIDIA ${model.id}: prompt filtered — retrying with a softer wording.`);
+          continue;
+        }
         log(`NVIDIA ${model.id}: no image (${finish}).`);
         break;
       }
@@ -1482,7 +1523,7 @@ async function main() {
   const imagesPromise = gatherImages(script);
   const narration = await synthesizeNarration(fullText);
   if (!narration.neural && CFG.autoPost && !CFG.allowFallbackPublish) {
-    throw new PipelineError('tts_failed', 'The neural voice service (Microsoft Edge TTS) was unreachable from GitHub, so only a robotic fallback voice was available. Nothing was posted; the next run will retry.');
+    throw new PipelineError('tts_failed', `The neural voice (Microsoft Edge TTS) failed on every voice and retry, so only a robotic fallback voice was available. Nothing was posted; the next run will retry automatically. Last error: ${LAST_TTS_ERROR.slice(0, 300) || 'unknown'}`);
   }
   const duration = +(narration.duration + (CFG.category === 'stories' ? 1.6 : 1.2)).toFixed(3);
   const times = timeScenes(script.scenes, narration.words, duration);
