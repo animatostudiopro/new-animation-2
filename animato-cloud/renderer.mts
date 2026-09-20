@@ -119,6 +119,13 @@ const CFG = {
   groqModels: listOf(pick(JOB.groq_models, ENV.GROQ_MODELS)),
   nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
   characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
+  // Story arcs: every story is told in at most 3 parts and then finished for good.
+  arcParts: Math.max(1, parseInt(pick(JOB.arc_parts, '3'), 10) || 3),
+  storyPremise: pick(JOB.story_premise),
+  storyCharacters: pick(JOB.story_characters),
+  storyTitle: pick(JOB.story_title),
+  adBrief: pick(JOB.ad_brief),
+  adImages: String(pick(JOB.ad_images) || '').split(',').map((x) => x.trim()).filter(Boolean),
   usedHeadlines: String(pick(JOB.used_headlines)).split('\n').map((x) => x.trim()).filter(Boolean),
   pollinationsKey: pick(AUTH.pollinations_key, ENV.POLLINATIONS_API_KEY),
   pexelsKey: pick(AUTH.pexels_key, ENV.PEXELS_API_KEY),
@@ -246,7 +253,7 @@ const clampNum = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v)
 // ---------------------------------------------------------------------------
 /** A performance cue placed before the `index`-th spoken word of a scene. */
 interface Cue { index: number; tag: string }
-interface Scene { narration: string; shot: 'scene' | 'panel' | 'full'; emotion: string; imagePrompt: string; searchQuery: string; cues: Cue[] }
+interface Scene { narration: string; shot: 'scene' | 'panel' | 'full'; emotion: string; imagePrompt: string; searchQuery: string; cues: Cue[]; productShot?: boolean }
 
 // ---------------------------------------------------------------------------
 // Performance tags: the script writer places [tags] inside the narration right
@@ -384,6 +391,7 @@ interface Script {
   aiError?: string;
   sources?: string[];
   sourceHeadline?: string;
+  premise?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,34 +488,64 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
 - Scene 1 is the HOOK (max 14 words): the most useful or surprising thing it does for the viewer ("This free AI tool turns a photo into a 3D model in seconds.").
 - Then, tutorial style: WHAT it is (one line) → the problem it solves / who it helps → WHERE to get it (official website, app store or platform by name — never invent a URL) → HOW to use it in 3-5 concrete steps ("Open…", "Upload…", "Type a prompt like…", "Export…") → one pro tip → one honest limitation → a clear verdict.
 - Talk like a friendly expert showing a friend, not an ad. Never state a spec, price, date or feature that is not in the headlines or widely known.
+- Teach, don't announce: the viewer should finish knowing exactly what it does for THEM, where to find it and what to click first. Say the steps out loud ("[count] Step one: open…"), and react to what impresses you.
 - Use shot "panel" for most scenes: the presenter points at the image of the tool/step.
 - searchQuery: a real-photo query naming the actual product/company (e.g. "Pixel 10 Pro phone"). imagePrompt: a clean, modern illustration or UI-style screen of exactly that step (e.g. "a laptop screen showing an AI image generator with a prompt box, clean UI, soft studio light") — no brand logos, no readable text.${headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real AI tool and stay factual.'}`;
+    case 'ads': {
+      const brief = CFG.adBrief
+        ? `\nTHE PRODUCT (read from the advertiser's own PDF — use ONLY these facts, never invent a price, feature, claim or link):\n"""${CFG.adBrief.slice(0, 5000)}"""`
+        : '\nNo product document was provided: write a clean, honest teaser for the product named in the creator\'s direction and invent nothing.';
+      return `FORMAT: a short, honest product advert that viewers actually enjoy${sub}${topic}${brief}
+- Scene 1 is the HOOK (max 14 words): the problem the viewer has, or the single best thing this product does ("Your meeting notes write themselves now — here's how.").
+- Then: what it is in one line → who it's for → the 2-3 features that matter, each with the benefit in plain words → how to get it (the exact site, app store or plan named in the document) → the offer or price ONLY if the document states it → a clear call to action.
+- The presenter genuinely likes it and speaks from experience: warm, specific, never shouty, no fake urgency, no invented testimonials.
+- Use shot "panel" whenever the product is shown, and set "productShot": true on those scenes so the real product photo from the PDF is used.
+- imagePrompt (only for scenes without a product photo): a clean, modern advert visual of the product in use — bright studio or lifestyle setting, no text, no logos.`;
+    }
     case 'news':
       return `FORMAT: a 60-second news explainer${sub}${topic}${news}
 - Scene 1 is the HOOK: what happened, in max 14 words, in plain language.
 - Then: the key facts (who, what, where, when), why it matters to the viewer, and what happens next. Neutral, accurate, no speculation, no opinions.
 - It must be a story that is NOT in the list of previous video titles below.
-- Use shot "panel" for fact scenes; searchQuery must name the real place/person/organisation/event for a real news photo.${headlines.length ? '' : '\n- No headlines were available: explain one important, well-established recent development without inventing details.'}`;
+- Use shot "panel" for fact scenes; searchQuery must name the real place/person/organisation/event for a real news photo.
+- The presenter reacts like someone who has followed the story: a beat of surprise at the number that matters, [lean_in] for the human detail, [serious] for the consequence. Viewers must feel this really happened, not that a page is being read.
+- Close with what to watch for next and when.${headlines.length ? '' : '\n- No headlines were available: explain one important, well-established recent development without inventing details.'}`;
     default: {
-      const tone = /horror|suspense|scary/i.test(CFG.subGenre) ? 'slow-building dread, grounded realism, sensory detail (sounds, cold air, shadows); scary, never gory'
-        : /mystery/i.test(CFG.subGenre) ? 'a gripping mystery with clues the viewer can follow'
-        : /twist/i.test(CFG.subGenre) ? 'a clean setup, subtle misdirection and a twist that recontextualises everything'
+      const tone = /horror|suspense|scary/i.test(CFG.subGenre) ? 'village/small-town horror: slow dread, a real folk-evil or haunting, sensory detail (cold air, oil lamps, footsteps on sand), frightening but never gory'
+        : /mystery/i.test(CFG.subGenre) ? 'a gripping mystery with clues the viewer can follow and a fair, surprising answer'
+        : /twist/i.test(CFG.subGenre) ? 'a clean setup, quiet misdirection and a twist that recontextualises everything'
         : /love|romance/i.test(CFG.subGenre) ? 'warm, emotional, bittersweet and hopeful'
         : 'gripping, emotional, cinematic';
-      const cont = pastStory
-        ? `\nTHE STORY SO FAR:\n${pastStory}\nThis is Part ${CFG.partNumber}. Continue DIRECTLY from the last cliffhanger with the same characters (same names, same looks) and setting. No "previously on" recap; the hook itself pulls the viewer straight back in.`
-        : `\nThis is Part 1 of a series: introduce ONE protagonist with a first name and ONE gripping situation.`;
-      return `FORMAT: episodic short story told by a NARRATOR in the THIRD PERSON${sub}${topic}${cont}
-- The presenter is the storyteller, NEVER a character in the story. Tell it about the characters by name: "This is the story of Anna. She lived alone above an old bakery…", "Marcus had never believed in luck. Then…". Use he/she/they and names — never "I", "me" or "my" for the protagonist. The narrator may speak to the viewer ("you") only for suspense or the final question.
+      const part = CFG.partNumber, last = CFG.arcParts;
+      const known = CFG.storyPremise
+        ? `\nTHIS STORY (keep every name, place and fact exactly):\n${CFG.storyPremise}${CFG.storyCharacters ? `\nCharacters: ${CFG.storyCharacters}` : ''}${CFG.storyTitle ? `\nSeries title: ${CFG.storyTitle}` : ''}`
+        : '';
+      const cont = pastStory ? `\nWHAT HAPPENED IN THE EARLIER PARTS:\n${pastStory}` : '';
+      const arcStep = part <= 1
+        ? `PART 1 of ${last} — SET UP AND IGNITE.
+- Open on the protagonist by name in a specific, vivid place ("Anna sold roasted corn at the junction in Umuoka, a village where nobody walked after 9 p.m.").
+- Establish what they want, the ordinary rule of their world, and the ONE thing that breaks it.
+- End on the first real shock, so Part 2 is unmissable.`
+        : part >= last
+          ? `PART ${part} of ${last} — CLIMAX AND FULL ENDING.
+- Pay off everything: the truth is revealed, the protagonist acts, the wrongdoer faces the consequence, and the reader learns what happened to everyone.
+- NO cliffhanger, NO "part ${part + 1}", NO unanswered question. Close the story completely with a final line that lands (justice, a cost, a lesson, or a chilling last image).
+- Finish with one line inviting the viewer to the NEXT story on the channel.`
+          : `PART ${part} of ${last} — RAISE THE STAKES AND TURN.
+- Deepen the danger and reveal something that changes how the viewer reads Part 1 (who is really behind it, what the protagonist did, what is at stake).
+- The protagonist must DO something, fail or half-succeed, and end the part in worse trouble than they started.`;
+      return `FORMAT: a complete short story told by a NARRATOR in the THIRD PERSON — a real story with a plot, not a monologue${sub}${topic}${known}${cont}
+- The presenter is the storyteller and NEVER a character in it. Use names and he/she/they, never "I" for the protagonist.
+- The whole story runs for EXACTLY ${last} parts and this is part ${part}.
+${arcStep}
 - Tone: ${tone}.
-- Scene 1 is the HOOK (max 16 words): an impossible detail or burning question about the protagonist that makes scrolling away impossible ("Anna's sister died three years ago. Tonight, Anna's phone lit up with her name.").
-- Keep it engaging EVERY scene: open a question, pay it off, open a bigger one. Concrete sensory details, rising stakes, no filler, no summarising.
-- Structure: hook → quick setup (who, where, what feels wrong) → 2-4 escalating beats → a cliffhanger that raises one urgent question, teasing Part ${CFG.partNumber + 1}.
-- Short, spoken sentences, past tense. Every scene must move the story forward and make sense.
-- Use shot "scene" for most scenes, "full" for the 1-2 most dramatic reveals, "panel" only for a key object/clue close-up.
-- "characters": a fixed visual description of each named character (age, hair, clothes), reused in every imagePrompt that shows them.
-- imagePrompt: a cinematic film still of EXACTLY what that scene describes — who (named character + their fixed description), where (the specific place), what is happening at that moment, lighting, camera angle. No text in the image.
-- Title must end with "(Part ${CFG.partNumber})".`;
+- A story means: a named protagonist with a want, a specific place (village, compound, market, boarding school, church, city flat), other named people who do things, a wrongdoing or a threat, rising consequences, and a clear ending. Things must HAPPEN — dialogue-in-narration, actions, choices, consequences — never vague musing.
+- Scene 1 is the HOOK (max 16 words): one concrete, impossible-to-scroll-past fact about this story.
+- Every scene moves the plot: new information, a new action or a new consequence. No repetition, no filler, no summarising what was just said.
+- Short spoken sentences, past tense, plain words. Keep the viewer feeling it: sounds, smells, small physical details.
+${part >= last ? '- The title must NOT contain "(Part ...)" if the story ends here; instead make it the story\'s own title.' : `- Title must end with "(Part ${part})".`}
+- Also return "premise": 2-3 sentences of what this story is about, who is in it and what has happened so far (the next part is written from this), and "characters": each named person's fixed look (age, build, hair, clothes) for the pictures.
+- imagePrompt: describe the exact moment of that scene as a scene from an animated family film — WHO (named character + their fixed look), WHERE, WHAT is happening, the light and the camera angle.`;
     }
   }
 }
@@ -532,6 +570,7 @@ PERFORMANCE TAGS (the presenter is an animated character with a face, head, arms
 - Start EVERY scene with an emotion tag and change emotion whenever the feeling of the words changes, exactly like a real presenter. Use [laugh] only for genuinely funny moments and [crying] only for truly heartbreaking ones.
 - Example: "[serious] Heavy rain flooded the coast overnight. [point] This is Main Street this morning. [happy] But the good news? [nod] The weekend looks sunny." / tutorial: "[explain] First, open the app. [count] Step one: upload your photo."
 - Use 2-4 tags per scene overall, including a hand/body tag in most scenes; [point] or [look_image] whenever the words refer to what is on screen; [wave] in the first or last scene. Never use a tag that contradicts the words.
+- The presenter LIVES the story: react as a person telling it to a friend — [lean_in] for a secret, [hands_up] at a shock, [laugh] at something funny, [crying] at heartbreak, [shake_head] at something wrong, [fist] at injustice. A flat, unreacting delivery is a failure.
 
 YOUTUBE PACKAGING
 - "title": max 70 characters, curiosity + the main keyword, honest (no false clickbait), Title Case.
@@ -548,8 +587,9 @@ Return ONLY this JSON (no markdown):
   "visualStyle": "one consistent look for every image, e.g. 'dark cinematic film still, cold blue shadows, 35mm, moody practical lighting'",
   "characters": "fixed physical description of each recurring named person for consistent images (or empty)",
   "sourceHeadline": "the exact headline used (tech/news only, else empty)",
+  "premise": "stories only: 2-3 sentences — who this story is about, where, and everything that has happened so far",
   "scenes": [
-    { "narration": "[emotion] spoken words with [gesture] tags where they land", "shot": "scene|panel|full", "emotion": "main emotion of the scene", "imagePrompt": "...", "searchQuery": "3-6 word real-photo search query" }
+    { "narration": "[emotion] spoken words with [gesture] tags where they land", "shot": "scene|panel|full", "emotion": "main emotion of the scene", "imagePrompt": "...", "searchQuery": "3-6 word real-photo search query", "productShot": false }
   ]
 }`;
 }
@@ -580,6 +620,7 @@ function cleanHashtag(h: any): string {
 }
 
 const DEFAULT_TAGS: Record<string, string[]> = {
+  ads: ['productreview', 'tools', 'smallbusiness', 'tech'],
   stories: ['storytime', 'scarystories', 'horrorstory', 'creepy'],
   cooking: ['recipe', 'cooking', 'easyrecipe', 'foodie'],
   tech: ['tech', 'technews', 'gadgets', 'ai'],
@@ -598,7 +639,8 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
         shot: (['scene', 'panel', 'full'].includes(String(s?.shot)) ? s.shot : 'scene') as Scene['shot'],
         emotion: String(s?.emotion || 'neutral').toLowerCase().slice(0, 20),
         imagePrompt: String(s?.imagePrompt || s?.visual || '').trim().slice(0, 400),
-        searchQuery: String(s?.searchQuery || '').replace(/[^\w\s'-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80)
+        searchQuery: String(s?.searchQuery || '').replace(/[^\w\s'-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80),
+        productShot: s?.productShot === true || s?.product === true
       };
     })
     .filter((s: Scene) => s.narration.split(' ').length >= 3);
@@ -610,7 +652,11 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
   if (scenes.length > L.maxScenes) scenes.splice(L.maxScenes - 1, scenes.length - L.maxScenes);
   let title = String(parsed.title || '').replace(/[#"]/g, '').replace(/\s+/g, ' ').trim();
   if (!title) title = scenes[0].narration.slice(0, 60);
-  if (CFG.category === 'stories' && !/\(part \d+\)/i.test(title)) title = `${title.slice(0, 58)} (Part ${CFG.partNumber})`;
+  if (CFG.category === 'stories') {
+    title = title.replace(/\s*\(part \d+\)\s*$/i, '');
+    if (CFG.partNumber < CFG.arcParts) title = `${title.slice(0, 58)} (Part ${CFG.partNumber})`;
+    else if (CFG.arcParts > 1) title = `${title.slice(0, 52)} (Finale)`;
+  }
   let hashtags = Array.from(new Set((Array.isArray(parsed.hashtags) ? parsed.hashtags : []).map(cleanHashtag).filter((h: string) => h.length >= 3 && !/^(viral|fyp|foryou|trending|shorts)$/.test(h))));
   for (const d of DEFAULT_TAGS[CFG.category] || DEFAULT_TAGS.stories) if (hashtags.length < 3 && !hashtags.includes(d)) hashtags.push(d);
   hashtags = hashtags.slice(0, 5);
@@ -625,7 +671,8 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
     scenes,
     usedFallbackTemplate: false,
     model,
-    sourceHeadline: String(parsed.sourceHeadline || '').slice(0, 300)
+    sourceHeadline: String(parsed.sourceHeadline || '').slice(0, 300),
+    premise: String(parsed.premise || '').replace(/\s+/g, ' ').slice(0, 900)
   };
 }
 
@@ -732,7 +779,7 @@ const VOICES: Record<string, Record<string, string[]>> = {
     default: ['en-US-AndrewMultilingualNeural', 'en-US-BrianMultilingualNeural', 'en-US-GuyNeural']
   }
 };
-const RATE: Record<string, string> = { stories: '-3%', cooking: '+4%', tech: '+5%', news: '+5%' };
+const RATE: Record<string, string> = { stories: '-3%', cooking: '+4%', tech: '+5%', news: '+5%', ads: '+4%' };
 
 function cleanForSpeech(text: string): string {
   return text.replace(/[*_#`>~]/g, ' ').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ').replace(/\s+/g, ' ').trim();
@@ -1028,6 +1075,7 @@ async function stockImage(query: string, file: string): Promise<'stock' | null> 
 
 /** The fixed look of every named character who appears in this scene (keeps people consistent across images). */
 function castFor(script: Script, scene: Scene): string {
+  if (!script.characters) script.characters = CFG.storyCharacters;
   if (!script.characters) return '';
   const parts = script.characters.split(/[;\n]+|\.\s+(?=[A-Z][a-z]+[:,( ])/).map((x) => x.trim()).filter(Boolean);
   const text = `${scene.imagePrompt} ${scene.narration}`.toLowerCase();
@@ -1039,8 +1087,19 @@ function castFor(script: Script, scene: Scene): string {
   return CFG.category === 'stories' && parts.length === 1 && /\b(she|he|her|his|they)\b/.test(text) ? `Character: ${parts[0]}` : '';
 }
 
+/** Stories are illustrated as an animated family film — never photoreal. */
+const ANIMATED_STYLE = '3D animated family-film still in the style of a major animation studio, stylised cartoon characters with big expressive eyes, soft rounded shapes, warm cinematic lighting, rich saturated colours, detailed painterly background, wholesome Pixar-like render, no photorealism';
+const PHOTO_WORDS = /\b(photo(graph(y|ic)?)?|photoreal(istic)?|realistic|dslr|35 ?mm|50 ?mm|bokeh|film still|cinematic still|hyper ?real(istic)?|raw photo|8k photo)\b/gi;
+function styleFor(script: Script): string {
+  if (CFG.category === 'stories') return ANIMATED_STYLE;
+  if (CFG.category === 'cooking') return script.visualStyle || 'professional food photography, natural light, shallow depth of field';
+  return script.visualStyle || 'clean modern editorial photography, natural light';
+}
+/** For stories: strip photo wording the model may have written into the prompt. */
+const animatedPrompt = (p: string) => (CFG.category === 'stories' ? p.replace(PHOTO_WORDS, 'animated').replace(/\s+/g, ' ').trim() : p);
+
 async function gatherImages(script: Script): Promise<{ files: (string | null)[]; aiCount: number }> {
-  const style = script.visualStyle || (CFG.category === 'cooking' ? 'professional food photography, natural light, shallow depth of field' : 'cinematic film still, dramatic lighting, 35mm');
+  const style = styleFor(script);
   const realPhotosFirst = CFG.category === 'tech' || CFG.category === 'news';
   const seedBase = parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}`).digest('hex').slice(0, 6), 16);
   const files: (string | null)[] = new Array(script.scenes.length).fill(null);
@@ -1051,16 +1110,35 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
   const testDir = ENV.ANIMATO_TEST_IMAGES_DIR;
   const testImages = testDir && fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((n) => /\.(jpe?g|png|webp)$/i.test(n)).sort() : [];
 
+  // Ads: the advertiser's own product photos (imported from their PDF) come first.
+  const productFiles: string[] = [];
+  if (CFG.category === 'ads' && CFG.adImages.length && CFG.appUrl && !CFG.offline) {
+    let n = 0;
+    for (const id of CFG.adImages.slice(0, 8)) {
+      const raw = path.join(WORK_DIR, `product_${n}.raw`);
+      const out = path.join(WORK_DIR, `product_${n}.jpg`);
+      if (await download(`${CFG.appUrl}/api/automation/assets/${encodeURIComponent(id)}`, raw, 45000) && await toJpeg(raw, out)) { productFiles.push(out); n++; }
+    }
+    log(`Ad: ${productFiles.length}/${CFG.adImages.length} product images downloaded from the PDF.`);
+  }
+  let productCursor = 0;
+  const nextProduct = () => (productFiles.length ? productFiles[productCursor++ % productFiles.length] : null);
+
   const fetchOne = async (i: number) => {
     const s = script.scenes[i];
     const raw = path.join(WORK_DIR, `scene_${i}.raw`);
     const out = path.join(WORK_DIR, `scene_${i}.jpg`);
+    if (productFiles.length && (s.productShot || (CFG.category === 'ads' && s.shot === 'panel'))) {
+      const p = nextProduct();
+      if (p) { files[i] = p; return; }
+    }
     if (testImages.length) {
       if (await toJpeg(path.join(testDir!, testImages[i % testImages.length]), out)) files[i] = out;
       return;
     }
-    const prompt = [s.imagePrompt || s.narration, castFor(script, s), CFG.category === 'stories' ? `The moment: ${s.narration.slice(0, 220)}` : '', style, 'photorealistic detail, no text, no watermark, no captions'].filter(Boolean).join('. ');
-    const order = realPhotosFirst ? ['stock', 'ai'] : ['ai', 'stock'];
+    const prompt = [animatedPrompt(s.imagePrompt || s.narration), animatedPrompt(castFor(script, s)), CFG.category === 'stories' ? `The moment: ${s.narration.slice(0, 220)}` : '', style, 'no text, no watermark, no captions'].filter(Boolean).join('. ');
+    // Stories are always drawn (a photo would break the animated look); tech/news prefer real photos.
+    const order = CFG.category === 'stories' ? ['ai'] : realPhotosFirst ? ['stock', 'ai'] : ['ai', 'stock'];
     for (const source of order) {
       if (Date.now() > deadline) break;
       const got = source === 'ai' ? await aiImage(prompt, seedBase + i * 7, raw) : await stockImage(s.searchQuery || s.imagePrompt.split(',')[0], raw);
@@ -1118,7 +1196,7 @@ function findChrome(): string | null {
 }
 
 function musicTrack(): string {
-  return CFG.category === 'cooking' ? 'motivation_inspirational.mp3'
+  return CFG.category === 'cooking' || CFG.category === 'ads' ? 'motivation_inspirational.mp3'
     : CFG.category === 'tech' ? 'news_broadcast.mp3'
     : CFG.category === 'news' ? 'news_urgent.mp3'
     : /horror|scary|suspense/i.test(CFG.subGenre) ? 'scary_ominous.mp3'
@@ -1339,7 +1417,7 @@ async function youtubeAccessToken(): Promise<string> {
   return cachedYouTubeToken;
 }
 
-const YT_CATEGORY: Record<string, string> = { cooking: '26', tech: '28', stories: '24', news: '25' };
+const YT_CATEGORY: Record<string, string> = { cooking: '26', tech: '28', stories: '24', news: '25', ads: '22' };
 
 async function uploadToYouTube(meta: { title: string; description: string; tags: string[]; synthetic: boolean }): Promise<{ videoId: string; url: string; privacy: string }> {
   const token = await youtubeAccessToken();
@@ -1398,7 +1476,7 @@ async function main() {
   const t0 = Date.now();
   console.log('='.repeat(64));
   console.log('ANIMATO CLOUD RENDERER');
-  console.log(`campaign=${CFG.campaignId || '(none)'} part=${CFG.partNumber} category=${CFG.category} format=${CFG.format} ${W}x${H} gender=${CFG.gender} autoPost=${CFG.autoPost}`);
+  console.log(`campaign=${CFG.campaignId || '(none)'} part=${CFG.partNumber}/${CFG.arcParts} category=${CFG.category} format=${CFG.format} ${W}x${H} gender=${CFG.gender} autoPost=${CFG.autoPost}`);
   console.log('='.repeat(64));
 
   let pastStory = CFG.previousScript ? `PART ${CFG.partNumber - 1}:\n${CFG.previousScript}` : '';
@@ -1460,9 +1538,11 @@ async function main() {
   await reportStatus('running', '4/5 Rendering the video', 58, `${images.filter(Boolean).length} scene images ready; character: ${presenter}.`);
 
   // 4. Render
-  const badge = CFG.category === 'stories' ? `PART ${CFG.partNumber}${CFG.subGenre ? ` · ${CFG.subGenre.toUpperCase()}` : ''}`
+  const badge = CFG.category === 'ads' ? 'SPONSORED' : CFG.category === 'stories' ? `${CFG.partNumber >= CFG.arcParts ? 'FINALE' : `PART ${CFG.partNumber}`}${CFG.subGenre ? ` · ${CFG.subGenre.toUpperCase()}` : ''}`
     : CFG.category === 'cooking' ? 'RECIPE' : CFG.category === 'tech' ? 'TECH' : CFG.category === 'news' ? 'NEWS' : CFG.category.toUpperCase();
-  const endCard = CFG.category === 'stories' ? `Part ${CFG.partNumber + 1} next — follow!` : 'Follow for more';
+  const endCard = CFG.category === 'stories'
+    ? (CFG.partNumber >= CFG.arcParts ? 'New story next — follow!' : `Part ${CFG.partNumber + 1} next — follow!`)
+    : 'Follow for more';
   const title = script.title.replace(/\s*\(part \d+\)\s*$/i, '');
   const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration });
   let characterMode = stage.character;
@@ -1479,7 +1559,11 @@ async function main() {
   const hashtagLine = [...script.hashtags, ...(IS_SHORTS ? ['shorts'] : [])].map((h) => `#${h}`).join(' ');
   const description = [
     script.description || script.title,
-    CFG.category === 'stories' ? `\nPart ${CFG.partNumber}. Part ${CFG.partNumber + 1} is coming — follow so you don't miss it.` : '',
+    CFG.category === 'stories'
+      ? (CFG.partNumber >= CFG.arcParts
+        ? `\nThis is the finale of the story. A brand-new story starts on the next upload — follow so you don't miss it.`
+        : `\nPart ${CFG.partNumber} of ${CFG.arcParts}. Part ${CFG.partNumber + 1} is coming — follow so you don't miss it.`)
+      : '',
     script.sources?.length ? `\nSources: ${script.sources.join('; ')}` : '',
     `\n${hashtagLine}`
   ].filter(Boolean).join('\n').trim();
@@ -1511,7 +1595,10 @@ async function main() {
     privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
     usedFallbackTemplate: script.usedFallbackTemplate, voice: narration.engine, character: characterMode,
     durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl,
-    sources: script.sources || [], model: script.model || ''
+    sources: script.sources || [], model: script.model || '',
+    // Story arc: the app keeps this so the next part continues the same story — and ends it at part ${CFG.arcParts}.
+    storyPremise: script.premise || '', storyCharacters: script.characters || '', storyTitle: script.title.replace(/\s*\((part \d+|finale)\)\s*$/i, ''),
+    arcPart: CFG.partNumber, arcParts: CFG.arcParts, arcComplete: CFG.category === 'stories' && CFG.partNumber >= CFG.arcParts
   });
   if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) {
     console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
