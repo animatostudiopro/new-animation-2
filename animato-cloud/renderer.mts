@@ -1209,7 +1209,12 @@ const MIME_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jp
 
 async function fetchRig(): Promise<{ rig: any; assetDir: string } | null> {
   const res = await appRequest('GET', `${campaignPath()}/rig`, undefined, 30000);
-  if (!res || res.status !== 200 || !res.data?.rig) return null;
+  if (!res || res.status !== 200 || !res.data?.rig) {
+    log(res?.status === 404
+      ? 'No character uploaded for this automation yet — using the default presenter. (Open the automation\'s project in the app once; your character uploads automatically.)'
+      : `Could not load this automation's character (${res ? `HTTP ${res.status}` : 'app unreachable'}) — using the default presenter.`);
+    return null;
+  }
   const assetDir = path.join(WORK_DIR, 'rig');
   fs.mkdirSync(assetDir, { recursive: true });
   const ids: string[] = Array.isArray(res.data.assets) ? res.data.assets : [];
@@ -1400,7 +1405,7 @@ async function renderWithStage(opts: {
           reportStatus('running', `4/5 Rendering the video (${pct}%)`, Math.round(60 + pct * 0.25), '');
         }
       } else if (p === '/done') {
-        finished?.({ ok: true, character: msg.character });
+        finished?.({ ok: true, character: msg.character === 'app' ? `your editor character${msg.heads ? '' : ' (no head group found: face animates, head does not tilt)'}` : `default presenter${msg.note ? ` — ${msg.note}` : ''}` });
       } else if (p === '/fail') {
         finished?.({ ok: false, reason: msg.error || 'stage failed' });
       }
@@ -1666,7 +1671,7 @@ async function main() {
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
   await reportStatus('completed', published ? 'Published to YouTube' : 'Video rendered', 100,
-    published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
+    (published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`) + ` Character: ${characterMode}.`,
     { youtubeUrl: published?.url || '' });
   log(`Done in ${secs}s.`);
   return 0;
