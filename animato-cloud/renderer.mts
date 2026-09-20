@@ -97,6 +97,14 @@ const CFG = {
   ytClientId: pick(AUTH.youtube_client_id, ENV.YOUTUBE_CLIENT_ID, DEFAULT_YT_CLIENT_ID),
   ytClientSecret: pick(AUTH.youtube_client_secret, ENV.YOUTUBE_CLIENT_SECRET),
   openrouterKey: pick(AUTH.openrouter_api_key, ENV.OPENROUTER_API_KEY),
+  // Every key the app sent (comma-separated) + repository secrets; tried in turn.
+  openrouterKeys: Array.from(new Set(
+    [AUTH.openrouter_api_keys, AUTH.openrouter_api_key, ENV.OPENROUTER_API_KEYS, ENV.OPENROUTER_API_KEY]
+      .flatMap((v) => (Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)))
+      .map((k) => String(k).trim())
+      .filter((k) => k.length > 20)
+  )) as string[],
+  nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
   openrouterModels: pick(JOB.models, ENV.OPENROUTER_MODELS, ENV.OPENROUTER_MODEL),
   pollinationsKey: pick(AUTH.pollinations_key, ENV.POLLINATIONS_API_KEY),
   pexelsKey: pick(AUTH.pexels_key, ENV.PEXELS_API_KEY),
@@ -111,6 +119,7 @@ const CFG = {
   offline: ENV.ANIMATO_OFFLINE === 'true',
   openrouterBase: pick(ENV.OPENROUTER_BASE_URL, 'https://openrouter.ai/api/v1'),
   googleTokenUrl: pick(ENV.GOOGLE_TOKEN_URL, 'https://oauth2.googleapis.com/token'),
+  nvidiaBase: pick(ENV.NVIDIA_GENAI_BASE, 'https://ai.api.nvidia.com/v1/genai'),
   youtubeUploadBase: pick(ENV.YOUTUBE_UPLOAD_BASE, 'https://www.googleapis.com/upload/youtube/v3'),
   newsBase: pick(ENV.NEWS_RSS_BASE, 'https://news.google.com/rss/search'),
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
@@ -118,7 +127,7 @@ const CFG = {
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, CFG.openrouterKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, CFG.openrouterKey, ...CFG.openrouterKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -362,6 +371,65 @@ const STRONG_FAMILIES: [RegExp, number][] = [
 ];
 const NOT_FOR_WRITING = /(code|coder|-fin\b|fin:|sante|medical|-vl\b|-vl:|vision|safety|guard|embed|rerank|ocr|audio|omni|math|laguna|nex-n|lightning|nano|\b[1-4](\.\d)?b\b|lfm)/i;
 
+// ---------------------------------------------------------------------------
+// OpenRouter key pool: start from a different key each run (spreads the free
+// daily limits), skip keys that are rejected / out of credit for the rest of
+// the run, and move to the next key when one is rate-limited.
+// ---------------------------------------------------------------------------
+const orKeys = CFG.openrouterKeys;
+const deadKeys = new Map<string, number>();      // key -> HTTP status that killed it
+let keyCursor = orKeys.length ? parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}:${CFG.runId}`).digest('hex').slice(0, 6), 16) % orKeys.length : 0;
+const tail = (k: string) => `…${k.slice(-4)}`;
+const liveKeys = () => {
+  const out: string[] = [];
+  for (let i = 0; i < orKeys.length; i++) { const k = orKeys[(keyCursor + i) % orKeys.length]; if (!deadKeys.has(k)) out.push(k); }
+  return out;
+};
+
+class AllKeysRejected extends Error {}
+
+/**
+ * POST to OpenRouter with automatic key failover.
+ * 401/403 (rejected) and 402 (no credit) retire the key for this run;
+ * 429 (rate limit) tries up to 4 other keys, then lets the caller move on
+ * to the next model.
+ */
+async function openrouterPost(route: string, body: any, timeoutMs: number): Promise<{ status: number; text: string }> {
+  let limited = 0;
+  let last = { status: 0, text: '' };
+  for (const key of liveKeys()) {
+    let res: Response;
+    try {
+      res = await fetch(`${CFG.openrouterBase}${route}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': CFG.appUrl || 'https://animato.studio', 'X-Title': 'Animato AutoPoster' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (err: any) {
+      return { status: 0, text: String(err?.message || err) };
+    }
+    const text = await res.text();
+    if (res.ok) {
+      keyCursor = orKeys.indexOf(key); // keep using the key that works
+      return { status: res.status, text };
+    }
+    last = { status: res.status, text };
+    if (res.status === 401 || res.status === 403 || res.status === 402) {
+      deadKeys.set(key, res.status);
+      log(`OpenRouter key ${tail(key)} ${res.status === 402 ? 'has no credit' : 'was rejected'} (HTTP ${res.status}) — switching to the next key (${liveKeys().length} left).`);
+      continue;
+    }
+    if (res.status === 429 && ++limited <= 4) {
+      log(`OpenRouter key ${tail(key)} is rate-limited — trying the next key.`);
+      continue;
+    }
+    return last; // model-level problem (400/404/5xx or still 429): caller tries the next model
+  }
+  if (!liveKeys().length) throw new AllKeysRejected(`All ${orKeys.length} OpenRouter API keys were rejected (${Array.from(deadKeys.entries()).map(([k, st]) => `${tail(k)}: HTTP ${st}`).join(', ')}).`);
+  return last;
+}
+
 async function freeModels(): Promise<{ id: string; jsonMode: boolean }[]> {
   if (CFG.openrouterModels) {
     return CFG.openrouterModels.split(',').map((s) => s.trim()).filter(Boolean).map((id) => ({ id, jsonMode: true }));
@@ -369,7 +437,7 @@ async function freeModels(): Promise<{ id: string; jsonMode: boolean }[]> {
   const fallback = ['deepseek/deepseek-v4-flash-0731:free', 'qwen/qwen3.8-27b:free', 'z-ai/glm-5.2:free', 'openrouter/free'].map((id) => ({ id, jsonMode: id !== 'openrouter/free' }));
   if (CFG.offline) return fallback;
   try {
-    const res = await fetch(`${CFG.openrouterBase}/models`, { headers: { Authorization: `Bearer ${CFG.openrouterKey}` }, signal: AbortSignal.timeout(20000) });
+    const res = await fetch(`${CFG.openrouterBase}/models`, { headers: liveKeys()[0] ? { Authorization: `Bearer ${liveKeys()[0]}` } : {}, signal: AbortSignal.timeout(20000) });
     if (!res.ok) return fallback;
     const data: any = await res.json();
     const models = (data?.data || [])
@@ -593,7 +661,9 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
   const models = await freeModels();
   let lastError = '';
   let nearMiss: { script: Script; words: number } | null = null;
+  if (!CFG.offline && !orKeys.length) throw new PipelineError('script_failed', 'No OpenRouter API key was provided to the runner.');
   if (!CFG.offline) {
+    log(`OpenRouter: ${orKeys.length} key(s) available, starting with ${tail(liveKeys()[0] || '????')}.`);
     for (const model of models) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
@@ -607,18 +677,12 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
             ]
           };
           if (model.jsonMode) body.response_format = { type: 'json_object' };
-          const res = await fetch(`${CFG.openrouterBase}/chat/completions`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${CFG.openrouterKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': CFG.appUrl || 'https://animato.studio', 'X-Title': 'Animato AutoPoster' },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(150000)
-          });
-          const text = await res.text();
-          if (!res.ok) {
-            lastError = `${model.id}: HTTP ${res.status} ${text.slice(0, 180)}`;
+          const res = await openrouterPost('/chat/completions', body, 150000);
+          const text = res.text;
+          if (res.status < 200 || res.status >= 300) {
+            lastError = `${model.id}: HTTP ${res.status || 'network'} ${text.slice(0, 180)}`;
             log(`OpenRouter ${lastError}`);
-            if (res.status === 401 || res.status === 403) throw new PipelineError('script_failed', `The OpenRouter API key was rejected (HTTP ${res.status}). Check OPENROUTER_API_KEY.`);
-            if (res.status === 429) await sleep(4000);
+            if (res.status === 429) await sleep(3000);
             break; // try the next model
           }
           const data = JSON.parse(text);
@@ -642,6 +706,9 @@ async function generateScript(pastStory: string, pastTitles: string[]): Promise<
           return script;
         } catch (err: any) {
           if (err instanceof PipelineError) throw err;
+          if (err instanceof AllKeysRejected) {
+            throw new PipelineError('script_failed', `${err.message} Add a working key in the app's OPENROUTER_API_KEYS setting (openrouter.ai/keys).`);
+          }
           lastError = `${model.id}: ${err?.message}`;
           log(`Script attempt ${attempt} with ${model.id} failed — ${err?.message}`);
         }
@@ -838,18 +905,91 @@ async function toJpeg(src: string, dst: string, cropBottom = 0): Promise<boolean
 const orientation = W > H * 1.2 ? 'landscape' : H > W * 1.2 ? 'portrait' : 'square';
 let lastPollinationsAt = 0;
 
-async function aiImage(prompt: string, seed: number, file: string): Promise<'ai' | null> {
+// NVIDIA NIM (build.nvidia.com): FLUX text-to-image. The hosted API may only
+// accept 1024x1024; we ask for the video's shape first and remember if it is refused.
+let nvidiaDisabled = '';
+let nvidiaSquareOnly = false;
+let nvidiaCount = 0;
+const NVIDIA_MODELS = [
+  { id: 'black-forest-labs/flux.1-dev', body: { mode: 'base', cfg_scale: 3.5, steps: 28, samples: 1 } },
+  { id: 'black-forest-labs/flux.1-schnell', body: { mode: 'base', cfg_scale: 0, steps: 4, samples: 1 } }
+];
+
+async function nvidiaImage(prompt: string, seed: number, file: string): Promise<boolean> {
+  if (!CFG.nvidiaKey || nvidiaDisabled) return false;
+  const shaped = orientation === 'portrait' ? { width: 768, height: 1344 } : orientation === 'landscape' ? { width: 1344, height: 768 } : { width: 1024, height: 1024 };
+  for (const model of NVIDIA_MODELS) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const size = nvidiaSquareOnly ? { width: 1024, height: 1024 } : shaped;
+      const framing = size.width === size.height && orientation !== 'square' ? ', centered composition with the main subject in the middle of the frame' : '';
+      let res: Response;
+      try {
+        res = await fetch(`${CFG.nvidiaBase}/${model.id}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${CFG.nvidiaKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ prompt: (prompt + framing).slice(0, 2000), ...size, seed: seed % 4294967295, ...model.body }),
+          signal: AbortSignal.timeout(120000)
+        });
+      } catch (err: any) {
+        log(`NVIDIA ${model.id} request failed (${err?.message}).`);
+        break; // next model
+      }
+      const text = await res.text();
+      if (res.status === 401 || res.status === 403) {
+        nvidiaDisabled = `HTTP ${res.status}`;
+        log(`⚠️ The NVIDIA API key was rejected (HTTP ${res.status}) — using other image sources for this run.`);
+        return false;
+      }
+      if (res.status === 422 && !nvidiaSquareOnly && (size.width !== 1024 || size.height !== 1024)) {
+        nvidiaSquareOnly = true; // this endpoint only takes 1024x1024
+        continue;
+      }
+      if (res.status === 429 || res.status >= 500) {
+        await sleep(2500 * (attempt + 1));
+        continue;
+      }
+      if (!res.ok) {
+        log(`NVIDIA ${model.id}: HTTP ${res.status} ${text.slice(0, 160)}`);
+        break;
+      }
+      let data: any = {};
+      try { data = JSON.parse(text); } catch {}
+      const art = Array.isArray(data?.artifacts) ? data.artifacts[0] : null;
+      const b64 = art?.base64 || data?.image || data?.b64_json || data?.data?.[0]?.b64_json;
+      const finish = String(art?.finishReason || art?.finish_reason || data?.finish_reason || 'SUCCESS').toUpperCase();
+      if (!b64 || (finish !== 'SUCCESS' && finish !== 'STOP')) {
+        log(`NVIDIA ${model.id}: no image (${finish}).`);
+        break;
+      }
+      fs.writeFileSync(file, Buffer.from(String(b64).replace(/^data:[^,]+,/, ''), 'base64'));
+      const [w, h] = await imageSize(file);
+      if (w >= 320 && h >= 320) { nvidiaCount++; return true; }
+      break;
+    }
+  }
+  return false;
+}
+
+/** 'ai' = anonymous Pollinations (bottom watermark cropped), 'ai-clean' = NVIDIA / keyed. */
+let pollinationsGate: Promise<void> = Promise.resolve();
+
+async function aiImage(prompt: string, seed: number, file: string): Promise<'ai' | 'ai-clean' | null> {
   if (CFG.offline || !prompt) return null;
+  if (await nvidiaImage(prompt, seed, file)) return 'ai-clean';
   const size = orientation === 'portrait' ? { w: 864, h: 1536 } : orientation === 'landscape' ? { w: 1536, h: 864 } : { w: 1152, h: 1152 };
   const enc = encodeURIComponent(prompt.slice(0, 480));
   if (CFG.pollinationsKey) {
     const url = `https://gen.pollinations.ai/image/${enc}?model=flux&width=${size.w}&height=${size.h}&seed=${seed}&nologo=true&private=true`;
-    if (await download(url, file, 90000, { Authorization: `Bearer ${CFG.pollinationsKey}` })) return 'ai';
+    if (await download(url, file, 90000, { Authorization: `Bearer ${CFG.pollinationsKey}` })) return 'ai-clean';
   }
-  // Anonymous tier: about one request every 15 s.
-  const wait = lastPollinationsAt + 15500 - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastPollinationsAt = Date.now();
+  // Anonymous tier: about one request every 15 s (serialised across parallel workers).
+  const turn = pollinationsGate.then(async () => {
+    const wait = lastPollinationsAt + 15500 - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastPollinationsAt = Date.now();
+  });
+  pollinationsGate = turn.catch(() => {});
+  await turn;
   const url = `https://image.pollinations.ai/prompt/${enc}?model=flux&width=${size.w}&height=${size.h}&seed=${seed}&nologo=true&private=true`;
   return (await download(url, file, 90000)) ? 'ai' : null;
 }
@@ -894,7 +1034,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
   const seedBase = parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}`).digest('hex').slice(0, 6), 16);
   const files: (string | null)[] = new Array(script.scenes.length).fill(null);
   let aiCount = 0;
-  const deadline = Date.now() + (CFG.pollinationsKey ? 6 : 9) * 60 * 1000;
+  const deadline = Date.now() + (CFG.pollinationsKey || CFG.nvidiaKey ? 7 : 9) * 60 * 1000;
 
   // Test hook (never set in production): take scene images from a local folder.
   const testDir = ENV.ANIMATO_TEST_IMAGES_DIR;
@@ -913,16 +1053,16 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     for (const source of order) {
       if (Date.now() > deadline) break;
       const got = source === 'ai' ? await aiImage(prompt, seedBase + i * 7, raw) : await stockImage(s.searchQuery || s.imagePrompt.split(',')[0], raw);
-      if (got && await toJpeg(raw, out, got === 'ai' && !CFG.pollinationsKey ? 0.04 : 0)) {
+      if (got && await toJpeg(raw, out, got === 'ai' ? 0.04 : 0)) {
         files[i] = out;
-        if (got === 'ai') aiCount++;
+        if (got === 'ai' || got === 'ai-clean') aiCount++;
         return;
       }
     }
   };
 
-  if (realPhotosFirst || CFG.pollinationsKey) {
-    // Stock searches (and keyed AI) can run in parallel.
+  if (realPhotosFirst || CFG.pollinationsKey || CFG.nvidiaKey) {
+    // Stock searches and keyed AI (NVIDIA / Pollinations key) run in parallel.
     const queue = script.scenes.map((_, i) => i);
     await Promise.all(Array.from({ length: 3 }, async () => { while (queue.length) await fetchOne(queue.shift()!); }));
   } else {
@@ -944,7 +1084,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `gradients=s=${W}x${H}:c0=${colors[0]}:c1=${colors[1]}:x0=0:y0=0:x1=${W}:y1=${H}:nb_colors=2`, '-frames:v', '1', grad]);
     files.fill(grad);
   }
-  log(`Images: ${files.filter(Boolean).length}/${files.length} scenes (${aiCount} AI-generated).`);
+  log(`Images: ${files.filter(Boolean).length}/${files.length} scenes (${aiCount} AI-generated${nvidiaCount ? `, ${nvidiaCount} by NVIDIA FLUX` : ''}${nvidiaDisabled ? `; NVIDIA unavailable: ${nvidiaDisabled}` : ''}).`);
   return { files, aiCount };
 }
 
@@ -1332,7 +1472,8 @@ async function main() {
   // 1. Script
   const script = await generateScript(pastStory, pastTitles);
   if (script.usedFallbackTemplate && !CFG.allowFallbackPublish) {
-    throw new PipelineError('script_failed', `AI script generation failed (${script.aiError || 'unknown error'}). Check the OpenRouter API key / free-model limits. Nothing was posted.`);
+    // Keys work but every free model was busy / rate-limited: retry later (no pause).
+    throw new PipelineError('script_retry', `The free AI models were busy or rate-limited on all ${orKeys.length} OpenRouter keys (${script.aiError || 'unknown error'}). Nothing was posted; the next attempt runs automatically.`);
   }
   const fullText = script.scenes.map((s) => s.narration).join(' ');
   await reportStatus('running', '2/5 Recording the voice-over', 22, `Script ready: "${script.title}" (${script.scenes.length} scenes${script.model ? `, ${script.model}` : ''}).`);
