@@ -30,6 +30,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
+import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -142,6 +143,10 @@ const CFG = {
   groqBase: pick(ENV.GROQ_BASE_URL, 'https://api.groq.com/openai/v1'),
   googleTokenUrl: pick(ENV.GOOGLE_TOKEN_URL, 'https://oauth2.googleapis.com/token'),
   nvidiaBase: pick(ENV.NVIDIA_GENAI_BASE, 'https://ai.api.nvidia.com/v1/genai'),
+  // Real-image sources (news, tech, tutorials, cooking, ads). Overridable for tests.
+  wikiApiBase: pick(ENV.WIKI_API_BASE, 'https://en.wikipedia.org/w/api.php'),
+  commonsApiBase: pick(ENV.COMMONS_API_BASE, 'https://commons.wikimedia.org/w/api.php'),
+  openverseBase: pick(ENV.OPENVERSE_BASE, 'https://api.openverse.org/v1/images/'),
   youtubeUploadBase: pick(ENV.YOUTUBE_UPLOAD_BASE, 'https://www.googleapis.com/upload/youtube/v3'),
   newsBase: pick(ENV.NEWS_RSS_BASE, 'https://news.google.com/rss/search'),
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
@@ -253,7 +258,7 @@ const clampNum = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v)
 // ---------------------------------------------------------------------------
 /** A performance cue placed before the `index`-th spoken word of a scene. */
 interface Cue { index: number; tag: string }
-interface Scene { narration: string; shot: 'scene' | 'panel' | 'full'; emotion: string; imagePrompt: string; searchQuery: string; cues: Cue[]; productShot?: boolean }
+interface Scene { narration: string; shot: 'scene' | 'panel' | 'full'; emotion: string; imagePrompt: string; searchQuery: string; cues: Cue[]; productShot?: boolean; imageCredit?: string }
 
 // ---------------------------------------------------------------------------
 // Performance tags: the script writer places [tags] inside the narration right
@@ -392,6 +397,14 @@ interface Script {
   sources?: string[];
   sourceHeadline?: string;
   premise?: string;
+  /** Tech / tutorials: the product's official website (its real images and a screenshot are used). */
+  officialUrl?: string;
+  /** News / tech: the headline the video is about (its articles' photos are used). */
+  sourceStory?: { title: string; source: string; link: string };
+  /** Where every real image came from (shown on screen and in the description). */
+  imageCredits?: string[];
+  /** Full license attribution for every CC BY / public-domain image used. */
+  imageAttributions?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +494,7 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
 - Then: ingredients with exact amounts, then clear step-by-step instructions with times/temperatures, one pro tip, and a satisfying final plating moment.
 - End with a one-line call to action (ask a question viewers will answer in the comments).
 - Use shot "panel" for ingredient and step scenes (the presenter points at the photo), "scene" for the hook and the final dish.
-- imagePrompt: professional food photography of exactly that step (hands, pan, ingredients), appetising natural light, shallow depth of field.`;
+- searchQuery: the real dish, ingredient or cooking step to find a REAL photo of (e.g. "jollof rice", "fresh scotch bonnet peppers", "frying plantain"). The video uses real photos found on the web — never generated images.`;
     case 'tech':
       return `FORMAT: a tech / AI tool tutorial-review${sub}${topic}${news}
 - Cover ONE real, newly released or trending AI tool, app, model or gadget${headlines.length ? ' from the headlines above' : ''}.
@@ -490,7 +503,9 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
 - Talk like a friendly expert showing a friend, not an ad. Never state a spec, price, date or feature that is not in the headlines or widely known.
 - Teach, don't announce: the viewer should finish knowing exactly what it does for THEM, where to find it and what to click first. Say the steps out loud ("[count] Step one: open…"), and react to what impresses you.
 - Use shot "panel" for most scenes: the presenter points at the image of the tool/step.
-- searchQuery: a real-photo query naming the actual product/company (e.g. "Pixel 10 Pro phone"). imagePrompt: a clean, modern illustration or UI-style screen of exactly that step (e.g. "a laptop screen showing an AI image generator with a prompt box, clean UI, soft studio light") — no brand logos, no readable text.${headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real AI tool and stay factual.'}`;
+- The pictures are REAL images found on the web — the product's own website and screenshots, the news articles about it, press photos — never generated. So:
+  - "officialUrl": the tool's official website or product page (e.g. "https://gemini.google.com"). Only a URL you are sure is real; otherwise leave it empty.
+  - searchQuery (every scene): name the real product, company, person or device exactly as a news photo would be captioned (e.g. "Google Gemini app", "Nvidia Blackwell GPU", "Sam Altman"), 2-6 words, no generic words like "technology" or "AI concept".${headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real AI tool and stay factual.'}`;
     case 'ads': {
       const brief = CFG.adBrief
         ? `\nTHE PRODUCT (read from the advertiser's own PDF — use ONLY these facts, never invent a price, feature, claim or link):\n"""${CFG.adBrief.slice(0, 5000)}"""`
@@ -500,14 +515,14 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
 - Then: what it is in one line → who it's for → the 2-3 features that matter, each with the benefit in plain words → how to get it (the exact site, app store or plan named in the document) → the offer or price ONLY if the document states it → a clear call to action.
 - The presenter genuinely likes it and speaks from experience: warm, specific, never shouty, no fake urgency, no invented testimonials.
 - Use shot "panel" whenever the product is shown, and set "productShot": true on those scenes so the real product photo from the PDF is used.
-- imagePrompt (only for scenes without a product photo): a clean, modern advert visual of the product in use — bright studio or lifestyle setting, no text, no logos.`;
+- searchQuery (scenes without a product photo): the product or company name as written in the document, or the real everyday setting it is used in ("small business owner laptop"). Real photos only — nothing is generated.`;
     }
     case 'news':
       return `FORMAT: a 60-second news explainer${sub}${topic}${news}
 - Scene 1 is the HOOK: what happened, in max 14 words, in plain language.
 - Then: the key facts (who, what, where, when), why it matters to the viewer, and what happens next. Neutral, accurate, no speculation, no opinions.
 - It must be a story that is NOT in the list of previous video titles below.
-- Use shot "panel" for fact scenes; searchQuery must name the real place/person/organisation/event for a real news photo.
+- Use shot "panel" for fact scenes. The pictures are the REAL photos from the news articles about this story (never generated), so searchQuery must name the real place/person/organisation/event exactly as a news photo caption would (e.g. "Lagos flooding", "Bola Tinubu", "SpaceX Starship launch"), 2-6 words.
 - The presenter reacts like someone who has followed the story: a beat of surprise at the number that matters, [lean_in] for the human detail, [serious] for the consequence. Viewers must feel this really happened, not that a page is being read.
 - Close with what to watch for next and when.${headlines.length ? '' : '\n- No headlines were available: explain one important, well-established recent development without inventing details.'}`;
     default: {
@@ -545,7 +560,7 @@ ${arcStep}
 - Short spoken sentences, past tense, plain words. Keep the viewer feeling it: sounds, smells, small physical details.
 ${part >= last ? '- The title must NOT contain "(Part ...)" if the story ends here; instead make it the story\'s own title.' : `- Title must end with "(Part ${part})".`}
 - Also return "premise": 2-3 sentences of what this story is about, who is in it and what has happened so far (the next part is written from this), and "characters": each named person's fixed look (age, build, hair, clothes) for the pictures.
-- imagePrompt: describe the exact moment of that scene as a scene from an animated family film — WHO (named character + their fixed look), WHERE, WHAT is happening, the light and the camera angle.`;
+- imagePrompt: describe the exact moment of that scene as a still from a high-end 3D animated family film (big-studio feature quality) — WHO (named character as an ORIGINAL stylised cartoon character + their fixed look; never an existing movie character), WHERE (a cartoon version of the place), WHAT is happening, the light and the camera angle. Every person is a cartoon character with big expressive eyes and soft rounded features — never a real or photorealistic human.`;
     }
   }
 }
@@ -587,9 +602,10 @@ Return ONLY this JSON (no markdown):
   "visualStyle": "one consistent look for every image, e.g. 'dark cinematic film still, cold blue shadows, 35mm, moody practical lighting'",
   "characters": "fixed physical description of each recurring named person for consistent images (or empty)",
   "sourceHeadline": "the exact headline used (tech/news only, else empty)",
+  "officialUrl": "tech/tutorials: the official website of the product (real URL only), else empty",
   "premise": "stories only: 2-3 sentences — who this story is about, where, and everything that has happened so far",
   "scenes": [
-    { "narration": "[emotion] spoken words with [gesture] tags where they land", "shot": "scene|panel|full", "emotion": "main emotion of the scene", "imagePrompt": "...", "searchQuery": "3-6 word real-photo search query", "productShot": false }
+    { "narration": "[emotion] spoken words with [gesture] tags where they land", "shot": "scene|panel|full", "emotion": "main emotion of the scene", "imagePrompt": "stories only: the animated scene to draw", "searchQuery": "real things to find a real photo of (names of people, products, places, dishes)", "productShot": false }
   ]
 }`;
 }
@@ -626,6 +642,18 @@ const DEFAULT_TAGS: Record<string, string[]> = {
   tech: ['tech', 'technews', 'gadgets', 'ai'],
   news: ['news', 'breakingnews', 'worldnews', 'explained']
 };
+
+/** Only a plain https homepage/product URL is kept (never a search, news aggregator or social page). */
+function cleanOfficialUrl(v: any): string {
+  const raw = String(v || '').trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    if (!/^https?:$/.test(u.protocol) || !u.hostname.includes('.')) return '';
+    if (/(^|\.)(google|bing|news\.google|youtube|youtu|facebook|twitter|x|instagram|tiktok|reddit|t)\.(com|co|be)$/i.test(u.hostname)) return '';
+    return u.toString().slice(0, 300);
+  } catch { return ''; }
+}
 
 function normaliseScript(parsed: any, model: string, relaxed = false): Script {
   const L = { ...lengthSpec() };
@@ -672,7 +700,8 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
     usedFallbackTemplate: false,
     model,
     sourceHeadline: String(parsed.sourceHeadline || '').slice(0, 300),
-    premise: String(parsed.premise || '').replace(/\s+/g, ' ').slice(0, 900)
+    premise: String(parsed.premise || '').replace(/\s+/g, ' ').slice(0, 900),
+    officialUrl: cleanOfficialUrl(parsed.officialUrl)
   };
 }
 
@@ -684,7 +713,12 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
   let lastError = '';
   const withSources = (sc: Script) => {
     const used = headlines.find((h) => sc.sourceHeadline && sameStory(h.title, sc.sourceHeadline)) || (headlines.length ? headlines.find((h) => sc.scenes.some((x) => sameStory(h.title, x.narration))) : null);
-    sc.sources = (used ? [used] : headlines.slice(0, 1)).map((h) => `${h.title} (${h.source})`);
+    // Cite only what the video is really about — never a neighbouring headline.
+    sc.sources = used ? [`${used.title} (${used.source})`] : sc.sourceHeadline ? [sc.sourceHeadline] : [];
+    // The photos must be of the story the script is actually about: the matched
+    // headline, else the headline the writer named — never an unrelated one.
+    if (used) sc.sourceStory = { title: used.title, source: used.source, link: used.link };
+    else if (sc.sourceHeadline) sc.sourceStory = { title: sc.sourceHeadline, source: '', link: '' };
     return sc;
   };
   if (!CFG.offline && !LLM.hasKeys) throw new PipelineError('script_failed', 'No Gemini or Groq API key was provided to the runner.');
@@ -1039,39 +1073,201 @@ async function aiImage(prompt: string, seed: number, file: string): Promise<'ai'
   return (await download(url, file, 90000)) ? 'ai' : null;
 }
 
-async function stockImage(query: string, file: string): Promise<'stock' | null> {
-  if (CFG.offline || !query) return null;
-  const q = encodeURIComponent(query);
-  const orient = orientation === 'portrait' ? 'portrait' : orientation === 'landscape' ? 'landscape' : 'square';
-  const candidates: string[] = [];
-  const tryJson = async (url: string, headers: Record<string, string> = {}) => {
-    try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'AnimatoAutoPoster/3.0 (+https://github.com)', ...headers }, signal: AbortSignal.timeout(20000) });
-      return res.ok ? await res.json() : null;
-    } catch { return null; }
-  };
-  if (CFG.pexelsKey) {
-    const d: any = await tryJson(`https://api.pexels.com/v1/search?query=${q}&per_page=6&orientation=${orient}`, { Authorization: CFG.pexelsKey });
-    for (const p of d?.photos || []) candidates.push(orientation === 'portrait' ? p.src?.portrait || p.src?.large2x : p.src?.large2x || p.src?.large);
-  }
-  if (CFG.pixabayKey && candidates.length < 2) {
-    const d: any = await tryJson(`https://pixabay.com/api/?key=${CFG.pixabayKey}&q=${q}&image_type=photo&safesearch=true&per_page=6&orientation=${orientation === 'landscape' ? 'horizontal' : 'vertical'}`);
-    for (const h of d?.hits || []) candidates.push(h.largeImageURL);
-  }
-  if (candidates.length < 2) {
-    const d: any = await tryJson(`https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrnamespace=6&gsrlimit=6&gsrsearch=${q}%20filetype:bitmap&prop=imageinfo&iiprop=url|size&iiurlwidth=1600`);
-    const pages = Object.values(d?.query?.pages || {}).sort((a: any, b: any) => (a.index || 0) - (b.index || 0)) as any[];
-    for (const p of pages) { const ii = p?.imageinfo?.[0]; if (ii && (ii.width || 0) >= 800) candidates.push(ii.thumburl || ii.url); }
-  }
-  if (candidates.length < 2) {
-    const d: any = await tryJson(`https://api.openverse.org/v1/images/?q=${q}&page_size=8&mature=false&aspect_ratio=${orientation === 'portrait' ? 'tall' : orientation === 'landscape' ? 'wide' : 'square'}`);
-    for (const r of d?.results || []) if ((r.width || 0) >= 800) candidates.push(r.url);
-  }
-  for (const url of candidates.filter(Boolean).slice(0, 6)) {
-    if (await download(url, file, 30000)) return 'stock';
-  }
+// ---------------------------------------------------------------------------
+// Real images from the web — news, tech, tutorials, cooking, ads.
+// Nothing here is generated: every picture is found on the web (the story's own
+// news photos, the product's official site and a real screenshot of it,
+// Wikipedia / Wikimedia, free photo libraries) and credited on screen.
+// Only STORIES are illustrated by an image model (they are fiction).
+// ---------------------------------------------------------------------------
+interface WebImage {
+  url: string;
+  /** Short on-screen credit, e.g. "Photo: Jane Doe · CC BY 4.0". */
+  credit: string;
+  kind: 'screenshot' | 'wiki' | 'library' | 'product' | 'advertiser';
+  /** Full attribution for the description (title, author, license, source page). */
+  attribution?: string;
+}
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+/** Logos, icons, avatars, tracking pixels, placeholders — never used as a scene picture. */
+const BAD_IMAGE = /(logo|favicon|sprite|icon|avatar|placeholder|default[-_]?(image|og|share|thumb)|blank\.|spacer|pixel|1x1|badge|button|banner-ad|advert|doubleclick|gravatar|emoji|\.svg(\?|$)|\.gif(\?|$)|data:image)/i;
+const MIN_REAL_W = 600;
+
+const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+const htmlDecode = (v: string) => v.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#x2F;/gi, '/').trim();
+const absUrl = (u: string, base: string) => { try { return new URL(htmlDecode(u), base).toString(); } catch { return ''; } };
+const plain = (html: any) => htmlDecode(String(html || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+/**
+ * COPYRIGHT: only images whose license allows reuse in a monetised video with
+ * cropping/zooming and no share-alike obligation are accepted — public domain,
+ * CC0 and CC BY (credited). Share-alike, non-commercial, no-derivatives,
+ * fair-use / non-free and trademarked files are refused.
+ */
+function reusableLicense(short: string, restrictions = '', forAds = false): string | null {
+  const l = plain(short);
+  if (!l) return null;
+  if (/\b(sa|nc|nd)\b|share[- ]?alike|non-?commercial|no[- ]?deriv|fair use|non-?free|all rights reserved|copyrighted/i.test(l)) return null;
+  if (/trademark/i.test(restrictions)) return null;
+  if (forAds && /personality/i.test(restrictions)) return null; // a person's likeness never endorses a product
+  if (/^(cc0|pdm|public domain|pd\b|pd-|no restrictions|no known copyright)/i.test(l)) return l.replace(/^pd-.*/i, 'Public domain');
+  if (/^cc[- ]?by([- ][\d.]+)?$/i.test(l) || /^cc[- ]?by [\d.]+/i.test(l)) return l.toUpperCase().replace('CC-BY', 'CC BY');
+  if (/^attribution$/i.test(l)) return 'CC BY';
   return null;
 }
+const shortCredit = (author: string, license: string) => {
+  const who = plain(author).replace(/^(photo(graph)? by|by)\s+/i, '').slice(0, 26) || 'Unknown author';
+  return /public domain|cc0|pdm/i.test(license) ? `Photo: ${who} · Public domain` : `Photo: ${who} · ${license}`;
+};
+
+async function fetchText(url: string, timeoutMs = 15000, maxBytes = 2_000_000): Promise<{ text: string; finalUrl: string } | null> {
+  if (CFG.offline || !url) return null;
+  try {
+    const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { text: buf.subarray(0, maxBytes).toString('utf8'), finalUrl: res.url || url };
+  } catch { return null; }
+}
+async function fetchJson(url: string, headers: Record<string, string> = {}, timeoutMs = 15000): Promise<any> {
+  if (CFG.offline) return null;
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'AnimatoAutoPoster/5.0 (+https://github.com; credits every image it uses)', ...headers }, signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok ? await res.json() : null;
+  } catch { return null; }
+}
+
+/** The share / lead images of a page — used ONLY for the advertiser's own website. */
+function pageImages(html: string, pageUrl: string): string[] {
+  const out: string[] = [];
+  const add = (u: string) => { const a = absUrl(u, pageUrl); if (a && /^https?:/i.test(a) && !BAD_IMAGE.test(a) && !out.includes(a)) out.push(a); };
+  for (const m of html.slice(0, 400_000).matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = m[0];
+    const key = (tag.match(/\b(?:property|name|itemprop)\s*=\s*["']([^"']+)["']/i) || [])[1]?.toLowerCase() || '';
+    const content = (tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i) || [])[1];
+    if (content && /^(og:image(:secure_url|:url)?|twitter:image(:src)?|image)$/.test(key)) add(content);
+  }
+  return out.slice(0, 6);
+}
+async function advertiserImages(url: string): Promise<WebImage[]> {
+  const r = await fetchText(url);
+  if (!r) return [];
+  const who = hostOf(r.finalUrl) || hostOf(url);
+  return pageImages(r.text, r.finalUrl).slice(0, 3).map((u) => ({ url: u, credit: `Image: ${who}`, kind: 'advertiser' as const, attribution: `Product images: ${who} (the advertiser)` }));
+}
+
+/** Wikimedia Commons files with their license, author and file page (only reusable ones are kept). */
+async function commonsFiles(params: string, forAds = false): Promise<WebImage[]> {
+  const d = await fetchJson(`${CFG.commonsApiBase}?action=query&format=json&origin=*&${params}&prop=imageinfo&iiprop=url|size|mime|extmetadata&iiurlwidth=1600`);
+  const pages = (Object.values(d?.query?.pages || {}) as any[]).sort((a, b) => (a.index || 0) - (b.index || 0));
+  const out: WebImage[] = [];
+  for (const p of pages) {
+    const ii = p?.imageinfo?.[0];
+    if (!ii || p.missing !== undefined || (ii.width || 0) < 800 || !/jpe?g|png|webp/i.test(ii.mime || ii.url || '')) continue;
+    const md = ii.extmetadata || {};
+    const lic = reusableLicense(md.LicenseShortName?.value || md.License?.value || '', md.Restrictions?.value || '', forAds);
+    if (!lic) continue;
+    const url = ii.thumburl || ii.url;
+    if (!url || BAD_IMAGE.test(url)) continue;
+    const author = plain(md.Artist?.value || md.Credit?.value || '');
+    const title = plain(md.ObjectName?.value || String(p.title || '').replace(/^File:/, '').replace(/\.[a-z]+$/i, ''));
+    const page = ii.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(String(p.title || ''))}`;
+    const licUrl = plain(md.LicenseUrl?.value || '');
+    out.push({ url, credit: shortCredit(author, lic), kind: 'library',
+      attribution: `"${title}" by ${author || 'unknown author'} — ${lic}${licUrl ? ` (${licUrl})` : ''} — ${page}` });
+  }
+  return out;
+}
+
+/** Lead image of the best-matching Wikipedia article — only when it is a freely licensed Commons file. */
+async function wikiImages(query: string, forAds = false): Promise<WebImage[]> {
+  if (!query) return [];
+  const d = await fetchJson(`${CFG.wikiApiBase}?action=query&format=json&origin=*&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=2&prop=pageimages&piprop=name`);
+  const names = (Object.values(d?.query?.pages || {}) as any[]).sort((a, b) => (a.index || 0) - (b.index || 0)).map((p) => p?.pageimage).filter(Boolean);
+  if (!names.length) return [];
+  // Non-free files (fair-use logos, posters) live on Wikipedia itself, not on Commons → they come back "missing" and are skipped.
+  return (await commonsFiles(`titles=${names.map((n: string) => encodeURIComponent(`File:${n}`)).join('|')}`, forAds)).map((x) => ({ ...x, kind: 'wiki' as const }));
+}
+
+/** Freely licensed photo libraries: Wikimedia Commons, Openverse (CC0/PDM/CC BY), Pexels, Pixabay. */
+async function libraryImages(query: string, forAds = false): Promise<WebImage[]> {
+  if (!query) return [];
+  const q = encodeURIComponent(query);
+  const out: WebImage[] = [];
+  if (CFG.pexelsKey) {
+    const d = await fetchJson(`https://api.pexels.com/v1/search?query=${q}&per_page=4&orientation=${orientation}`, { Authorization: CFG.pexelsKey });
+    for (const p of d?.photos || []) out.push({ url: orientation === 'portrait' ? p.src?.portrait || p.src?.large2x : p.src?.large2x || p.src?.large, credit: `Photo: ${String(p.photographer || 'Pexels').slice(0, 24)} · Pexels`, kind: 'library', attribution: `Photo by ${p.photographer || 'unknown'} on Pexels (Pexels License) — ${p.url || 'https://www.pexels.com'}` });
+  }
+  if (CFG.pixabayKey) {
+    const d = await fetchJson(`https://pixabay.com/api/?key=${CFG.pixabayKey}&q=${q}&image_type=photo&safesearch=true&per_page=4&orientation=${orientation === 'landscape' ? 'horizontal' : 'vertical'}`);
+    for (const h of d?.hits || []) out.push({ url: h.largeImageURL, credit: `Photo: ${String(h.user || 'Pixabay').slice(0, 24)} · Pixabay`, kind: 'library', attribution: `Image by ${h.user || 'unknown'} on Pixabay (Pixabay Content License) — ${h.pageURL || 'https://pixabay.com'}` });
+  }
+  out.push(...await commonsFiles(`generator=search&gsrnamespace=6&gsrlimit=12&gsrsearch=${q}%20filetype:bitmap`, forAds));
+  if (out.length < 3) {
+    const o = await fetchJson(`${CFG.openverseBase}?q=${q}&page_size=10&mature=false&license=cc0,pdm,by`);
+    for (const r of o?.results || []) {
+      if ((r.width || 0) < 800) continue;
+      const lic = reusableLicense(`${r.license === 'by' ? 'CC BY' : String(r.license || '').toUpperCase()} ${r.license_version || ''}`.trim());
+      if (!lic) continue;
+      out.push({ url: r.url, credit: shortCredit(r.creator || '', lic), kind: 'library', attribution: `"${plain(r.title) || 'Untitled'}" by ${plain(r.creator) || 'unknown author'} — ${lic}${r.license_url ? ` (${r.license_url})` : ''} — ${r.foreign_landing_url || r.url}` });
+    }
+  }
+  return out.filter((x) => x.url && !BAD_IMAGE.test(x.url));
+}
+
+/** A real screenshot of a website (the tool's own page) with headless Chrome. */
+async function siteScreenshot(url: string, file: string): Promise<boolean> {
+  const chrome = findChrome();
+  if (!chrome || CFG.offline || !url) return false;
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'animato-shot-'));
+  const size = '1440,900'; // the desktop page people actually see; matches the framed screen panel
+  const r = await run(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars', '--mute-audio', '--no-first-run',
+    `--user-data-dir=${profile}`, `--window-size=${size}`, '--virtual-time-budget=9000', `--user-agent=${BROWSER_UA}`, `--screenshot=${file}`, url], { timeoutMs: 45000 });
+  try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
+  if (r.code !== 0 || !fs.existsSync(file) || fs.statSync(file).size < 15000) return false;
+  const [w, h] = await imageSize(file);
+  return w >= 600 && h >= 400;
+}
+
+/**
+ * Present a website screenshot inside a browser window with the real address in
+ * the bar. Viewers see it is the actual site, and the margin survives the
+ * panel's slow zoom so no text is cut off.
+ */
+async function framedScreenshot(png: string, pageUrl: string, out: string): Promise<boolean> {
+  const addr = (() => { try { const u = new URL(pageUrl); return `${u.hostname.replace(/^www\./, '')}${u.pathname === '/' ? '' : u.pathname}`.slice(0, 60); } catch { return ''; } })();
+  const txt = path.join(WORK_DIR, 'site_addr.txt');
+  fs.writeFileSync(txt, addr || 'official website');
+  const font = path.join(HERE, 'assets/fonts/Poppins-Bold.ttf');
+  const vf = [
+    'scale=1180:-2',
+    'pad=1440:990:130:170:0x14161b',
+    'drawbox=x=130:y=104:w=1180:h=66:color=0x2a2d35:t=fill',
+    'drawbox=x=150:y=128:w=18:h=18:color=0xff5f57:t=fill', 'drawbox=x=178:y=128:w=18:h=18:color=0xfebc2e:t=fill', 'drawbox=x=206:y=128:w=18:h=18:color=0x28c840:t=fill',
+    'drawbox=x=250:y=116:w=900:h=42:color=0x3a3e48:t=fill',
+    `drawtext=fontfile=${font}:textfile=${txt}:fontsize=26:fontcolor=0xe8eaf0:x=272:y=123`
+  ].join(',');
+  const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', png, '-frames:v', '1', '-vf', vf, '-q:v', '3', out], { timeoutMs: 60000 });
+  return r.code === 0 && fs.existsSync(out);
+}
+
+/** Download a real image, reject tiny / duplicate ones, normalise to JPEG. */
+const usedImageHashes = new Set<string>();
+const usedImageUrls = new Set<string>();
+async function takeImage(img: WebImage, raw: string, out: string): Promise<boolean> {
+  if (usedImageUrls.has(img.url)) return false;
+  usedImageUrls.add(img.url);
+  if (!(await download(img.url, raw, 30000, { 'User-Agent': BROWSER_UA, Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' }))) return false;
+  const [w, h] = await imageSize(raw);
+  if (w < MIN_REAL_W || h < 300 || w / h > 4 || h / w > 4) return false;
+  const hash = crypto.createHash('md5').update(fs.readFileSync(raw)).digest('hex');
+  if (usedImageHashes.has(hash)) return false;
+  usedImageHashes.add(hash);
+  return toJpeg(raw, out);
+}
+
+/** Scenes that talk about using the tool / its website get the real screenshot. */
+const WEBSITE_WORDS = /\b(website|site|open|go to|visit|sign ?up|log ?in|download|install|app store|play store|click|tap|type|upload|paste|dashboard|interface|homepage|free plan|pricing)\b/i;
 
 /** The fixed look of every named character who appears in this scene (keeps people consistent across images). */
 function castFor(script: Script, scene: Scene): string {
@@ -1087,84 +1283,139 @@ function castFor(script: Script, scene: Scene): string {
   return CFG.category === 'stories' && parts.length === 1 && /\b(she|he|her|his|they)\b/.test(text) ? `Character: ${parts[0]}` : '';
 }
 
-/** Stories are illustrated as an animated family film — never photoreal. */
-const ANIMATED_STYLE = '3D animated family-film still in the style of a major animation studio, stylised cartoon characters with big expressive eyes, soft rounded shapes, warm cinematic lighting, rich saturated colours, detailed painterly background, wholesome Pixar-like render, no photorealism';
-const PHOTO_WORDS = /\b(photo(graph(y|ic)?)?|photoreal(istic)?|realistic|dslr|35 ?mm|50 ?mm|bokeh|film still|cinematic still|hyper ?real(istic)?|raw photo|8k photo)\b/gi;
+/** Stories are illustrated as an animated family film — never photoreal, never real people. */
+const ANIMATED_STYLE = 'high-end 3D animated feature-film still, every person is an ORIGINAL stylised 3D cartoon character with big expressive eyes and soft rounded features (not any existing movie, TV or game character, no logos, no brand mascots), cartoon environment, warm cinematic lighting, rich saturated colours, detailed painterly background, wholesome family-film render, no real people, no photographic humans, no realistic faces, no photorealism';
+const PHOTO_WORDS = /\b(photo(graph(y|ic)?)?|photoreal(istic)?|realistic|real[- ]life|dslr|35 ?mm|50 ?mm|bokeh|film still|cinematic still|hyper ?real(istic)?|raw photo|8k photo|portrait photo|headshot)\b/gi;
+/** Real-person words become cartoon characters (a story picture never shows a real human). */
+const PERSON_WORDS: [RegExp, string][] = [
+  [/\b(man|woman|men|women|person|people|lady|ladies|gentleman|pastor|priest|girl|boy|child|children|kid|kids|villager|villagers|crowd|mother|father|old man|old woman)\b/gi, 'cartoon $1']
+];
 function styleFor(script: Script): string {
-  if (CFG.category === 'stories') return ANIMATED_STYLE;
-  if (CFG.category === 'cooking') return script.visualStyle || 'professional food photography, natural light, shallow depth of field';
-  return script.visualStyle || 'clean modern editorial photography, natural light';
+  return CFG.category === 'stories' ? ANIMATED_STYLE : script.visualStyle || '';
 }
-/** For stories: strip photo wording the model may have written into the prompt. */
-const animatedPrompt = (p: string) => (CFG.category === 'stories' ? p.replace(PHOTO_WORDS, 'animated').replace(/\s+/g, ' ').trim() : p);
+/** For stories: strip photo wording and make every person a cartoon character. */
+const animatedPrompt = (p: string) => {
+  if (CFG.category !== 'stories') return p;
+  let out = p.replace(PHOTO_WORDS, 'animated');
+  for (const [re, to] of PERSON_WORDS) out = out.replace(re, to);
+  return out.replace(/\bcartoon cartoon\b/gi, 'cartoon').replace(/\s+/g, ' ').trim();
+};
 
-async function gatherImages(script: Script): Promise<{ files: (string | null)[]; aiCount: number }> {
-  const style = styleFor(script);
-  const realPhotosFirst = CFG.category === 'tech' || CFG.category === 'news';
-  const seedBase = parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}`).digest('hex').slice(0, 6), 16);
-  const files: (string | null)[] = new Array(script.scenes.length).fill(null);
+async function gatherImages(script: Script): Promise<{ files: (string | null)[]; aiCount: number; credits: (string | null)[] }> {
+  const isStory = CFG.category === 'stories';
+  const n = script.scenes.length;
+  const files: (string | null)[] = new Array(n).fill(null);
+  const credits: (string | null)[] = new Array(n).fill(null);
   let aiCount = 0;
-  const deadline = Date.now() + (CFG.pollinationsKey || CFG.nvidiaKey ? 7 : 9) * 60 * 1000;
 
   // Test hook (never set in production): take scene images from a local folder.
   const testDir = ENV.ANIMATO_TEST_IMAGES_DIR;
-  const testImages = testDir && fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((n) => /\.(jpe?g|png|webp)$/i.test(n)).sort() : [];
-
-  // Ads: the advertiser's own product photos (imported from their PDF) come first.
-  const productFiles: string[] = [];
-  if (CFG.category === 'ads' && CFG.adImages.length && CFG.appUrl && !CFG.offline) {
-    let n = 0;
-    for (const id of CFG.adImages.slice(0, 8)) {
-      const raw = path.join(WORK_DIR, `product_${n}.raw`);
-      const out = path.join(WORK_DIR, `product_${n}.jpg`);
-      if (await download(`${CFG.appUrl}/api/automation/assets/${encodeURIComponent(id)}`, raw, 45000) && await toJpeg(raw, out)) { productFiles.push(out); n++; }
-    }
-    log(`Ad: ${productFiles.length}/${CFG.adImages.length} product images downloaded from the PDF.`);
+  const testImages = testDir && fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((x) => /\.(jpe?g|png|webp)$/i.test(x)).sort() : [];
+  if (testImages.length) {
+    for (let i = 0; i < n; i++) { const out = path.join(WORK_DIR, `scene_${i}.jpg`); if (await toJpeg(path.join(testDir!, testImages[i % testImages.length]), out)) files[i] = out; }
+    return { files, aiCount, credits };
   }
-  let productCursor = 0;
-  const nextProduct = () => (productFiles.length ? productFiles[productCursor++ % productFiles.length] : null);
 
-  const fetchOne = async (i: number) => {
-    const s = script.scenes[i];
-    const raw = path.join(WORK_DIR, `scene_${i}.raw`);
-    const out = path.join(WORK_DIR, `scene_${i}.jpg`);
-    if (productFiles.length && (s.productShot || (CFG.category === 'ads' && s.shot === 'panel'))) {
-      const p = nextProduct();
-      if (p) { files[i] = p; return; }
+  if (isStory) {
+    // ---- STORIES: fiction, so every picture is drawn — original 3D animated cartoon scenes only.
+    const style = ANIMATED_STYLE;
+    const seedBase = parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}`).digest('hex').slice(0, 6), 16);
+    const deadline = Date.now() + (CFG.pollinationsKey || CFG.nvidiaKey ? 7 : 9) * 60 * 1000;
+    const drawOne = async (i: number) => {
+      if (Date.now() > deadline) return;
+      const s = script.scenes[i];
+      const raw = path.join(WORK_DIR, `scene_${i}.raw`), out = path.join(WORK_DIR, `scene_${i}.jpg`);
+      const prompt = [animatedPrompt(s.imagePrompt || s.narration), animatedPrompt(castFor(script, s)), `The moment: ${animatedPrompt(s.narration.slice(0, 220))}`, style, 'no text, no watermark, no captions'].filter(Boolean).join('. ');
+      const got = await aiImage(prompt, seedBase + i * 7, raw);
+      if (got && await toJpeg(raw, out, got === 'ai' ? 0.04 : 0)) { files[i] = out; aiCount++; }
+    };
+    if (CFG.pollinationsKey || CFG.nvidiaKey) {
+      const queue = script.scenes.map((_, i) => i);
+      await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await drawOne(queue.shift()!); }));
+    } else {
+      for (let i = 0; i < n; i++) await drawOne(i); // anonymous AI is rate-limited: early scenes first
     }
-    if (testImages.length) {
-      if (await toJpeg(path.join(testDir!, testImages[i % testImages.length]), out)) files[i] = out;
-      return;
-    }
-    const prompt = [animatedPrompt(s.imagePrompt || s.narration), animatedPrompt(castFor(script, s)), CFG.category === 'stories' ? `The moment: ${s.narration.slice(0, 220)}` : '', style, 'no text, no watermark, no captions'].filter(Boolean).join('. ');
-    // Stories are always drawn (a photo would break the animated look); tech/news prefer real photos.
-    const order = CFG.category === 'stories' ? ['ai'] : realPhotosFirst ? ['stock', 'ai'] : ['ai', 'stock'];
-    for (const source of order) {
-      if (Date.now() > deadline) break;
-      const got = source === 'ai' ? await aiImage(prompt, seedBase + i * 7, raw) : await stockImage(s.searchQuery || s.imagePrompt.split(',')[0], raw);
-      if (got && await toJpeg(raw, out, got === 'ai' ? 0.04 : 0)) {
-        files[i] = out;
-        if (got === 'ai' || got === 'ai-clean') aiCount++;
-        return;
+  } else {
+    // ---- EVERYTHING ELSE: real images found on the web. Nothing is generated.
+    const deadline = Date.now() + 5 * 60 * 1000;
+    const cat = CFG.category;
+    const subject = (script.sourceStory?.title || script.sourceHeadline || script.title).replace(/\s*\(part \d+\)\s*$/i, '').slice(0, 160);
+
+    // Ads: the advertiser's own product photos (imported from their PDF).
+    const productFiles: string[] = [];
+    if (cat === 'ads' && CFG.adImages.length && CFG.appUrl && !CFG.offline) {
+      let k = 0;
+      for (const id of CFG.adImages.slice(0, 8)) {
+        const raw = path.join(WORK_DIR, `product_${k}.raw`), out = path.join(WORK_DIR, `product_${k}.jpg`);
+        if (await download(`${CFG.appUrl}/api/automation/assets/${encodeURIComponent(id)}`, raw, 45000) && await toJpeg(raw, out)) { productFiles.push(out); k++; }
       }
+      log(`Ad: ${productFiles.length}/${CFG.adImages.length} product images downloaded from the PDF.`);
     }
-  };
+    let productCursor = 0;
 
-  if (realPhotosFirst || CFG.pollinationsKey || CFG.nvidiaKey) {
-    // Stock searches and keyed AI (NVIDIA / Pollinations key) run in parallel.
+    // COPYRIGHT-SAFE SOURCES ONLY. News/publisher photos and brands' marketing images
+    // are never used: only public-domain, CC0 and CC BY images (credited), the
+    // advertiser's own images (ads), and a screenshot of the tool's own interface
+    // on tutorial steps (showing how to use it — review / instruction use).
+    const forAds = cat === 'ads';
+    const pool: WebImage[] = [];
+    const briefUrl = forAds ? cleanOfficialUrl((CFG.adBrief.match(/\bhttps?:\/\/[^\s)"'<>]+|\bwww\.[a-z0-9-]+\.[a-z.]{2,}[^\s)"'<>]*/i) || [])[0]) : '';
+    const official = script.officialUrl || briefUrl;
+    let screenshot: { file: string; credit: string; uses: number } | null = null;
+    if (official) {
+      const [imgs, shotOk] = await Promise.all([
+        forAds ? advertiserImages(official) : Promise.resolve([] as WebImage[]), // the advertiser supplies these; other brands' images are not used
+        siteScreenshot(official, path.join(WORK_DIR, 'site_shot.png'))
+      ]);
+      pool.push(...imgs);
+      const shotJpg = path.join(WORK_DIR, 'site_shot.jpg');
+      if (shotOk && (await framedScreenshot(path.join(WORK_DIR, 'site_shot.png'), official, shotJpg) || await toJpeg(path.join(WORK_DIR, 'site_shot.png'), shotJpg))) screenshot = { file: shotJpg, credit: `Screenshot: ${hostOf(official)}`, uses: 0 };
+      log(`Official site ${hostOf(official)}: ${screenshot ? 'live screenshot for the how-to steps' : 'no screenshot'}${imgs.length ? ` + ${imgs.length} advertiser image(s)` : ''}.`);
+    }
+
+    const tryList = async (list: WebImage[], raw: string, out: string): Promise<WebImage | null> => {
+      for (const img of list) { if (Date.now() > deadline) return null; if (await takeImage(img, raw, out)) return img; }
+      return null;
+    };
+    const fromPool = () => pool.filter((x) => !usedImageUrls.has(x.url));
+    const attributions: string[] = [];
+
+    const fetchOne = async (i: number) => {
+      const s = script.scenes[i];
+      const raw = path.join(WORK_DIR, `scene_${i}.raw`), out = path.join(WORK_DIR, `scene_${i}.jpg`);
+      const set = (file: string, credit: string) => { files[i] = file; credits[i] = credit; };
+      if (productFiles.length && (s.productShot || (forAds && s.shot === 'panel'))) { set(productFiles[productCursor++ % productFiles.length], 'Product image'); return; }
+      // A website screenshot is always shown as a framed screen (panel), never stretched full-screen.
+      if (screenshot && screenshot.uses < 2 && WEBSITE_WORDS.test(s.narration)) { screenshot.uses++; s.shot = 'panel'; set(screenshot.file, screenshot.credit); return; }
+      const q = s.searchQuery || subject.split(/\s+/).slice(0, 6).join(' ');
+      // Best first: the named person / place / organisation's free Wikipedia image,
+      // then freely licensed photo libraries for the scene, then for the whole topic.
+      const sources: (() => Promise<WebImage[]>)[] = [];
+      if (forAds) sources.push(async () => fromPool());
+      sources.push(async () => wikiImages(q, forAds));
+      sources.push(async () => libraryImages(q, forAds));
+      if (q !== subject) sources.push(async () => wikiImages(subject.split(/\s+/).slice(0, 6).join(' '), forAds));
+      if (q !== subject) sources.push(async () => libraryImages(subject.split(/\s+/).slice(0, 5).join(' '), forAds));
+      for (const src of sources) {
+        if (Date.now() > deadline) break;
+        const got = await tryList(await src(), raw, out);
+        if (got) { set(out, got.credit); if (got.attribution && !attributions.includes(got.attribution)) attributions.push(got.attribution); return; }
+      }
+      if (screenshot) { screenshot.uses++; s.shot = 'panel'; set(screenshot.file, screenshot.credit); }
+    };
     const queue = script.scenes.map((_, i) => i);
     await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await fetchOne(queue.shift()!); }));
-  } else {
-    // Anonymous AI images are rate-limited: go in order so early scenes are ready first.
-    for (let i = 0; i < script.scenes.length; i++) await fetchOne(i);
+    // Leftover product photos still beat a repeated image for ads.
+    for (let i = 0; i < n && productFiles.length; i++) if (!files[i]) { files[i] = productFiles[productCursor++ % productFiles.length]; credits[i] = 'Product image'; }
+    script.imageAttributions = attributions;
   }
 
-  // Scenes without an image reuse the nearest one so nothing is ever blank.
-  for (let i = 0; i < files.length; i++) {
+  // Scenes without an image reuse the nearest one so nothing is ever blank (never an invented picture).
+  for (let i = 0; i < n; i++) {
     if (files[i]) continue;
-    for (let d = 1; d < files.length; d++) {
-      const f = files[i - d] || files[i + d];
-      if (f) { files[i] = f; break; }
+    for (let d = 1; d < n; d++) {
+      const j = files[i - d] ? i - d : files[i + d] ? i + d : -1;
+      if (j >= 0) { files[i] = files[j]; credits[i] = credits[j]; break; }
     }
   }
   if (!files.some(Boolean)) {
@@ -1173,8 +1424,10 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `gradients=s=${W}x${H}:c0=${colors[0]}:c1=${colors[1]}:x0=0:y0=0:x1=${W}:y1=${H}:nb_colors=2`, '-frames:v', '1', grad]);
     files.fill(grad);
   }
-  log(`Images: ${files.filter(Boolean).length}/${files.length} scenes (${aiCount} AI-generated${nvidiaCount ? `, ${nvidiaCount} by NVIDIA FLUX` : ''}${nvidiaDisabled ? `; NVIDIA unavailable: ${nvidiaDisabled}` : ''}).`);
-  return { files, aiCount };
+  script.imageCredits = Array.from(new Set(credits.filter((c): c is string => !!c && c !== 'Product image')));
+  if (isStory) log(`Images: ${files.filter(Boolean).length}/${n} scenes, ${aiCount} drawn as original 3D animated scenes${nvidiaCount ? `, ${nvidiaCount} by NVIDIA FLUX` : ''}${nvidiaDisabled ? `; NVIDIA unavailable: ${nvidiaDisabled}` : ''}.`);
+  else log(`Images: ${new Set(files.filter(Boolean)).size} real image(s) for ${n} scenes — none generated. Sources: ${script.imageCredits.join(', ') || 'none found'}.`);
+  return { files, aiCount, credits };
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,46 +1448,99 @@ function findChrome(): string | null {
   return candidates.find((c) => { try { return fs.statSync(c).isFile(); } catch { return false; } }) || null;
 }
 
-function musicTrack(): string {
-  return CFG.category === 'cooking' || CFG.category === 'ads' ? 'motivation_inspirational.mp3'
-    : CFG.category === 'tech' ? 'news_broadcast.mp3'
-    : CFG.category === 'news' ? 'news_urgent.mp3'
-    : /horror|scary|suspense/i.test(CFG.subGenre) ? 'scary_ominous.mp3'
-    : /mystery/i.test(CFG.subGenre) ? 'mystery_suspense.mp3'
-    : 'story_chill.mp3';
-}
-
-async function findMusic(): Promise<string | null> {
-  const track = musicTrack();
-  const local = [path.join(HERE, 'music', track), path.join(process.cwd(), 'public', 'audio', 'music', track)].find((c) => fs.existsSync(c));
-  if (local) return local;
-  if (CFG.appUrl && !CFG.offline) {
-    const file = path.join(WORK_DIR, track);
-    try {
-      const res = await fetch(`${CFG.appUrl}/audio/music/${track}`, { signal: AbortSignal.timeout(30000) });
-      if (res.ok) {
-        fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
-        if ((await probeDuration(file)) > 1) return file;
-      }
-    } catch {}
+/**
+ * Where the presenter is actually speaking, and how loud, measured from the
+ * narration audio itself (50 ms windows) — works even when word timings are estimates.
+ */
+async function analyseVoice(file: string): Promise<{ levelDb: number; speech: { start: number; end: number }[] } | null> {
+  const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-ac', '1', '-ar', '16000', '-f', 's16le', '-'], { timeoutMs: 60000 });
+  if (r.code !== 0 || r.stdout.length < 32000) return null;
+  const pcm = new Int16Array(r.stdout.buffer, r.stdout.byteOffset, Math.floor(r.stdout.length / 2));
+  const WIN = 800, sec = WIN / 16000;
+  const dbs: number[] = [];
+  for (let i = 0; i + WIN <= pcm.length; i += WIN) {
+    let sum = 0;
+    for (let k = i; k < i + WIN; k++) sum += (pcm[k] / 32768) ** 2;
+    dbs.push(10 * Math.log10(sum / WIN + 1e-12));
   }
-  return null;
+  const peak = Math.max(...dbs);
+  const gate = Math.max(-45, peak - 32);
+  let power = 0, count = 0;
+  const speech: { start: number; end: number }[] = [];
+  dbs.forEach((d, i) => {
+    if (d <= gate) return;
+    power += 10 ** (d / 10); count++;
+    const t = i * sec, last = speech[speech.length - 1];
+    if (last && t - last.end < 0.6) last.end = t + sec;          // short gaps are part of the phrase
+    else speech.push({ start: t, end: t + sec });
+  });
+  if (!count) return null;
+  return { levelDb: 10 * Math.log10(power / count), speech: speech.filter((x) => x.end - x.start >= 0.12) };
 }
 
-/** Audio: narration + music that ducks under the voice. */
+/** Integrated loudness (LUFS, EBU R128 — how loud it SOUNDS, bass weighted down) of an audio file. */
+async function loudnessLufs(file: string): Promise<number | null> {
+  const r = await run('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'ebur128=framelog=quiet', '-f', 'null', '-'], { timeoutMs: 60000 });
+  const m = r.stderr.match(/Integrated loudness:[\s\S]*?I:\s*(-?[\d.]+)\s*LUFS/);
+  const v = m ? Number(m[1]) : NaN;
+  return Number.isFinite(v) && v > -70 ? v : null;
+}
+
+/**
+ * Background music is ORIGINAL — composed and synthesised for this video (see
+ * music.ts). No third-party track is ever used, so there is nothing to license,
+ * credit or get a Content ID claim for.
+ *
+ * It is mixed to be clearly HEARD but never fight the voice:
+ *   - EQ for phone speakers (no sub-bass) with a dip where speech lives;
+ *   - 13 dB under the measured voice level while the presenter speaks (the
+ *     usual broadcast "music bed" level), 7 dB under in pauses, intro and outro;
+ *   - smooth swells from the real speech timing instead of a pumping compressor.
+ */
+const MUSIC_UNDER_VOICE_DB = 13;
+const MUSIC_PAUSE_LIFT_DB = 6;
+async function findMusic(seconds: number, narration: Narration): Promise<string | null> {
+  try {
+    const mood = moodFor(CFG.category, CFG.subGenre);
+    const file = path.join(WORK_DIR, `music_${mood}.wav`);
+    const t0 = Date.now();
+    const { L, R, sampleRate } = composeBuffers(mood, Math.max(10, seconds), `${CFG.campaignId}:${CFG.partNumber}`);
+    eqForVoice(L, R, sampleRate);
+    const voice = await analyseVoice(narration.audioPath);
+    const speech = voice?.speech?.length ? voice.speech : narration.words.map((w) => ({ start: w.start, end: w.end }));
+    // Match PERCEIVED loudness (LUFS): a bass-heavy bed measures loud but sounds quiet,
+    // so raw RMS would leave it inaudible on phones. RMS is only the fallback.
+    fs.writeFileSync(file, encodeWav(L, R, sampleRate));
+    const [voiceLufs, musicLufs] = await Promise.all([loudnessLufs(narration.audioPath), loudnessLufs(file)]);
+    const perceived = voiceLufs !== null && musicLufs !== null;
+    const voiceDb = perceived ? voiceLufs! : voice?.levelDb ?? -18;
+    const musicDb = perceived ? musicLufs! : levelDb(L, R);
+    const speechGain = 10 ** ((voiceDb - MUSIC_UNDER_VOICE_DB - musicDb) / 20);
+    automateLevel(L, R, sampleRate, { speech, speechGain, pauseGain: speechGain * 10 ** (MUSIC_PAUSE_LIFT_DB / 20) });
+    fs.writeFileSync(file, encodeWav(L, R, sampleRate));
+    log(`Music: original ${mood} soundtrack composed for this video (${Math.round(seconds)}s) — ${MUSIC_UNDER_VOICE_DB} dB under the voice (${voiceDb.toFixed(1)} ${perceived ? 'LUFS' : 'dBFS'}) while speaking, +${MUSIC_PAUSE_LIFT_DB} dB between ${speech.length} spoken phrase(s), intro and outro; ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
+    return file;
+  } catch (err: any) {
+    log(`⚠️ Music could not be composed (${err?.message || err}) — the video has voice only.`);
+    return null;
+  }
+}
+
+/** Audio: narration + the music bed (already levelled under the voice). */
 function audioArgs(narration: string, music: string | null, firstInput: number): { inputs: string[]; filter: string } {
   const inputs = ['-i', narration];
   if (music) inputs.push('-stream_loop', '-1', '-i', music);
   const v = firstInput, m = firstInput + 1;
   const filter = music
-    ? `[${v}:a]aresample=48000,apad[vo];[vo]asplit=2[vox][side];[${m}:a]aresample=48000,volume=0.22[mus];[mus][side]sidechaincompress=threshold=0.02:ratio=7:attack=15:release=350[ducked];[vox][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`
+    // The music file is already levelled and shaped around the voice (findMusic), so it is mixed as-is.
+    ? `[${v}:a]aresample=48000,apad[vo];[${m}:a]aresample=48000[mus];[vo][mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`
     : `[${v}:a]aresample=48000,apad[aout]`;
   return { inputs, filter };
 }
 
 async function renderWithStage(opts: {
   narration: Narration; scenes: Scene[]; times: { start: number; end: number }[]; cues: { t: number; tag: string }[]; images: (string | null)[];
-  title: string; badge: string; endCard: string; music: string | null; duration: number;
+  title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[];
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const chrome = findChrome();
   if (!chrome) return { ok: false, character: 'none', reason: 'Chrome not found on the runner' };
@@ -1249,7 +1555,7 @@ async function renderWithStage(opts: {
     audio: `/audio/narration${audioExt}`,
     words: opts.narration.words.map((w) => ({ text: w.text, start: +w.start.toFixed(3), end: +w.end.toFixed(3) })),
     wordsReliable: opts.narration.wordsReliable,
-    segments: opts.scenes.map((s, i) => ({ start: opts.times[i].start, end: opts.times[i].end, text: s.narration, image: opts.images[i] ? `/img/${path.basename(opts.images[i]!)}` : null, shot: s.shot, emotion: s.emotion })),
+    segments: opts.scenes.map((s, i) => ({ start: opts.times[i].start, end: opts.times[i].end, text: s.narration, image: opts.images[i] ? `/img/${path.basename(opts.images[i]!)}` : null, shot: s.shot, emotion: s.emotion, credit: opts.credits?.[i] || null })),
     cues: opts.cues,
     // The presenter: the CSS character spec designed in the app (the stage draws it).
     characterSpec: CFG.characterSpec,
@@ -1533,7 +1839,7 @@ async function main() {
   await reportStatus('running', '3/5 Finding an image for every scene', 38, `Voice-over recorded (${narration.duration.toFixed(0)}s, ${narration.engine}).`);
 
   // 3. Images, character rig, music
-  const [{ files: images, aiCount }, music] = await Promise.all([imagesPromise, findMusic()]);
+  const [{ files: images, aiCount, credits }, music] = await Promise.all([imagesPromise, findMusic(duration, narration)]);
   const presenter = CFG.characterSpec ? `${CFG.characterSpec.name || 'custom'} (designed in the app)` : `default ${CFG.gender} presenter`;
   await reportStatus('running', '4/5 Rendering the video', 58, `${images.filter(Boolean).length} scene images ready; character: ${presenter}.`);
 
@@ -1544,7 +1850,7 @@ async function main() {
     ? (CFG.partNumber >= CFG.arcParts ? 'New story next — follow!' : `Part ${CFG.partNumber + 1} next — follow!`)
     : 'Follow for more';
   const title = script.title.replace(/\s*\(part \d+\)\s*$/i, '');
-  const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration });
+  const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration, credits });
   let characterMode = stage.character;
   if (!stage.ok) {
     log(`⚠️ Character renderer unavailable (${stage.reason}). Rendering scenes + captions without the character.`);
@@ -1565,13 +1871,21 @@ async function main() {
         : `\nPart ${CFG.partNumber} of ${CFG.arcParts}. Part ${CFG.partNumber + 1} is coming — follow so you don't miss it.`)
       : '',
     script.sources?.length ? `\nSources: ${script.sources.join('; ')}` : '',
+    script.officialUrl ? `Official site: ${script.officialUrl}` : '',
+    script.imageAttributions?.length
+      ? `\nImage credits (images may be cropped):\n${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
+      : '',
+    script.imageCredits?.some((c) => c.startsWith('Screenshot:')) ? `Screenshots of ${script.officialUrl ? hostOf(script.officialUrl) : 'the official website'} are shown to explain how to use it.` : '',
+    CFG.category !== 'stories' ? '' : 'Story art is original and AI-generated for this video.',
+    'Music: original, composed for this video.',
     `\n${hashtagLine}`
   ].filter(Boolean).join('\n').trim();
 
   fs.writeFileSync(OUTPUT_META, JSON.stringify({
     campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect,
     title: script.title, description, hashtags: script.hashtags, tags: script.tags, model: script.model,
-    scenes: script.scenes.map((s, i) => ({ ...s, start: times[i].start, end: times[i].end })),
+    scenes: script.scenes.map((s, i) => ({ ...s, start: times[i].start, end: times[i].end, image: images[i] ? path.basename(images[i]!) : null, imageCredit: credits[i] || null })),
+    imageSource: CFG.category === 'stories' ? 'generated (animated story art)' : 'real, freely licensed images (public domain / CC0 / CC BY) + official-site screenshots', imageCredits: script.imageCredits || [], imageAttributions: script.imageAttributions || [], officialUrl: script.officialUrl || '',
     cues,
     voice: narration.engine, character: characterMode, durationSec: outDur, createdAt: new Date().toISOString()
   }, null, 2));
@@ -1584,7 +1898,7 @@ async function main() {
     log('Dry run — skipping the YouTube upload.');
   } else {
     await reportStatus('running', '5/5 Uploading to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
-    published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 || CFG.category === 'news' });
+    published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
     log(`Published: ${published.url} (privacy: ${published.privacy})`);
   }
 
