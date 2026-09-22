@@ -111,6 +111,9 @@ const CFG = {
   previousScript: pick(JOB.previous_script, ENV.PREVIOUS_SCRIPT),
   privacy: pick(JOB.privacy, ENV.YOUTUBE_PRIVACY, 'public'),
   ytRefreshToken: pick(AUTH.youtube_refresh_token, ENV.YOUTUBE_REFRESH_TOKEN),
+  // Expected destination supplied by the campaign. Used as a final routing
+  // guard immediately before upload.
+  ytChannelId: pick(AUTH.youtube_channel_id, ENV.YOUTUBE_CHANNEL_ID),
   ytClientId: pick(AUTH.youtube_client_id, ENV.YOUTUBE_CLIENT_ID, DEFAULT_YT_CLIENT_ID),
   ytClientSecret: pick(AUTH.youtube_client_secret, ENV.YOUTUBE_CLIENT_SECRET),
   // Script writer keys the app sent (comma-separated) + repository secrets; rotated with instant failover.
@@ -147,6 +150,7 @@ const CFG = {
   wikiApiBase: pick(ENV.WIKI_API_BASE, 'https://en.wikipedia.org/w/api.php'),
   commonsApiBase: pick(ENV.COMMONS_API_BASE, 'https://commons.wikimedia.org/w/api.php'),
   openverseBase: pick(ENV.OPENVERSE_BASE, 'https://api.openverse.org/v1/images/'),
+  wikidataApiBase: pick(ENV.WIKIDATA_API_BASE, 'https://www.wikidata.org/w/api.php'),
   youtubeUploadBase: pick(ENV.YOUTUBE_UPLOAD_BASE, 'https://www.googleapis.com/upload/youtube/v3'),
   newsBase: pick(ENV.NEWS_RSS_BASE, 'https://news.google.com/rss/search'),
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
@@ -1215,18 +1219,253 @@ async function libraryImages(query: string, forAds = false): Promise<WebImage[]>
   return out.filter((x) => x.url && !BAD_IMAGE.test(x.url));
 }
 
-/** A real screenshot of a website (the tool's own page) with headless Chrome. */
-async function siteScreenshot(url: string, file: string): Promise<boolean> {
+/**
+ * Error / block pages that must NEVER end up in a video ("This site can't be
+ * reached", HTTP errors, bot checks, captchas, parked domains).
+ */
+const BROKEN_PAGE = /this site can.?t be reached|site can.?t be reached|\berr_[a-z_]{4,}|dns_probe|server.?s ip address could not be found|took too long to respond|refused to connect|just a moment\.\.\.|checking (if the site connection is secure|your browser)|attention required|verify you are (a )?human|are you a robot|enable javascript and cookies to continue|unusual traffic from your|domain (is )?for sale|buy this domain|account (has been )?suspended|welcome to nginx|default web page|apache2 (ubuntu|debian) default page/i;
+/** Only trusted in the page TITLE (or on a nearly empty page): these words also appear on healthy pages. */
+const BROKEN_TITLE = /access denied|forbidden|\b(400|401|403|404|410|429|500|502|503|504)\b|not found|bad gateway|service unavailable|coming soon|under construction|parked|it works!|error|captcha/i;
+
+/** Pixel variety of an image (0 = a flat colour). Blank / half-loaded screenshots score very low. */
+async function imageVariety(file: string): Promise<number> {
+  const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-vf', 'scale=96:60,format=gray', '-f', 'rawvideo', '-'], { timeoutMs: 20000 });
+  if (r.code !== 0 || !r.stdout.length) return 0;
+  const px = r.stdout;
+  let mean = 0; for (const v of px) mean += v; mean /= px.length;
+  let varc = 0; for (const v of px) varc += (v - mean) ** 2;
+  const hist = new Set<number>(); for (const v of px) hist.add(v >> 3);
+  return Math.sqrt(varc / px.length) * Math.min(1, hist.size / 8);
+}
+
+/** A page that loaded, but only shows a wall instead of the article / product. */
+const WALLED_PAGE = /subscribe to (continue|read|keep reading)|sign in to (continue|read|keep reading)|log ?in to (continue|read)|create (a )?(free )?account to (continue|read)|register to continue|become a (member|subscriber) to|this (article|content|story) is (for|available to) subscribers|you have reached your (article|free) limit|enable cookies to continue|turn off your ad ?blocker|please disable your ad ?blocker/i;
+
+interface Shot {
+  finalUrl: string;
+  title: string;
+  /** One or two verified PNG captures of the page (top of page first). */
+  files: string[];
+}
+
+/**
+ * A VERIFIED screenshot of a live website, driven through the Chrome DevTools
+ * protocol (not a blind `--screenshot`). A capture is only returned when every
+ * one of these is true, so a wrong or broken picture can never reach a video:
+ *
+ *   1. the main document answered 2xx/3xx and Chrome did not show an error page
+ *   2. the page is not a bot-check / parked / paywall / login wall
+ *   3. it really is the page we asked for (same site, or the story's own words
+ *      appear on it) — never a redirect to some unrelated homepage
+ *   4. cookie, consent, newsletter and app-install overlays are dismissed
+ *   5. lazy-loaded images, web fonts and late network work have finished
+ *   6. the capture is retina (2×) and is not blank / flat
+ *
+ * Anything else returns null: the scene then uses a licensed photo instead.
+ */
+async function siteScreenshot(url: string, file: string, opts: { expect?: string[]; second?: string } = {}): Promise<Shot | null> {
   const chrome = findChrome();
-  if (!chrome || CFG.offline || !url) return false;
+  const WS = (globalThis as any).WebSocket;
+  if (!chrome || CFG.offline || !url || !WS) return null;
+  const wantHost = hostOf(url);
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'animato-shot-'));
-  const size = '1440,900'; // the desktop page people actually see; matches the framed screen panel
-  const r = await run(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars', '--mute-audio', '--no-first-run',
-    `--user-data-dir=${profile}`, `--window-size=${size}`, '--virtual-time-budget=9000', `--user-agent=${BROWSER_UA}`, `--screenshot=${file}`, url], { timeoutMs: 45000 });
-  try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
-  if (r.code !== 0 || !fs.existsSync(file) || fs.statSync(file).size < 15000) return false;
-  const [w, h] = await imageSize(file);
-  return w >= 600 && h >= 400;
+  const proc = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars', '--mute-audio', '--no-first-run',
+    '--no-default-browser-check', '--disable-extensions', '--disable-features=IsolateOrigins,site-per-process,TranslateUI', '--autoplay-policy=user-gesture-required',
+    `--user-data-dir=${profile}`, '--remote-debugging-port=0', '--window-size=1440,900', 'about:blank'], { stdio: 'ignore' });
+  let ws: any = null;
+  const cleanup = () => { try { ws?.close(); } catch {} try { proc.kill('SIGKILL'); } catch {} try { fs.rmSync(profile, { recursive: true, force: true }); } catch {} };
+  const fail = (why: string) => { log(`Screenshot of ${wantHost || url} rejected: ${why}.`); return null; };
+  try {
+    // 1. Connect to Chrome.
+    let port = '';
+    for (let i = 0; i < 100 && !port; i++) {
+      const f = path.join(profile, 'DevToolsActivePort');
+      if (fs.existsSync(f)) port = fs.readFileSync(f, 'utf8').split('\n')[0].trim();
+      if (!port) await sleep(100);
+    }
+    if (!port) return fail('Chrome did not start');
+    const targets: any[] = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const page = targets.find((t) => t.type === 'page');
+    if (!page) return fail('no browser tab');
+    ws = new WS(page.webSocketDebuggerUrl);
+    await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error('devtools connection failed')); });
+    let id = 0;
+    const pending = new Map<number, (v: any) => void>();
+    const listeners: ((m: any) => void)[] = [];
+    ws.onmessage = (ev: any) => {
+      const m = JSON.parse(String(ev.data));
+      if (m.id && pending.has(m.id)) { pending.get(m.id)!(m); pending.delete(m.id); } else listeners.forEach((l) => l(m));
+    };
+    const cmd = (method: string, params: any = {}, timeoutMs = 20000) => new Promise<any>((res) => {
+      const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params }));
+      setTimeout(() => { if (pending.has(i)) { pending.delete(i); res({ error: { message: `${method} timed out` } }); } }, timeoutMs);
+    });
+    const evaluate = async (expression: string, timeoutMs = 20000) => {
+      const r = await cmd('Runtime.evaluate', { returnByValue: true, awaitPromise: true, expression }, timeoutMs);
+      return r.result?.result?.value;
+    };
+
+    // 2. Navigate like a real desktop visitor and watch the main document's status.
+    await cmd('Page.enable'); await cmd('Network.enable'); await cmd('Runtime.enable');
+    await cmd('Network.setUserAgentOverride', { userAgent: BROWSER_UA, acceptLanguage: 'en-US,en;q=0.9' });
+    // Retina metrics: text in the framed screenshot stays sharp at 1080p and 4K.
+    await cmd('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
+    await cmd('Emulation.setScriptExecutionDisabled', { value: false });
+    let docStatus = 0, loaded = false, inflight = 0, lastActivity = Date.now();
+    listeners.push((m) => {
+      if (m.method === 'Network.responseReceived' && m.params?.type === 'Document' && !docStatus) docStatus = m.params.response?.status || 0;
+      if (m.method === 'Page.loadEventFired') loaded = true;
+      if (m.method === 'Network.requestWillBeSent') { inflight++; lastActivity = Date.now(); }
+      if (m.method === 'Network.loadingFinished' || m.method === 'Network.loadingFailed') { inflight = Math.max(0, inflight - 1); lastActivity = Date.now(); }
+    });
+    const nav = await cmd('Page.navigate', { url }, 30000);
+    if (nav.error) return fail(nav.error.message);
+    if (nav.result?.errorText) return fail(nav.result.errorText);
+    for (let i = 0; i < 200 && !loaded; i++) await sleep(100);        // up to 20 s for the load event
+    // Wait for the network to go quiet (lazy images, fonts, hero videos…).
+    for (let i = 0; i < 120; i++) {
+      if (inflight === 0 && Date.now() - lastActivity > 700) break;
+      await sleep(100);
+    }
+    if (docStatus && (docStatus < 200 || docStatus >= 400)) return fail(`HTTP ${docStatus}`);
+
+    // 3. Dismiss cookie / consent / newsletter / app-install overlays, then make
+    //    every lazy image load by walking down the page and back to the top.
+    await evaluate(`(async () => {
+      const YES = /^(accept|accept all|accept all cookies|allow all|i agree|agree|got it|ok|okay|continue|understood|allow|yes, i agree|i accept|save and (accept|close)|reject all|decline|no thanks|not now|maybe later|close|dismiss|skip)$/i;
+      const BAD = /cookie|consent|gdpr|onetrust|cmp|truste|privacy|banner|cc-window|qc-cmp|didomi|usercentrics|newsletter|subscribe|signup|sign-up|paywall|modal|overlay|popup|interstitial|app-?(banner|install)|promo|notification|sp_message|piano|tp-modal/i;
+      const click = () => {
+        const els = Array.from(document.querySelectorAll('button, a[role=button], [role=button], input[type=button], input[type=submit]')).slice(0, 400);
+        for (const el of els) {
+          const t = ((el.innerText || el.value || el.getAttribute('aria-label') || '') + '').trim();
+          if (!t || t.length > 28 || !YES.test(t)) continue;
+          const box = el.getBoundingClientRect();
+          if (!box.width || !box.height) continue;
+          const holder = el.closest('div,section,aside,dialog,form') || el;
+          const tag = (holder.id || '') + ' ' + (typeof holder.className === 'string' ? holder.className : '');
+          const fixed = ['fixed', 'sticky'].includes(getComputedStyle(holder).position);
+          if (BAD.test(tag) || fixed || /cookie|consent/i.test((holder.innerText || '').slice(0, 300))) { try { el.click(); } catch (e) {} return true; }
+        }
+        return false;
+      };
+      click(); await new Promise((r) => setTimeout(r, 500)); click();
+      // Anything still floating over the page and looking like an overlay: hide it.
+      for (const el of Array.from(document.querySelectorAll('body *')).slice(0, 4000)) {
+        const s = getComputedStyle(el);
+        if (s.position !== 'fixed' && s.position !== 'sticky') continue;
+        const box = el.getBoundingClientRect();
+        const tag = (el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '') + ' ' + (el.getAttribute('aria-label') || '');
+        const txt = (el.innerText || '').slice(0, 400);
+        const covers = box.height > innerHeight * 0.55 && box.width > innerWidth * 0.55;
+        if (BAD.test(tag) || covers || /\\b(cookies?|consent|subscribe|newsletter|sign up)\\b/i.test(txt)) el.style.setProperty('display', 'none', 'important');
+      }
+      for (const el of Array.from(document.querySelectorAll('[class*=paywall], [id*=paywall], [class*=backdrop], [class*=overlay], .modal, dialog[open]')).slice(0, 200)) {
+        el.style && el.style.setProperty('display', 'none', 'important');
+      }
+      document.documentElement.style.setProperty('overflow', 'auto', 'important');
+      document.body.style.setProperty('overflow', 'auto', 'important');
+      document.body.style.removeProperty('position');
+      // Wake up lazy images: walk down a few screens, then come back.
+      const h = Math.min(document.body.scrollHeight, innerHeight * 5);
+      for (let y = 0; y <= h; y += Math.round(innerHeight * 0.75)) { window.scrollTo(0, y); window.dispatchEvent(new Event('scroll')); await new Promise((r) => setTimeout(r, 220)); }
+      window.scrollTo(0, 0); window.dispatchEvent(new Event('scroll'));
+      for (const img of Array.from(document.images)) { img.loading = 'eager'; if (img.dataset && img.dataset.src && !img.src) img.src = img.dataset.src; }
+      try { await document.fonts.ready; } catch (e) {}
+      for (let i = 0; i < 40; i++) {
+        const shown = Array.from(document.images).filter((im) => im.getBoundingClientRect().top < innerHeight * 1.2 && im.naturalWidth === 0 && im.currentSrc);
+        if (!shown.length) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 700));
+      return true;
+    })()`, 45000);
+
+    // 4. Read the page that is actually on screen now and check it is the right one.
+    const probe = await evaluate(`(() => {
+      const text = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+      const imgs = Array.from(document.images).filter((i) => i.naturalWidth > 120 && i.getBoundingClientRect().top < innerHeight * 1.5).length;
+      return { title: document.title || '', head: text.slice(0, 900), length: text.length, imgs, url: location.href,
+        height: document.body ? document.body.scrollHeight : 0,
+        errorPage: !!document.querySelector('#main-frame-error, .neterror, #sub-frame-error') };
+    })()`);
+    const info = probe;
+    if (!info) return fail('page could not be read');
+    if (info.errorPage || /^(chrome-error|about:)/.test(info.url)) return fail('browser error page');
+    if (BROKEN_PAGE.test(`${info.title} ${info.head}`) || BROKEN_TITLE.test(info.title) || (info.length < 600 && BROKEN_TITLE.test(info.head)))
+      return fail(`error/blocked page ("${String(info.title || info.head).slice(0, 60)}")`);
+    if (WALLED_PAGE.test(info.head) || (WALLED_PAGE.test(`${info.title} ${info.head}`) && info.length < 1800))
+      return fail('paywall / sign-in wall');
+    if (info.length < 200 && info.imgs < 2) return fail('page is nearly empty');
+    // Right page? Same site is enough; otherwise the story's own words must be on it.
+    const gotHost = hostOf(info.url);
+    const sameSite = !!gotHost && !!wantHost && (gotHost === wantHost || gotHost.endsWith(`.${wantHost}`) || wantHost.endsWith(`.${gotHost}`));
+    const words = (opts.expect || []).join(' ').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+      .filter((w) => w.length > 3 && !['this', 'that', 'with', 'from', 'what', 'when', 'your', 'about', 'after', 'into', 'their', 'says', 'will', 'more', 'than', 'have', 'been'].includes(w));
+    const haystack = `${info.title} ${info.head} ${info.url}`.toLowerCase();
+    const hits = Array.from(new Set(words)).filter((w) => haystack.includes(w));
+    if (!sameSite && words.length && !hits.length)
+      return fail(`redirected to ${gotHost || 'another site'}, which is not about this story`);
+    if (!sameSite && !words.length) return fail(`redirected to ${gotHost || 'another site'}`);
+
+    // 5. Capture, and check the picture itself. One retry if it comes out flat.
+    const files: string[] = [];
+    const grab = async (target: string): Promise<boolean> => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const shot = await cmd('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, 30000);
+        const b64 = shot.result?.data;
+        if (!b64) { await sleep(1500); continue; }
+        fs.writeFileSync(target, Buffer.from(b64, 'base64'));
+        const variety = await imageVariety(target);
+        if (variety >= 6) return true;
+        try { fs.unlinkSync(target); } catch {}
+        log(`Screenshot attempt ${attempt + 1} of ${gotHost} was flat (variety ${variety.toFixed(1)}) — waiting and retrying.`);
+        await sleep(2500);
+      }
+      return false;
+    };
+    if (!(await grab(file))) return fail('blank / flat capture');
+    files.push(file);
+    // A second view further down the page, so two scenes never show the same frame.
+    if (opts.second && info.height > 1400) {
+      await evaluate(`(async () => {
+        window.scrollTo(0, Math.min(document.body.scrollHeight - innerHeight, Math.round(innerHeight * 1.15)));
+        window.dispatchEvent(new Event('scroll'));
+        for (const el of Array.from(document.querySelectorAll('body *')).slice(0, 3000)) {
+          const s = getComputedStyle(el);
+          if (s.position === 'fixed' || s.position === 'sticky') el.style.setProperty('display', 'none', 'important');
+        }
+        await new Promise((r) => setTimeout(r, 900));
+        return true;
+      })()`, 20000);
+      if (await grab(opts.second)) {
+        const a = crypto.createHash('md5').update(fs.readFileSync(file)).digest('hex');
+        const b = crypto.createHash('md5').update(fs.readFileSync(opts.second)).digest('hex');
+        if (a === b) { try { fs.unlinkSync(opts.second); } catch {} } else files.push(opts.second);
+      }
+    }
+    log(`Screenshot of ${gotHost} verified: HTTP ${docStatus || 'ok'}, "${String(info.title).slice(0, 60)}", ${info.length} chars, ${info.imgs} image(s)${hits.length ? `, matched "${hits.slice(0, 4).join(', ')}"` : ''}, ${files.length} view(s) at 2×.`);
+    return { finalUrl: info.url, title: info.title, files };
+  } catch (err: any) {
+    return fail(err?.message || String(err));
+  } finally {
+    cleanup();
+  }
+}
+
+/** The product's official website as recorded on Wikidata (property P856) — used when the script's URL doesn't work. */
+async function wikidataOfficialSite(name: string): Promise<string> {
+  if (!name) return '';
+  const d = await fetchJson(`${CFG.wikidataApiBase}?action=wbsearchentities&format=json&origin=*&language=en&type=item&limit=3&search=${encodeURIComponent(name)}`);
+  const ids = (d?.search || []).map((x: any) => x.id).filter(Boolean).slice(0, 3);
+  if (!ids.length) return '';
+  const e = await fetchJson(`${CFG.wikidataApiBase}?action=wbgetentities&format=json&origin=*&props=claims&ids=${ids.join('|')}`);
+  for (const qid of ids) {
+    const claims = e?.entities?.[qid]?.claims?.P856 || [];
+    const best = claims.find((c: any) => c.rank === 'preferred') || claims[0];
+    const url = cleanOfficialUrl(best?.mainsnak?.datavalue?.value);
+    if (url) return url;
+  }
+  return '';
 }
 
 /**
@@ -1268,6 +1507,8 @@ async function takeImage(img: WebImage, raw: string, out: string): Promise<boole
 
 /** Scenes that talk about using the tool / its website get the real screenshot. */
 const WEBSITE_WORDS = /\b(website|site|open|go to|visit|sign ?up|log ?in|download|install|app store|play store|click|tap|type|upload|paste|dashboard|interface|homepage|free plan|pricing)\b/i;
+/** News: the scene that names where the story comes from gets the article's own page. */
+const SOURCE_WORDS = /\b(according to|reported|reports|report|announced|confirmed|statement|published|sources?|story|article|headline|per )\b/i;
 
 /** The fixed look of every named character who appears in this scene (keeps people consistent across images). */
 function castFor(script: Script, scene: Scene): string {
@@ -1361,17 +1602,71 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     const pool: WebImage[] = [];
     const briefUrl = forAds ? cleanOfficialUrl((CFG.adBrief.match(/\bhttps?:\/\/[^\s)"'<>]+|\bwww\.[a-z0-9-]+\.[a-z.]{2,}[^\s)"'<>]*/i) || [])[0]) : '';
     const official = script.officialUrl || briefUrl;
-    let screenshot: { file: string; credit: string; uses: number } | null = null;
-    if (official) {
-      const [imgs, shotOk] = await Promise.all([
-        forAds ? advertiserImages(official) : Promise.resolve([] as WebImage[]), // the advertiser supplies these; other brands' images are not used
-        siteScreenshot(official, path.join(WORK_DIR, 'site_shot.png'))
-      ]);
+    /** News / tech: the page the story itself was published on. */
+    const storyLink = cleanOfficialUrl(script.sourceStory?.link || '');
+    // ---- REAL SCREENSHOTS (everything except stories)
+    // News: the article's own page on the publisher's site. Tech / tutorials /
+    // ads: the product's official site. Every capture is verified live — right
+    // site, no cookie wall, no paywall, no error page, nothing blank — and shown
+    // in a browser window with the real address, so what viewers see is exactly
+    // what the site shows. If nothing passes, no screenshot is used at all.
+    const shots: { file: string; credit: string; uses: number }[] = [];
+    let shotUses = 0;
+    const shotCap = cat === 'news' ? 2 : 3;
+    if (official || storyLink || cat === 'tech') {
+      const imgsP = forAds && official ? advertiserImages(official) : Promise.resolve([] as WebImage[]); // other brands' images are not used
+      // Candidates, best first: the story's own article page, the URL the script
+      // named, those sites' front pages, then the product's official site on
+      // Wikidata. A candidate is only used if it passes every check in
+      // siteScreenshot() — the first one that does wins.
+      const tried = new Set<string>();
+      const names = Array.from(new Set(script.scenes.map((x) => x.searchQuery).filter(Boolean))).slice(0, 2);
+      const homeOf = (u: string) => { try { const x = new URL(u); return x.pathname === '/' ? '' : `${x.origin}/`; } catch { return ''; } };
+      const expect = [script.sourceStory?.title || '', script.sourceHeadline || '', subject, ...names].filter(Boolean);
+      const candidates: (() => Promise<string>)[] = [
+        async () => storyLink,
+        async () => official,
+        async () => homeOf(storyLink),
+        async () => homeOf(official),
+        ...names.map((nm) => async () => wikidataOfficialSite(nm))
+      ];
+      const pngA = path.join(WORK_DIR, 'site_shot.png'), pngB = path.join(WORK_DIR, 'site_shot_b.png');
+      let shot: Shot | null = null;
+      const started = Date.now();
+      for (const next of candidates) {
+        if (Date.now() - started > 150_000) break;
+        const url = await next();
+        if (!url || tried.has(url)) continue;
+        tried.add(url);
+        shot = await siteScreenshot(url, pngA, { expect, second: pngB });
+        if (shot) break;
+      }
+      const imgs = await imgsP;
       pool.push(...imgs);
-      const shotJpg = path.join(WORK_DIR, 'site_shot.jpg');
-      if (shotOk && (await framedScreenshot(path.join(WORK_DIR, 'site_shot.png'), official, shotJpg) || await toJpeg(path.join(WORK_DIR, 'site_shot.png'), shotJpg))) screenshot = { file: shotJpg, credit: `Screenshot: ${hostOf(official)}`, uses: 0 };
-      log(`Official site ${hostOf(official)}: ${screenshot ? 'live screenshot for the how-to steps' : 'no screenshot'}${imgs.length ? ` + ${imgs.length} advertiser image(s)` : ''}.`);
+      if (shot) {
+        let k = 0;
+        for (const png of shot.files) {
+          const jpg = path.join(WORK_DIR, `site_shot_${k}.jpg`);
+          // Always presented as a framed browser window with the real address.
+          if ((await framedScreenshot(png, shot.finalUrl, jpg)) || (await toJpeg(png, jpg))) {
+            shots.push({ file: jpg, credit: `Screenshot: ${hostOf(shot.finalUrl)}`, uses: 0 });
+          }
+          k++;
+        }
+        // Cite the page that actually loaded (tech / tutorials / ads only — a news
+        // video cites its source story separately).
+        if (cat !== 'news' && (!script.officialUrl || hostOf(script.officialUrl) !== hostOf(shot.finalUrl))) script.officialUrl = shot.finalUrl;
+      }
+      log(shots.length
+        ? `Screenshots: ${shots.length} verified live view(s) of ${hostOf(shot!.finalUrl)}${cat === 'news' ? ' (the story\u2019s own page)' : ''}.`
+        : `Screenshots: none — ${tried.size ? `${tried.size} candidate(s) failed verification (${Array.from(tried).map(hostOf).join(', ')})` : 'no page to shoot'}; licensed photos are used instead.`);
     }
+    /** The least-used verified screenshot that is still within its budget. */
+    const nextShot = () => {
+      if (shotUses >= shotCap) return null;
+      const free = shots.filter((x) => x.uses < 2).sort((a, b) => a.uses - b.uses);
+      return free[0] || null;
+    };
 
     const tryList = async (list: WebImage[], raw: string, out: string): Promise<WebImage | null> => {
       for (const img of list) { if (Date.now() > deadline) return null; if (await takeImage(img, raw, out)) return img; }
@@ -1386,7 +1681,10 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
       const set = (file: string, credit: string) => { files[i] = file; credits[i] = credit; };
       if (productFiles.length && (s.productShot || (forAds && s.shot === 'panel'))) { set(productFiles[productCursor++ % productFiles.length], 'Product image'); return; }
       // A website screenshot is always shown as a framed screen (panel), never stretched full-screen.
-      if (screenshot && screenshot.uses < 2 && WEBSITE_WORDS.test(s.narration)) { screenshot.uses++; s.shot = 'panel'; set(screenshot.file, screenshot.credit); return; }
+      if (WEBSITE_WORDS.test(s.narration) || (cat === 'news' && SOURCE_WORDS.test(s.narration))) {
+        const sh = nextShot();
+        if (sh) { sh.uses++; shotUses++; s.shot = 'panel'; set(sh.file, sh.credit); return; }
+      }
       const q = s.searchQuery || subject.split(/\s+/).slice(0, 6).join(' ');
       // Best first: the named person / place / organisation's free Wikipedia image,
       // then freely licensed photo libraries for the scene, then for the whole topic.
@@ -1401,7 +1699,8 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
         const got = await tryList(await src(), raw, out);
         if (got) { set(out, got.credit); if (got.attribution && !attributions.includes(got.attribution)) attributions.push(got.attribution); return; }
       }
-      if (screenshot) { screenshot.uses++; s.shot = 'panel'; set(screenshot.file, screenshot.credit); }
+      const sh = nextShot();
+      if (sh) { sh.uses++; shotUses++; s.shot = 'panel'; set(sh.file, sh.credit); }
     };
     const queue = script.scenes.map((_, i) => i);
     await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await fetchOne(queue.shift()!); }));
@@ -1701,9 +2000,10 @@ async function renderFallback(opts: { narration: Narration; times: { start: numb
 // 6. YouTube
 // ---------------------------------------------------------------------------
 let cachedYouTubeToken = '';
+let verifiedYouTubeChannelId = '';
 
 async function youtubeAccessToken(): Promise<string> {
-  if (cachedYouTubeToken) return cachedYouTubeToken;
+  if (cachedYouTubeToken && (!CFG.ytChannelId || verifiedYouTubeChannelId === CFG.ytChannelId)) return cachedYouTubeToken;
   if (!CFG.ytRefreshToken) throw new PipelineError('youtube_not_connected', 'No YouTube account is connected to this automation. Open its dashboard and press "Connect YouTube".');
   if (!CFG.ytClientSecret) throw new PipelineError('youtube_config', 'The YouTube OAuth client secret was not provided to the runner.');
   const res = await fetch(CFG.googleTokenUrl, {
@@ -1720,10 +2020,70 @@ async function youtubeAccessToken(): Promise<string> {
     throw new PipelineError('youtube_auth', `Google token refresh failed (HTTP ${res.status}): ${data?.error_description || data?.error || 'unknown error'}`);
   }
   cachedYouTubeToken = data.access_token;
+
+  // Final destination guard: resolve the YouTube channel for this OAuth
+  // credential and refuse to upload if it is not the channel assigned to this
+  // automation. A routing mistake therefore becomes a failed run, never a
+  // cross-post to another automation.
+  if (CFG.ytChannelId) {
+    const ch = await fetch('https://www.googleapis.com/youtube/v3/channels?part=id,snippet&mine=true', {
+      headers: { Authorization: `Bearer ${cachedYouTubeToken}` },
+      signal: AbortSignal.timeout(30000)
+    });
+    const chData: any = await ch.json().catch(() => ({}));
+    const actualId = String(chData?.items?.[0]?.id || '');
+    const actualTitle = String(chData?.items?.[0]?.snippet?.title || '');
+    if (!ch.ok || !actualId) {
+      throw new PipelineError('youtube_routing', `Could not verify the YouTube destination for automation ${CFG.campaignId || '(unknown)'}.`);
+    }
+    if (actualId !== CFG.ytChannelId) {
+      throw new PipelineError(
+        'youtube_routing',
+        `YouTube destination mismatch for automation ${CFG.campaignId || '(unknown)'}: this automation is assigned to channel ${CFG.ytChannelId}, but the OAuth credential resolves to ${actualId}${actualTitle ? ` (${actualTitle})` : ''}. Nothing was uploaded.`
+      );
+    }
+    verifiedYouTubeChannelId = actualId;
+    log(`YouTube destination verified: ${actualTitle || actualId} (${actualId}).`);
+  }
+
   return cachedYouTubeToken;
 }
 
 const YT_CATEGORY: Record<string, string> = { cooking: '26', tech: '28', stories: '24', news: '25', ads: '22' };
+
+/** Build a YouTube-safe description. YouTube's limit is 5,000 UTF-8 bytes,
+ * not 5,000 JavaScript characters. Strip controls and invalid URL-like text,
+ * normalize whitespace, and leave headroom so emoji/non-ASCII text cannot
+ * accidentally cross the API limit.
+ */
+function sanitizeYouTubeDescription(input: unknown): string {
+  let text = String(input || '')
+    .normalize('NFC')
+    .replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '')
+    .replace(/[<>]/g, '')
+    .replace(/[ \\t]+\\n/g, '\\n')
+    .replace(/\\n{4,}/g, '\\n\\n\\n')
+    .trim();
+  if (!text) text = 'Created automatically with Animato AutoPoster Studio.';
+  while (Buffer.byteLength(text, 'utf8') > 4900) {
+    text = text.slice(0, Math.max(0, text.length - 64)).trimEnd();
+  }
+  return text;
+}
+
+function youtubeHashtagLine(values: unknown[]): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const h = String(value || '').trim().replace(/^#+/, '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 30);
+    if (h.length >= 3 && !seen.has(h)) {
+      seen.add(h);
+      out.push(`#${h}`);
+    }
+    if (out.length >= 8) break;
+  }
+  return out.join(' ');
+}
 
 async function uploadToYouTube(meta: { title: string; description: string; tags: string[]; synthetic: boolean }): Promise<{ videoId: string; url: string; privacy: string }> {
   const token = await youtubeAccessToken();
@@ -1735,7 +2095,7 @@ async function uploadToYouTube(meta: { title: string; description: string; tags:
   let tagChars = 0;
   const tags = meta.tags.filter((t) => { tagChars += t.length + 3; return tagChars < 480; });
   const body = {
-    snippet: { title, description: meta.description.slice(0, 4900), tags, categoryId: YT_CATEGORY[CFG.category] || '24', defaultLanguage: 'en', defaultAudioLanguage: 'en' },
+    snippet: { title, description: sanitizeYouTubeDescription(meta.description), tags, categoryId: YT_CATEGORY[CFG.category] || '24', defaultLanguage: 'en', defaultAudioLanguage: 'en' },
     status: { privacyStatus: CFG.privacy, selfDeclaredMadeForKids: false, containsSyntheticMedia: meta.synthetic }
   };
   const init = await fetch(`${CFG.youtubeUploadBase}/videos?uploadType=resumable&part=snippet,status`, {
@@ -1862,8 +2222,12 @@ async function main() {
   if (outDur < 3) throw new PipelineError('render_failed', `Rendered video is only ${outDur.toFixed(1)}s long.`);
   log(`Video: ${(fs.statSync(OUTPUT_VIDEO).size / 1e6).toFixed(1)} MB, ${outDur.toFixed(1)}s, character: ${characterMode}.`);
 
-  const hashtagLine = [...script.hashtags, ...(IS_SHORTS ? ['shorts'] : [])].map((h) => `#${h}`).join(' ');
-  const description = [
+  // Keep hashtags relevant and valid; never generate ##foo or generic spam tags.
+  const hashtagLine = youtubeHashtagLine([
+    ...(Array.isArray(script.hashtags) ? script.hashtags : []),
+    ...(IS_SHORTS ? ['shorts'] : [])
+  ]);
+  const description = sanitizeYouTubeDescription([
     script.description || script.title,
     CFG.category === 'stories'
       ? (CFG.partNumber >= CFG.arcParts
@@ -1875,11 +2239,15 @@ async function main() {
     script.imageAttributions?.length
       ? `\nImage credits (images may be cropped):\n${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
       : '',
-    script.imageCredits?.some((c) => c.startsWith('Screenshot:')) ? `Screenshots of ${script.officialUrl ? hostOf(script.officialUrl) : 'the official website'} are shown to explain how to use it.` : '',
+    script.imageCredits?.some((c) => c.startsWith('Screenshot:'))
+      ? (CFG.category === 'news'
+        ? `Screenshots show the source page this story was reported on (${script.imageCredits.filter((c) => c.startsWith('Screenshot:')).map((c) => c.replace('Screenshot: ', '')).join(', ')}).`
+        : `Screenshots of ${script.officialUrl ? hostOf(script.officialUrl) : 'the official website'} are shown to explain how to use it.`)
+      : '',
     CFG.category !== 'stories' ? '' : 'Story art is original and AI-generated for this video.',
     'Music: original, composed for this video.',
-    `\n${hashtagLine}`
-  ].filter(Boolean).join('\n').trim();
+    hashtagLine ? `\n${hashtagLine}` : ''
+  ].filter(Boolean).join('\n').trim());
 
   fs.writeFileSync(OUTPUT_META, JSON.stringify({
     campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect,

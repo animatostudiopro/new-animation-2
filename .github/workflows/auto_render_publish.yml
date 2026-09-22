@@ -44,7 +44,7 @@ on:
         type: string
         default: '1'
       auto_post_youtube:
-        description: Publish to YouTube (needs YOUTUBE_* repository secrets)
+        description: Publish to YouTube (automatic runs use the automation's connected channel)
         type: choice
         options: ['false', 'true']
         default: 'false'
@@ -115,7 +115,10 @@ jobs:
           # a fallback for manual runs.
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          # Auto runs get their refresh token only from the campaign-specific dispatch payload.
+          # Never expose the shared repository refresh token to repository_dispatch runs,
+          # otherwise a missing payload token could silently route to another channel.
+          YOUTUBE_REFRESH_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.YOUTUBE_REFRESH_TOKEN || '' }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
