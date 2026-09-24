@@ -30,7 +30,6 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
-import { publishToFacebook, publishToInstagram, SocialError } from './social.ts';
 import { researchNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 
@@ -110,12 +109,8 @@ const CFG = {
   format: FMT.format,
   aspect: FMT.aspect,
   autoPost: pick(JOB.auto_post_youtube, INPUTS.auto_post_youtube, ENV.AUTO_POST_YOUTUBE, 'false').toLowerCase() === 'true',
-  // Where to publish: any of youtube, facebook, instagram (older jobs: YouTube only).
-  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter(Boolean)),
-  fbPageId: pick(AUTH.facebook_page_id, ENV.FACEBOOK_PAGE_ID),
-  fbPageToken: pick(AUTH.facebook_page_token, ENV.FACEBOOK_PAGE_TOKEN),
-  igUserId: pick(AUTH.instagram_user_id, ENV.INSTAGRAM_USER_ID),
-  fbGraphVersion: pick(AUTH.facebook_graph_version, ENV.FACEBOOK_GRAPH_VERSION, 'v23.0'),
+  // Where to publish: YouTube only.
+  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter((x) => x === 'youtube')),
   previousScript: pick(JOB.previous_script, ENV.PREVIOUS_SCRIPT),
   privacy: pick(JOB.privacy, ENV.YOUTUBE_PRIVACY, 'public'),
   ytRefreshToken: pick(AUTH.youtube_refresh_token, ENV.YOUTUBE_REFRESH_TOKEN),
@@ -166,7 +161,7 @@ const CFG = {
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.fbPageToken, CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -179,8 +174,8 @@ fs.mkdirSync(WORK_DIR, { recursive: true });
 
 // Older jobs had no target list: YouTube when auto-post is on.
 if (!CFG.targets.size && CFG.autoPost) CFG.targets.add('youtube');
-const WANT = { youtube: CFG.targets.has('youtube'), facebook: CFG.targets.has('facebook') && !!CFG.fbPageToken, instagram: CFG.targets.has('instagram') && !!CFG.fbPageToken && !!CFG.igUserId };
-const PUBLISH = WANT.youtube || WANT.facebook || WANT.instagram;
+const WANT = { youtube: CFG.targets.has('youtube') };
+const PUBLISH = WANT.youtube;
 
 const [W, H] = DIMENSIONS[CFG.aspect];
 const FPS = 30;
@@ -2522,9 +2517,6 @@ async function main() {
     await youtubeAccessToken();
     log('YouTube connection verified.');
   }
-  if ((CFG.targets.has('facebook') || CFG.targets.has('instagram')) && !CFG.fbPageToken) {
-    throw new PipelineError('facebook_not_connected', 'Facebook/Instagram posting is on, but no Facebook Page is connected to this automation.');
-  }
 
   // 1. Script
   const script = await generateScript(pastStory, pastTitles, pastSources);
@@ -2611,8 +2603,6 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     creditsBlock,
     hashtagLine
   ].filter(Boolean).join('\n\n').trim());
-  // Facebook / Instagram get the same detailed text (Instagram: max 2,200 chars, 30 hashtags).
-  const socialText = [script.description, descriptionDetails(script), series, sourcesBlock].filter(Boolean).join('\n\n').trim();
 
   fs.writeFileSync(OUTPUT_META, JSON.stringify({
     campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect,
@@ -2623,63 +2613,22 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     voice: narration.engine, character: characterMode, durationSec: outDur, createdAt: new Date().toISOString()
   }, null, 2));
 
-  // 5. Publish — YouTube, the Facebook Page and/or its Instagram.
+  // 5. Publish on YouTube.
   let published: { videoId: string; url: string; privacy: string } | null = null;
-  let facebookUrl = '', instagramUrl = '';
-  const failures: { where: string; code: string; message: string }[] = [];
   if (!PUBLISH) {
     log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
   } else if (CFG.dryRun) {
-    log(`Dry run — skipping publishing (${Array.from(CFG.targets).join(', ')}).`);
+    log('Dry run — skipping publishing.');
   } else {
-    const where = [WANT.youtube && 'YouTube', WANT.facebook && 'Facebook', WANT.instagram && 'Instagram'].filter(Boolean).join(', ');
-    await reportStatus('running', `5/5 Publishing to ${where}`, 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to ${where}…`);
-    if (WANT.youtube) {
-      try {
-        published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
-        log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
-      } catch (err: any) {
-        // Only YouTube: keep the original behaviour (the error decides retry vs pause).
-        if (!WANT.facebook && !WANT.instagram) throw err;
-        failures.push({ where: 'YouTube', code: err?.code || 'youtube_upload', message: String(err?.message || err) });
-        log(`⚠️ YouTube upload failed: ${err?.message || err}`);
-      }
-    }
-    const social = { pageId: CFG.fbPageId, pageToken: CFG.fbPageToken, igUserId: CFG.igUserId, version: CFG.fbGraphVersion, log };
-    const vertical = CFG.aspect === '9:16' || CFG.aspect === '1:1';
-    const tagLine = script.hashtags.map((h) => `#${h}`).join(' ');
-    if (WANT.facebook) {
-      try {
-        const fb = await publishToFacebook(social, OUTPUT_VIDEO, { title: script.title, description: `${socialText}\n\n${tagLine}`.trim().slice(0, 5000), vertical });
-        facebookUrl = fb.url;
-        log(`Published on Facebook: ${fb.url}`);
-      } catch (err: any) {
-        failures.push({ where: 'Facebook', code: err instanceof SocialError ? err.code : 'facebook_upload', message: String(err?.message || err) });
-        log(`⚠️ Facebook upload failed: ${err?.message || err}`);
-      }
-    }
-    if (WANT.instagram) {
-      try {
-        const ig = await publishToInstagram(social, OUTPUT_VIDEO, { caption: `${script.title}\n\n${socialText}`.slice(0, 2150 - tagLine.length).trim() + `\n\n${tagLine}` });
-        instagramUrl = ig.url;
-        log(`Published on Instagram: ${ig.url}`);
-      } catch (err: any) {
-        failures.push({ where: 'Instagram', code: err instanceof SocialError ? err.code : 'facebook_upload', message: String(err?.message || err) });
-        log(`⚠️ Instagram upload failed: ${err?.message || err}`);
-      }
-    }
-    if (!published && !facebookUrl && !instagramUrl && failures.length) {
-      const auth = failures.find((f) => /auth|not_connected|not_linked/.test(f.code));
-      throw new PipelineError(auth?.code || failures[0].code, `Publishing failed everywhere: ${failures.map((f) => `${f.where}: ${f.message}`).join(' | ')}`);
-    }
-    if (failures.length) await reportStatus('running', '5/5 Published (partly)', 95, `⚠️ Not posted on ${failures.map((f) => `${f.where} (${f.message.slice(0, 120)})`).join(', ')}.`);
+    await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
+    published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
+    log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
   }
 
   // 6. Report back — the app records the episode and schedules the next one.
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
     partNumber: CFG.partNumber, title: script.title, script: fullText, description,
-    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!(published || facebookUrl || instagramUrl),
-    facebookUrl, instagramUrl,
+    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published,
     privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
     usedFallbackTemplate: script.usedFallbackTemplate, voice: narration.engine, character: characterMode,
     durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl,
@@ -2692,7 +2641,7 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
-  const links = [published?.url, facebookUrl, instagramUrl].filter(Boolean);
+  const links = [published?.url].filter(Boolean);
   await reportStatus('completed', links.length ? 'Published' : 'Video rendered', 100,
     links.length ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${links.join(' · ')}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
     { youtubeUrl: published?.url || '' });

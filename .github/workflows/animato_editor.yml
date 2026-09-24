@@ -2,7 +2,8 @@
 #
 # Installed and kept up to date automatically by the Animato app.
 # One run edits ONE upload: transcribe the voice, cut fillers / retakes /
-# dead air, match the video to what is said and compile the final MP4.
+# dead air, match the video to what is said and compile the final MP4 with
+# the captions drawn onto the picture.
 
 name: Animato AI Video Editor
 
@@ -25,8 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout
+      - name: Checkout (the editor only)
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: animato-cloud
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -40,9 +43,13 @@ jobs:
 
       - name: Install FFmpeg
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null
+          # Skip the slow package-list refresh when the runner's lists are fresh enough.
+          if ! command -v ffmpeg > /dev/null; then
+            sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null 2>&1 \
+              || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null; }
+          fi
           ffmpeg -hide_banner -version | head -n 1
+          nproc
 
       - name: Edit the video
         env:
@@ -57,6 +64,6 @@ jobs:
           name: animato-edit-${{ github.run_id }}
           path: |
             output/editor/edited.mp4
-            output/editor/captions.srt
+            output/editor/captions.ass
           retention-days: 7
           if-no-files-found: ignore
