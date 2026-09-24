@@ -56,7 +56,7 @@ const tail = (k: string) => `…${String(k).slice(-4)}`;
 type Outcome =
   | { kind: 'ok'; text: string; sources?: WebSource[] }
   | { kind: 'dead-key'; why: string }
-  | { kind: 'rate'; why: string; daily: boolean }
+  | { kind: 'rate'; why: string; daily: boolean; retryMs?: number }
   | { kind: 'model-gone'; why: string }
   | { kind: 'too-large'; why: string }
   | { kind: 'blocked'; why: string }
@@ -77,7 +77,10 @@ export class LlmPool {
   cfg: LlmConfig;
   exhausted = new Set<string>();          // provider:model
   deadKeys = new Map<string, string>();   // key → reason
-  pairDone = new Set<string>();           // key|model
+  pairDone = new Set<string>();           // key|model (daily quota used / refused for this run)
+  coolUntil = new Map<string, number>();  // key|model → when a per-minute rate limit lifts
+  /** How long attempts() may wait in total for per-minute limits to lift before giving up (ms). */
+  maxWaitMs = 4 * 60 * 1000;
   cursor: Record<Provider, number> = { gemini: 0, groq: 0 };
   lastErrors: string[] = [];
 
@@ -111,6 +114,23 @@ export class LlmPool {
 
   /** Every usable (provider, model) answer, best first. Stop iterating once an answer is good enough. */
   async *attempts(req: LlmRequest): AsyncGenerator<LlmAttempt> {
+    // Per-minute rate limits are temporary: when every model is only cooling
+    // down, wait for the first one to come back instead of failing the video.
+    const started = Date.now();
+    let yielded = false;
+    for (let round = 0; round < 6; round++) {
+      for await (const a of this.pass(req)) { yielded = true; yield a; }
+      if (yielded) return;
+      const now = Date.now();
+      const next = Math.min(...[...this.coolUntil.values()].filter((t) => t > now), Infinity);
+      if (!Number.isFinite(next) || now + (next - now) - started > this.maxWaitMs) return;
+      const wait = Math.max(1000, next - now + 1500);
+      this.log(`All models are rate-limited for the moment — waiting ${Math.round(wait / 1000)}s for the limit to lift, then trying again.`);
+      await new Promise((z) => setTimeout(z, wait));
+    }
+  }
+
+  private async *pass(req: LlmRequest): AsyncGenerator<LlmAttempt> {
     let user = req.user;
     for (const provider of ['gemini', 'groq'] as Provider[]) {
       if (!(provider === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys).length) continue;
@@ -118,7 +138,14 @@ export class LlmPool {
         let serverErrors = 0;
         let withExtras = true;
         let answered = false;
-        let keys = this.keysFor(provider).filter((k) => !this.pairDone.has(`${k}|${model}`));
+        let cooling = false;
+        const nowT = Date.now();
+        let keys = this.keysFor(provider).filter((k) => {
+          if (this.pairDone.has(`${k}|${model}`)) return false;
+          const until = this.coolUntil.get(`${k}|${model}`) || 0;
+          if (until > nowT) { cooling = true; return false; }
+          return true;
+        });
         for (let i = 0; i < keys.length; i++) {
           const key = keys[i];
           const t0 = Date.now();
@@ -134,7 +161,12 @@ export class LlmPool {
           const note = `${provider}/${model} key ${tail(key)}: ${out.why}`;
           this.lastErrors.push(note);
           if (out.kind === 'dead-key') { this.deadKeys.set(key, out.why); this.log(`${note} — key retired, next key.`); continue; }
-          if (out.kind === 'rate') { this.pairDone.add(`${key}|${model}`); this.log(`${note} — ${out.daily ? 'daily quota used' : 'rate-limited'}, next key.`); continue; }
+          if (out.kind === 'rate') {
+            if (out.daily) this.pairDone.add(`${key}|${model}`);
+            else { this.coolUntil.set(`${key}|${model}`, Date.now() + (out.retryMs || 60000)); cooling = true; }
+            this.log(`${note} — ${out.daily ? 'daily quota used' : 'rate-limited for a minute'}, next key.`);
+            continue;
+          }
           if (out.kind === 'model-gone') { this.log(`${note} — model unavailable, next model.`); break; }
           if (out.kind === 'too-large') { this.log(`${note} — request too large for this model's free tier, next model.`); break; }
           if (out.kind === 'blocked') {
@@ -151,9 +183,10 @@ export class LlmPool {
           if (++serverErrors >= 2) { this.log(`${note} — next model.`); break; }
           this.log(`${note} — trying another key.`);
         }
-        // Either every key is spent / the model is gone, or it answered and the caller wants a
-        // different answer: never ask this model again in this run.
-        this.exhausted.add(`${provider}:${model}${this.modeOf(req)}`);
+        // It answered and the caller wants a different answer, or the model is gone / its
+        // daily quota is used: never ask it again in this run. A model that is only
+        // rate-limited for a minute stays available for later.
+        if (answered || !cooling) this.exhausted.add(`${provider}:${model}${this.modeOf(req)}`);
         if (!answered && !this.keysFor(provider).length) break; // no live keys left for this provider
       }
     }
@@ -264,7 +297,12 @@ export class LlmPool {
     if (status === 404) return { kind: 'model-gone', why };
     if (status === 400 && /model.*(not found|not supported|does not exist|decommissioned)|unknown model|is not found for api version/.test(low)) return { kind: 'model-gone', why };
     if (status === 413 || /request too large|reduce your message size/.test(low)) return { kind: 'too-large', why };
-    if (status === 429 || /resource_exhausted|quota|rate limit/.test(low)) return { kind: 'rate', why, daily: /per ?day|perday|daily|tpd|rpd/.test(low) };
+    if (status === 429 || /resource_exhausted|quota|rate limit/.test(low)) {
+      // "retryDelay": "37s" (Gemini) / "try again in 1m2.5s" (Groq)
+      const m = low.match(/retrydelay"?\s*:\s*"?(\d+(?:\.\d+)?)s/) || low.match(/try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s/);
+      const retryMs = m ? (m.length === 3 ? (Number(m[1] || 0) * 60 + Number(m[2])) : Number(m[1])) * 1000 : undefined;
+      return { kind: 'rate', why, daily: /per ?day|perday|daily|tpd|rpd/.test(low), retryMs: retryMs && retryMs < 10 * 60 * 1000 ? retryMs : undefined };
+    }
     if (status === 400 && /json_validate_failed|failed to generate json|thinking|reasoning_effort|response_format|responsemimetype|unknown name|invalid json payload/.test(low)) return { kind: 'bad-request', why, extras: true };
     if (status === 400 && /safety|blocked/.test(low)) return { kind: 'blocked', why };
     if (status >= 500 || status === 0) return { kind: 'server', why };

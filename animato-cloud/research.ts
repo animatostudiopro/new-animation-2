@@ -305,6 +305,8 @@ export interface CheckResult {
 
 export async function factCheck(ctx: ResearchCtx, sheet: string, scenes: CheckScene[], title: string, description: string): Promise<CheckResult | null> {
   if (ctx.offline || !ctx.llm.hasKeys) return null;
+  // Keep the request small enough for every model's free tier (Groq counts input + answer per minute).
+  if (sheet.length > 14000) sheet = `${sheet.slice(0, 14000)}\n[…source material trimmed]`;
   const kind = ctx.category === 'cooking' ? 'cooking tutorial' : ctx.category === 'ads' ? 'product advert' : ctx.category === 'tech' ? 'tech review / tutorial' : 'news report';
   const system = 'You are a strict, independent fact-checker for a video publisher. You compare a script with its source material, sentence by sentence. You flag anything that is wrong, invented, exaggerated, speculative-presented-as-fact, or not supported by the sources. You answer with one JSON object and nothing else.';
   const user = `Fact-check this ${kind} script against the SOURCE MATERIAL.
@@ -332,7 +334,7 @@ Return ONLY:
   "title": "corrected title, or empty if fine",
   "description": "corrected description, or empty if fine"
 }`;
-  for await (const a of ctx.llm.attempts({ system, user, json: true, temperature: 0, maxTokens: 6000, timeoutMs: 120000, task: 'fact_check' })) {
+  for await (const a of ctx.llm.attempts({ system, user, json: true, temperature: 0, maxTokens: 3500, timeoutMs: 120000, task: 'fact_check' })) {
     try {
       const d = extractJsonObject(a.text);
       const fixes = new Map<number, string>();
@@ -390,4 +392,26 @@ Return ONLY JSON: {"match": true|false, "shows": "what the picture actually show
     } catch { /* ask the next vision model */ }
   }
   return null;
+}
+
+/**
+ * Cooking fallback when no checker model can be reached at all: every number the
+ * script says (amounts, times, temperatures) must appear in the verified recipe.
+ * Returns the problems found (empty = consistent with the recipe).
+ */
+export function recipeNumbersCheck(recipe: string, narrations: string[]): string[] {
+  const WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, thirty: 30, forty: 40, 'forty-five': 45, fifty: 50, sixty: 60, half: 0.5, quarter: 0.25 };
+  const nums = (t: string) => {
+    const out = new Set<number>();
+    const low = t.toLowerCase().replace(/(\d)\s*\/\s*(\d)/g, (_m, a, b) => String(Number(a) / Number(b)));
+    for (const m of low.matchAll(/\d+(?:\.\d+)?/g)) out.add(Number(m[0]));
+    for (const [w, n] of Object.entries(WORDS)) if (new RegExp(`\\b${w}\\b`).test(low)) out.add(n);
+    return out;
+  };
+  const allowed = nums(recipe);
+  const problems: string[] = [];
+  narrations.forEach((n, i) => {
+    for (const x of nums(n)) if (x > 1 && !allowed.has(x)) problems.push(`scene ${i}: "${x}" is not in the verified recipe`);
+  });
+  return problems;
 }

@@ -31,7 +31,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
 import { publishToFacebook, publishToInstagram, SocialError } from './social.ts';
-import { researchNews, researchRecipe, factSheet, factCheck, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
+import { researchNews, researchRecipe, factSheet, factCheck, recipeNumbersCheck, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 
 // ---------------------------------------------------------------------------
@@ -939,6 +939,12 @@ async function verifyScript(script: Script, pack: FactPack | null): Promise<void
     const res = await factCheck(ctx, sheet, script.scenes.map((sc) => ({ tagged: taggedOf(sc) })), script.title, script.description);
     if (!res) {
       if (pack?.confirmed && round > 1) { log('Fact check: no checker model answered for the re-check; the corrected script stands.'); return; }
+      if (CFG.category === 'cooking' && pack?.recipe) {
+        // No model can be reached right now: check every amount, time and temperature against the verified recipe instead.
+        const problems = recipeNumbersCheck(pack.recipe, script.scenes.map((sc) => sc.narration));
+        if (!problems.length) { log('Fact check: no checker model was available, so every amount, time and temperature was checked against the verified recipe instead ✔'); return; }
+        throw new PipelineError('fact_check_failed', `No fact-checker model was available and the script has numbers that are not in the verified recipe (${problems.slice(0, 3).join('; ')}). Nothing was posted; the next attempt runs automatically.`);
+      }
       throw new PipelineError('fact_check_failed', 'The fact-checker could not be reached, so the script was not verified and nothing was posted. The next attempt runs automatically.');
     }
     if (res.titleFix) script.title = res.titleFix.replace(/[#"]/g, '').trim() || script.title;

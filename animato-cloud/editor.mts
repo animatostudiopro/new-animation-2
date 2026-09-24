@@ -82,10 +82,21 @@ async function probe(file: string): Promise<{ duration: number; width: number; h
 async function fetchFile(spec: any, dest: string) {
   if (!spec) return false;
   if (spec.url) {
-    const res = await fetch(spec.url, { signal: AbortSignal.timeout(3600_000) });
-    if (!res.ok) throw new EditError(`Could not download ${spec.name || 'the file'} (HTTP ${res.status}).`);
-    fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-    return true;
+    // Streamed straight to disk (large screen recordings), with a few retries.
+    for (let a = 0; a < 4; a++) {
+      const res = await fetch(spec.url, { signal: AbortSignal.timeout(3600_000) }).catch(() => null);
+      if (res?.ok && res.body) {
+        const { Readable } = await import('node:stream');
+        const { pipeline } = await import('node:stream/promises');
+        await pipeline(Readable.fromWeb(res.body as any), fs.createWriteStream(dest));
+        if (!spec.size || fs.statSync(dest).size === Number(spec.size)) return true;
+        log(`Download of ${spec.name || 'the file'} was incomplete — retrying.`);
+      } else if (res && res.status < 500 && res.status !== 429) {
+        throw new EditError(`Could not download ${spec.name || 'the file'} (HTTP ${res.status}).`);
+      }
+      await new Promise((z) => setTimeout(z, 3000 * (a + 1)));
+    }
+    throw new EditError(`Could not download ${spec.name || 'the file'} after several tries.`);
   }
   if (spec.base) {
     const fd = fs.openSync(dest, 'w');
