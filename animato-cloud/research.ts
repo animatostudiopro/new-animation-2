@@ -148,7 +148,7 @@ export function overlap(headline: string, text: string): number {
 async function groundedResearch(ctx: ResearchCtx, question: string, shape: string): Promise<{ data: any; sources: WebSource[]; model: string } | null> {
   if (ctx.offline || !ctx.llm.hasKeys) return null;
   const system = 'You are a meticulous fact-checking researcher for a news desk. You search the live web, read several reputable independent sources, and report ONLY facts those sources state. You never guess, never fill gaps and never present rumours as facts. You answer with one JSON object and nothing else.';
-  for await (const a of ctx.llm.attempts({ system, user: `${question}\n\nReturn ONLY this JSON:\n${shape}`, webSearch: true, json: true, temperature: 0.1, maxTokens: 4000, timeoutMs: 120000 })) {
+  for await (const a of ctx.llm.attempts({ system, user: `${question}\n\nReturn ONLY this JSON:\n${shape}`, webSearch: true, json: true, temperature: 0.1, maxTokens: 4000, timeoutMs: 120000, task: 'research' })) {
     try {
       const data = extractJsonObject(a.text);
       return { data, sources: a.sources || [], model: `${a.provider}/${a.model}` };
@@ -332,7 +332,7 @@ Return ONLY:
   "title": "corrected title, or empty if fine",
   "description": "corrected description, or empty if fine"
 }`;
-  for await (const a of ctx.llm.attempts({ system, user, json: true, temperature: 0, maxTokens: 6000, timeoutMs: 120000 })) {
+  for await (const a of ctx.llm.attempts({ system, user, json: true, temperature: 0, maxTokens: 6000, timeoutMs: 120000, task: 'fact_check' })) {
     try {
       const d = extractJsonObject(a.text);
       const fixes = new Map<number, string>();
@@ -383,7 +383,7 @@ Does the picture clearly and correctly show "${subject}"?
 - For a person/place/organisation/event: true only if it plausibly shows that exact subject (not a generic stock scene).
 - Logos only, icons, charts, text-only slides, collages, memes, watermark-covered or blurry images → false.
 Return ONLY JSON: {"match": true|false, "shows": "what the picture actually shows, 3-8 words"}`;
-  for await (const a of ctx.llm.attempts({ system: 'You verify that pictures match what a video is saying. You answer with one JSON object.', user, images: [{ mime: 'image/jpeg', data: jpegBase64 }], json: true, temperature: 0, maxTokens: 300, timeoutMs: 45000 })) {
+  for await (const a of ctx.llm.attempts({ system: 'You verify that pictures match what a video is saying. You answer with one JSON object.', user, images: [{ mime: 'image/jpeg', data: jpegBase64 }], json: true, temperature: 0, maxTokens: 300, timeoutMs: 45000, task: 'vision' })) {
     try {
       const d = extractJsonObject(a.text);
       return { match: d.match === true || String(d.match).toLowerCase() === 'true', shows: String(d.shows || '').slice(0, 80) };

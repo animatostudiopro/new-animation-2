@@ -39,6 +39,8 @@ export interface LlmRequest {
   webSearch?: boolean;
   /** Images to look at (vision check). Gemini models, then Groq's vision model. */
   images?: { mime: string; data: string }[];
+  /** What this call is for (script, research, fact_check, vision, editor_plan…) — used in logs. */
+  task?: string;
 }
 export interface WebSource { title: string; uri: string }
 export interface LlmAttempt { provider: Provider; model: string; text: string; ms: number; sources?: WebSource[] }
@@ -125,7 +127,8 @@ export class LlmPool {
           if (out.kind === 'ok') {
             this.cursor[provider] = (provider === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys).indexOf(key);
             answered = true;
-            yield { provider, model, text: out.text, ms, sources: out.sources };
+            const attempt: LlmAttempt = { provider, model, text: out.text, ms, sources: out.sources };
+            yield attempt;
             break; // the caller wants another answer → next MODEL, never the same one again
           }
           const note = `${provider}/${model} key ${tail(key)}: ${out.why}`;

@@ -30,6 +30,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
+import { publishToFacebook, publishToInstagram, SocialError } from './social.ts';
 import { researchNews, researchRecipe, factSheet, factCheck, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 
@@ -109,6 +110,12 @@ const CFG = {
   format: FMT.format,
   aspect: FMT.aspect,
   autoPost: pick(JOB.auto_post_youtube, INPUTS.auto_post_youtube, ENV.AUTO_POST_YOUTUBE, 'false').toLowerCase() === 'true',
+  // Where to publish: any of youtube, facebook, instagram (older jobs: YouTube only).
+  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter(Boolean)),
+  fbPageId: pick(AUTH.facebook_page_id, ENV.FACEBOOK_PAGE_ID),
+  fbPageToken: pick(AUTH.facebook_page_token, ENV.FACEBOOK_PAGE_TOKEN),
+  igUserId: pick(AUTH.instagram_user_id, ENV.INSTAGRAM_USER_ID),
+  fbGraphVersion: pick(AUTH.facebook_graph_version, ENV.FACEBOOK_GRAPH_VERSION, 'v23.0'),
   previousScript: pick(JOB.previous_script, ENV.PREVIOUS_SCRIPT),
   privacy: pick(JOB.privacy, ENV.YOUTUBE_PRIVACY, 'public'),
   ytRefreshToken: pick(AUTH.youtube_refresh_token, ENV.YOUTUBE_REFRESH_TOKEN),
@@ -159,7 +166,7 @@ const CFG = {
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
+  for (const secret of [CFG.fbPageToken, CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -169,6 +176,11 @@ const WORK_DIR = path.join(OUTPUT_DIR, 'work');
 const OUTPUT_VIDEO = path.join(OUTPUT_DIR, 'rendered_video.mp4');
 const OUTPUT_META = path.join(OUTPUT_DIR, 'video_metadata.json');
 fs.mkdirSync(WORK_DIR, { recursive: true });
+
+// Older jobs had no target list: YouTube when auto-post is on.
+if (!CFG.targets.size && CFG.autoPost) CFG.targets.add('youtube');
+const WANT = { youtube: CFG.targets.has('youtube'), facebook: CFG.targets.has('facebook') && !!CFG.fbPageToken, instagram: CFG.targets.has('instagram') && !!CFG.fbPageToken && !!CFG.igUserId };
+const PUBLISH = WANT.youtube || WANT.facebook || WANT.instagram;
 
 const [W, H] = DIMENSIONS[CFG.aspect];
 const FPS = 30;
@@ -614,8 +626,8 @@ PERFORMANCE TAGS (the presenter is an animated character with a face, head, arms
 
 YOUTUBE PACKAGING
 - "title": max 70 characters, curiosity + the main keyword, honest (no false clickbait), Title Case.
-- "description": 2-3 sentences: a hook line, what the viewer gets, and a question inviting comments.
-- "hashtags": 3-5 specific lowercase hashtags without "#" that real viewers search (e.g. "scarystories", "horrorstory", "creepypasta"), never generic filler like "viral" or "fyp".
+- "description": a DETAILED, well-written description of 120-250 words in plain text (no hashtags, no markdown, no emoji spam, no "In this video we will" filler). Paragraph 1: a strong hook that names the exact subject (the real names of the people, product, place or dish). Paragraph 2-3: ${descriptionBrief()}. Last line: one specific question about THIS video that invites comments. Every statement must be true and match the script.
+- "hashtags": 5-8 lowercase hashtags without "#", each about THIS video's actual subject: the specific names in it (person, product, brand, place, dish), the precise niche and the topic people search for — e.g. for a jollof rice video "jollofrice", "nigerianfood", "westafricanfood", "ricerecipe", "cookingtutorial". NEVER generic filler ("viral", "fyp", "foryou", "trending", "explore", "reels", "shorts", "love", "instagood", "follow", "like", "subscribe", "video", "new") and never a tag unrelated to the video.
 - "tags": 8-15 search phrases.
 
 Return ONLY this JSON (no markdown):
@@ -668,6 +680,161 @@ const DEFAULT_TAGS: Record<string, string[]> = {
   news: ['news', 'breakingnews', 'worldnews', 'explained']
 };
 
+/** What the description's body must cover, per category. */
+function descriptionBrief(): string {
+  switch (CFG.category) {
+    case 'news': return 'the key verified facts — what happened, who is involved, where and when — and why it matters to the viewer; say "reportedly" for anything not confirmed';
+    case 'tech': return 'what the product/tool/update is, who makes it, what it actually does, how to get or use it (the real steps shown) and who it is for';
+    case 'cooking': return 'the dish and where it comes from, the main ingredients, a short summary of the method with the key time/temperature, and the tip from the video';
+    case 'ads': return 'what the product is, the real features and benefits from the brief (nothing invented), who it is for and how to get it';
+    default: return 'a gripping spoiler-free teaser of the story — who it is about, where it happens and the mystery or danger they face — without revealing the ending or the twist';
+  }
+}
+
+/** Hashtags nobody should ever use: generic reach-bait that says nothing about the video. */
+const JUNK_HASHTAGS = new Set(('viral viralvideo viralvideos fyp fypage fypシ foryou foryoupage foryourpage trending trend trendingnow explore explorepage reels reel reelsinstagram reelitfeelit shorts short youtubeshorts shortvideo shortsvideo ytshorts tiktok tiktokviral instagood instagram insta instadaily photooftheday picoftheday love like likes likeforlike likeforlikes follow followme followforfollow follow4follow subscribe sub video videos new newvideo today daily best top amazing awesome cool fun funny wow omg lol goodvibes happy beautiful cute life lifestyle motivation inspiration content contentcreator creator facebook fb meta youtube youtuber watch share comment blowup blowthisup nofilter tbt the and for with this that you your part episode').split(' '));
+const STOPWORDS = new Set('a an the and or but of to in on at for with from by as is are was were be been it its this that these those you your we our they their he she his her them i me my not no so than then there here what when where who why how all any can will just into over out up down about after before more most very also has have had do does did new video'.split(' '));
+
+/** Hype words that make meaningless tags on their own ("#perfect", "#shocking"). */
+const HYPE_WORDS = new Set('perfect best ultimate amazing incredible insane crazy shocking secret secrets truth finally really never ever always simple quick easy easiest fastest biggest huge must watch everyone nobody something anything nothing everything people thing things time times year years inside behind while could would should home made make makes making real still first last next part finale'.split(' '));
+/** Words that make a tag clearly about the category even when the script never says them. */
+const CATEGORY_ROOTS: Record<string, string[]> = {
+  cooking: ['food', 'recipe', 'cook', 'kitchen', 'meal', 'dish', 'dinner', 'lunch', 'breakfast', 'bake', 'cuisine', 'foodie', 'snack', 'dessert'],
+  tech: ['tech', 'gadget', 'software', 'app', 'phone', 'computer', 'coding', 'digital', 'tutorial', 'howto'],
+  news: ['news', 'headline', 'breaking', 'update', 'report', 'explained', 'currentevents'],
+  ads: ['review', 'product', 'shop', 'business', 'brand', 'deal'],
+  stories: ['story', 'stories', 'tale', 'storytime', 'drama', 'romance', 'mystery']
+};
+
+const wordsOf = (t: string) => String(t || '').toLowerCase().replace(/[’']/g, '').split(/[^a-z0-9]+/).filter(Boolean);
+
+/** Every 1-3 word run in the video's own words, joined — a hashtag must be one of these (or a known niche tag). */
+function subjectVocabulary(sc: Script): Set<string> {
+  const texts = [sc.title, sc.description, sc.premise || '', sc.sourceHeadline || '', sc.factPack?.subject || '', sc.factPack?.productName || '', CFG.subGenre, CFG.topic,
+    ...sc.scenes.map((x) => `${x.narration} ${x.searchQuery || ''}`), ...(sc.tags || [])];
+  const vocab = new Set<string>();
+  for (const t of texts) {
+    const w = wordsOf(t);
+    for (let i = 0; i < w.length; i++) for (let n = 1; n <= 3 && i + n <= w.length; n++) {
+      const run = w.slice(i, i + n);
+      if (n === 1 && STOPWORDS.has(run[0])) continue;
+      const j = run.join('');
+      vocab.add(j);
+      if (j.endsWith('s')) vocab.add(j.slice(0, -1)); else vocab.add(`${j}s`);
+    }
+  }
+  return vocab;
+}
+
+/** Well-known niche tags that are always relevant to a category (people search them). */
+const NICHE_TAGS: Record<string, string[]> = {
+  stories: ['storytime', 'scarystories', 'horrorstory', 'horrorstories', 'creepypasta', 'mysterystory', 'shortstory', 'animatedstory', 'suspense', 'thriller', 'ghoststory', 'truescarystories', 'bedtimestory', 'lovestory', 'dramastory'],
+  cooking: ['recipe', 'recipes', 'cooking', 'easyrecipe', 'easyrecipes', 'homecooking', 'cookingtutorial', 'foodie', 'dinnerideas', 'lunchideas', 'breakfastideas', 'mealprep', 'comfortfood', 'healthyrecipes'],
+  tech: ['tech', 'technews', 'technology', 'gadgets', 'ai', 'artificialintelligence', 'techtips', 'tutorial', 'howto', 'software', 'apps', 'smartphone', 'productivity'],
+  news: ['news', 'breakingnews', 'worldnews', 'newsupdate', 'currentevents', 'explained', 'headlines', 'politics', 'economy'],
+  ads: ['productreview', 'smallbusiness', 'shopsmall', 'musthave', 'productdemo']
+};
+
+function cleanHashtagList(raw: any[], sc: Script): string[] {
+  const vocab = subjectVocabulary(sc);
+  const niche = new Set(NICHE_TAGS[CFG.category] || NICHE_TAGS.stories);
+  // Words of the video itself (4+ letters) and the category's own vocabulary: a tag must contain one.
+  const roots = [...vocab].filter((w) => w.length >= 4 && w.length <= 14 && !STOPWORDS.has(w) && !HYPE_WORDS.has(w));
+  const catRoots = CATEGORY_ROOTS[CFG.category] || CATEGORY_ROOTS.stories;
+  const scary = /horror|scary|creepy|ghost|haunt|suspense|thriller|mystery|spooky|paranormal/i.test(`${CFG.subGenre} ${CFG.topic} ${sc.title} ${sc.premise || ''}`);
+  const relevant = (h: string) => vocab.has(h) || niche.has(h) || roots.some((r) => h.includes(r)) || catRoots.some((r) => h.includes(r));
+  const ok = (h: string) => (h.length >= 3 || niche.has(h)) && h.length <= 28 && !/^\d+$/.test(h) && !JUNK_HASHTAGS.has(h) && !STOPWORDS.has(h) && !HYPE_WORDS.has(h)
+    && relevant(h) && !(CFG.category === 'stories' && !scary && /horror|scary|creepy|ghost|haunt|creepypasta/.test(h) && !vocab.has(h));
+  const out: string[] = [];
+  const add = (h: string) => { if (ok(h) && !out.includes(h) && !out.some((o) => o === `${h}s` || `${o}s` === h)) out.push(h); };
+  for (const h of raw.map(cleanHashtag)) add(h);
+  if (out.length < 5) {
+    // Derive from the video itself: the named subject first, then its key words.
+    const subj = [sc.factPack?.productName, sc.factPack?.subject?.split(/[:\-–—|,(]/)[0]].filter(Boolean) as string[];
+    for (const s of subj) { const w = wordsOf(s).filter((x) => !STOPWORDS.has(x)); if (w.length && w.length <= 3) add(w.join('')); }
+    const titleWords = wordsOf(sc.title.replace(/\((part \d+|finale)\)/i, '')).filter((w) => w.length >= 5 && !STOPWORDS.has(w) && !HYPE_WORDS.has(w) && !/^\d+$/.test(w));
+    for (const w of titleWords) if (out.length < 3) add(w);
+    const defaults = CFG.category === 'stories'
+      ? (scary ? ['storytime', 'scarystories', 'horrorstory', 'creepypasta'] : ['storytime', 'shortstory', 'animatedstory', 'dramastory'])
+      : [...(DEFAULT_TAGS[CFG.category] || []), ...(NICHE_TAGS[CFG.category] || [])];
+    for (const d of defaults) if (out.length < 5) add(d);
+  }
+  return out.slice(0, 8);
+}
+
+/** Plain, readable description text: no hashtags, markdown, links-as-markdown, emoji spam or JSON residue. */
+function cleanDescriptionText(t: string): string {
+  let d = String(t || '')
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '$1 $2')
+    .replace(/(^|\s)#[\p{L}\p{N}_]+/gu, '$1')
+    .replace(/\*\*|__|`+|^#+\s*/gm, '')
+    .replace(/^\s*(description|summary)\s*:\s*/i, '')
+    .replace(/\[(\w+)\]/g, '')
+    .replace(/(\p{Extended_Pictographic}️?){2,}/gu, (m) => [...m][0]);
+  const lines = d.split(/\r?\n/).map((l) => l.replace(/[ \t]+/g, ' ').trim());
+  d = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (/^\.{3}$|^(n\/a|none|tbd|description)$/i.test(d)) return '';
+  return d;
+}
+
+const firstSentence = (t: string) => { const m = String(t).match(/^.{20,180}?[.!?](\s|$)/); return (m ? m[0] : String(t).slice(0, 160)).trim(); };
+
+/** A readable, detailed body built from the (fact-checked) script when the writer's description is thin. */
+function descriptionFromScript(sc: Script): string {
+  const scenes = sc.scenes.map((x) => x.narration.trim()).filter(Boolean);
+  if (CFG.category === 'stories') {
+    // Only the set-up — never the ending or the twist.
+    const setup = scenes.slice(0, Math.max(2, Math.ceil(scenes.length * 0.3))).join(' ');
+    return [sc.premise && sc.premise.length > 60 ? sc.premise : setup.slice(0, 600)].join('\n\n');
+  }
+  return scenes.slice(0, 3).join(' ').slice(0, 700);
+}
+
+const COMMENT_QUESTION: Record<string, string> = {
+  news: 'What do you think happens next? Tell us in the comments.',
+  tech: 'Would you use this? Tell us in the comments.',
+  cooking: 'Would you try this recipe? Tell us how yours turned out in the comments.',
+  ads: 'Have questions about it? Ask in the comments.',
+  stories: 'What would you have done? Tell us in the comments.'
+};
+
+/** Clean and complete the title, description and hashtags of a finished script. */
+function polishMetadata(sc: Script): void {
+  let d = cleanDescriptionText(sc.description);
+  const words = d.split(/\s+/).filter(Boolean).length;
+  if (words < 60) {
+    const body = descriptionFromScript(sc);
+    d = d ? `${d}\n\n${body}` : body;
+  }
+  if (!/\?\s*$/.test(d.split('\n').filter(Boolean).pop() || '')) d = `${d}\n\n${COMMENT_QUESTION[CFG.category] || COMMENT_QUESTION.stories}`;
+  sc.description = d.slice(0, 2200).trim();
+  sc.hashtags = cleanHashtagList(Array.isArray(sc.hashtags) ? sc.hashtags : [], sc);
+  sc.tags = Array.from(new Set([...(sc.tags || []).map((t) => String(t).replace(/[<>#]/g, '').trim()).filter((t) => t && !JUNK_HASHTAGS.has(t.toLowerCase().replace(/\s+/g, ''))), ...sc.hashtags])).slice(0, 18);
+}
+
+/** The category section of the final description (only verified material). */
+function descriptionDetails(sc: Script): string {
+  const recipe = sc.factPack?.recipe || '';
+  if (CFG.category === 'cooking' && recipe) {
+    const lines = recipe.split('\n');
+    const ing = lines.filter((l) => l.startsWith('- ')).slice(0, 20).map((l) => `• ${l.slice(2)}`);
+    const steps = lines.filter((l) => /^\d+\.\s/.test(l)).slice(0, 12).map((l) => l.length > 170 ? `${l.slice(0, 167).trimEnd()}…` : l);
+    const tip = lines.find((l) => l.startsWith('TIP: '));
+    const safety = lines.find((l) => l.startsWith('SAFETY: '));
+    return [ing.length ? `🛒 INGREDIENTS\n${ing.join('\n')}` : '', steps.length ? `👩‍🍳 METHOD\n${steps.join('\n')}` : '', tip ? `💡 ${tip}` : '', safety ? `⚠️ ${safety}` : ''].filter(Boolean).join('\n\n');
+  }
+  if (CFG.category === 'stories' || sc.usedFallbackTemplate) return '';
+  // News / tech / ads: the key points exactly as narrated (the narration passed the fact check).
+  const seen = new Set<string>();
+  const points = sc.scenes.map((x) => firstSentence(x.narration)).filter((p) => {
+    const k = p.toLowerCase().slice(0, 40);
+    if (p.split(' ').length < 5 || seen.has(k) || /\b(subscribe|follow|comment|like this video)\b/i.test(p)) return false;
+    seen.add(k); return true;
+  }).slice(0, 6);
+  const head = CFG.category === 'news' ? '📌 KEY POINTS' : CFG.category === 'tech' ? '📌 WHAT YOU WILL LEARN' : '📌 HIGHLIGHTS';
+  return points.length >= 2 ? `${head}\n${points.map((p) => `• ${p}`).join('\n')}` : '';
+}
+
 /** Only a plain https homepage/product URL is kept (never a search, news aggregator or social page). */
 function cleanOfficialUrl(v: any): string {
   const raw = String(v || '').trim();
@@ -710,13 +877,11 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
     if (CFG.partNumber < CFG.arcParts) title = `${title.slice(0, 58)} (Part ${CFG.partNumber})`;
     else if (CFG.arcParts > 1) title = `${title.slice(0, 52)} (Finale)`;
   }
-  let hashtags = Array.from(new Set((Array.isArray(parsed.hashtags) ? parsed.hashtags : []).map(cleanHashtag).filter((h: string) => h.length >= 3 && !/^(viral|fyp|foryou|trending|shorts)$/.test(h))));
-  for (const d of DEFAULT_TAGS[CFG.category] || DEFAULT_TAGS.stories) if (hashtags.length < 3 && !hashtags.includes(d)) hashtags.push(d);
-  hashtags = hashtags.slice(0, 5);
+  const hashtags: string[] = Array.from(new Set<string>((Array.isArray(parsed.hashtags) ? parsed.hashtags : []).map(cleanHashtag).filter((h: string) => h.length >= 3 && !JUNK_HASHTAGS.has(h)))).slice(0, 10);
   const tags = Array.from(new Set([...(Array.isArray(parsed.tags) ? parsed.tags : []).map((t: any) => String(t).replace(/[<>#]/g, '').trim()).filter(Boolean), ...hashtags])).slice(0, 18);
   return {
     title: title.slice(0, 95),
-    description: String(parsed.description || '').replace(/#\w+/g, '').trim().slice(0, 1200),
+    description: cleanDescriptionText(String(parsed.description || '')).slice(0, 2200),
     hashtags,
     tags,
     visualStyle: String(parsed.visualStyle || '').slice(0, 200),
@@ -833,6 +998,7 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
       saferUser: saferScriptPrompt(prompt),
       temperature: CFG.category === 'stories' ? 0.95 : 0.7,
       maxTokens: IS_SHORTS ? 6000 : 10000,
+      task: 'script',
       json: true,
       timeoutMs: 100000
     })) {
@@ -2258,7 +2424,7 @@ function youtubeHashtagLine(values: unknown[]): string {
       seen.add(h);
       out.push(`#${h}`);
     }
-    if (out.length >= 8) break;
+    if (out.length >= 9) break;
   }
   return out.join(' ');
 }
@@ -2350,13 +2516,18 @@ async function main() {
 
   await reportStatus('running', '1/5 Writing the script', 8, `GitHub runner started Part ${CFG.partNumber} (${CFG.format === 'shorts' ? 'YouTube Short' : 'YouTube video'}, ${CFG.aspect}).`);
 
-  if (CFG.autoPost && !CFG.dryRun) {
+  if (WANT.youtube && !CFG.dryRun) {
     await youtubeAccessToken();
     log('YouTube connection verified.');
+  }
+  if ((CFG.targets.has('facebook') || CFG.targets.has('instagram')) && !CFG.fbPageToken) {
+    throw new PipelineError('facebook_not_connected', 'Facebook/Instagram posting is on, but no Facebook Page is connected to this automation.');
   }
 
   // 1. Script
   const script = await generateScript(pastStory, pastTitles, pastSources);
+  polishMetadata(script);
+  log(`Metadata: ${script.description.split(/\s+/).length}-word description, hashtags: ${script.hashtags.map((h) => `#${h}`).join(' ')}`);
   if (script.usedFallbackTemplate && !CFG.allowFallbackPublish) {
     // Keys work but every free model was busy / rate-limited / filtered: retry later (no pause).
     throw new PipelineError('script_retry', `No free AI model produced a script this time (${script.aiError || 'unknown error'}). Nothing was posted; the next attempt runs automatically with the next free model/key.`);
@@ -2367,7 +2538,7 @@ async function main() {
   // 2. Voice (+ start fetching images in parallel)
   const imagesPromise = gatherImages(script);
   const narration = await synthesizeNarration(fullText);
-  if (!narration.neural && CFG.autoPost && !CFG.allowFallbackPublish) {
+  if (!narration.neural && PUBLISH && !CFG.allowFallbackPublish) {
     throw new PipelineError('tts_failed', `The neural voice (Microsoft Edge TTS) failed on every voice and retry, so only a robotic fallback voice was available. Nothing was posted; the next run will retry automatically. Last error: ${LAST_TTS_ERROR.slice(0, 300) || 'unknown'}`);
   }
   const duration = +(narration.duration + (CFG.category === 'stories' ? 1.6 : 1.2)).toFixed(3);
@@ -2405,19 +2576,22 @@ async function main() {
     ...(Array.isArray(script.hashtags) ? script.hashtags : []),
     ...(IS_SHORTS ? ['shorts'] : [])
   ]);
-  const description = sanitizeYouTubeDescription([
-    script.description || script.title,
-    CFG.category === 'stories'
-      ? (CFG.partNumber >= CFG.arcParts
-        ? `\nThis is the finale of the story. A brand-new story starts on the next upload — follow so you don't miss it.`
-        : `\nPart ${CFG.partNumber} of ${CFG.arcParts}. Part ${CFG.partNumber + 1} is coming — follow so you don't miss it.`)
-      : '',
-    script.sources?.length ? `\nSources: ${script.sources.join('; ')}` : '',
+  const series = CFG.category === 'stories'
+    ? (CFG.partNumber >= CFG.arcParts
+      ? (CFG.arcParts > 1 ? `📺 This is the finale of the story. A brand-new story starts on the next upload — follow so you don't miss it.` : '')
+      : `📺 Part ${CFG.partNumber} of ${CFG.arcParts}. Part ${CFG.partNumber + 1} is coming next — follow so you don't miss it.`)
+    : '';
+  const sourcesBlock = [
+    script.sources?.length ? `📰 SOURCES
+${script.sources.map((x) => `• ${x}`).join('\n')}` : '',
     script.sourceLinks?.length ? script.sourceLinks.map((u) => `• ${u}`).join('\n') : '',
-    script.factChecked ? 'Every fact in this video was checked against the sources above before publishing.' : '',
-    script.officialUrl ? `Official site: ${script.officialUrl}` : '',
+    script.factChecked ? '✅ Every fact in this video was checked against the sources above before publishing.' : '',
+    script.officialUrl ? `🔗 Official site: ${script.officialUrl}` : ''
+  ].filter(Boolean).join('\n');
+  const creditsBlock = [
     script.imageAttributions?.length
-      ? `\nImage credits (images may be cropped):\n${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
+      ? `🖼️ IMAGE CREDITS (images may be cropped)
+${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
       : '',
     script.imageCredits?.some((c) => c.startsWith('Screenshot:'))
       ? (CFG.category === 'news'
@@ -2425,9 +2599,18 @@ async function main() {
         : `Screenshots of ${script.officialUrl ? hostOf(script.officialUrl) : 'the official website'} are shown to explain how to use it.`)
       : '',
     CFG.category !== 'stories' ? '' : 'Story art is original and AI-generated for this video.',
-    'Music: original, composed for this video.',
-    hashtagLine ? `\n${hashtagLine}` : ''
-  ].filter(Boolean).join('\n').trim());
+    '🎵 Music: original, composed for this video.'
+  ].filter(Boolean).join('\n');
+  const description = sanitizeYouTubeDescription([
+    script.description || script.title,
+    descriptionDetails(script),
+    series,
+    sourcesBlock,
+    creditsBlock,
+    hashtagLine
+  ].filter(Boolean).join('\n\n').trim());
+  // Facebook / Instagram get the same detailed text (Instagram: max 2,200 chars, 30 hashtags).
+  const socialText = [script.description, descriptionDetails(script), series, sourcesBlock].filter(Boolean).join('\n\n').trim();
 
   fs.writeFileSync(OUTPUT_META, JSON.stringify({
     campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect,
@@ -2438,22 +2621,63 @@ async function main() {
     voice: narration.engine, character: characterMode, durationSec: outDur, createdAt: new Date().toISOString()
   }, null, 2));
 
-  // 5. Publish
+  // 5. Publish — YouTube, the Facebook Page and/or its Instagram.
   let published: { videoId: string; url: string; privacy: string } | null = null;
-  if (!CFG.autoPost) {
-    log('Auto-post is OFF for this automation — the video is saved as a run artifact only.');
+  let facebookUrl = '', instagramUrl = '';
+  const failures: { where: string; code: string; message: string }[] = [];
+  if (!PUBLISH) {
+    log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
   } else if (CFG.dryRun) {
-    log('Dry run — skipping the YouTube upload.');
+    log(`Dry run — skipping publishing (${Array.from(CFG.targets).join(', ')}).`);
   } else {
-    await reportStatus('running', '5/5 Uploading to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
-    published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
-    log(`Published: ${published.url} (privacy: ${published.privacy})`);
+    const where = [WANT.youtube && 'YouTube', WANT.facebook && 'Facebook', WANT.instagram && 'Instagram'].filter(Boolean).join(', ');
+    await reportStatus('running', `5/5 Publishing to ${where}`, 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to ${where}…`);
+    if (WANT.youtube) {
+      try {
+        published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
+        log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
+      } catch (err: any) {
+        // Only YouTube: keep the original behaviour (the error decides retry vs pause).
+        if (!WANT.facebook && !WANT.instagram) throw err;
+        failures.push({ where: 'YouTube', code: err?.code || 'youtube_upload', message: String(err?.message || err) });
+        log(`⚠️ YouTube upload failed: ${err?.message || err}`);
+      }
+    }
+    const social = { pageId: CFG.fbPageId, pageToken: CFG.fbPageToken, igUserId: CFG.igUserId, version: CFG.fbGraphVersion, log };
+    const vertical = CFG.aspect === '9:16' || CFG.aspect === '1:1';
+    const tagLine = script.hashtags.map((h) => `#${h}`).join(' ');
+    if (WANT.facebook) {
+      try {
+        const fb = await publishToFacebook(social, OUTPUT_VIDEO, { title: script.title, description: `${socialText}\n\n${tagLine}`.trim().slice(0, 5000), vertical });
+        facebookUrl = fb.url;
+        log(`Published on Facebook: ${fb.url}`);
+      } catch (err: any) {
+        failures.push({ where: 'Facebook', code: err instanceof SocialError ? err.code : 'facebook_upload', message: String(err?.message || err) });
+        log(`⚠️ Facebook upload failed: ${err?.message || err}`);
+      }
+    }
+    if (WANT.instagram) {
+      try {
+        const ig = await publishToInstagram(social, OUTPUT_VIDEO, { caption: `${script.title}\n\n${socialText}`.slice(0, 2150 - tagLine.length).trim() + `\n\n${tagLine}` });
+        instagramUrl = ig.url;
+        log(`Published on Instagram: ${ig.url}`);
+      } catch (err: any) {
+        failures.push({ where: 'Instagram', code: err instanceof SocialError ? err.code : 'facebook_upload', message: String(err?.message || err) });
+        log(`⚠️ Instagram upload failed: ${err?.message || err}`);
+      }
+    }
+    if (!published && !facebookUrl && !instagramUrl && failures.length) {
+      const auth = failures.find((f) => /auth|not_connected|not_linked/.test(f.code));
+      throw new PipelineError(auth?.code || failures[0].code, `Publishing failed everywhere: ${failures.map((f) => `${f.where}: ${f.message}`).join(' | ')}`);
+    }
+    if (failures.length) await reportStatus('running', '5/5 Published (partly)', 95, `⚠️ Not posted on ${failures.map((f) => `${f.where} (${f.message.slice(0, 120)})`).join(', ')}.`);
   }
 
   // 6. Report back — the app records the episode and schedules the next one.
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
     partNumber: CFG.partNumber, title: script.title, script: fullText, description,
-    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published,
+    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!(published || facebookUrl || instagramUrl),
+    facebookUrl, instagramUrl,
     privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
     usedFallbackTemplate: script.usedFallbackTemplate, voice: narration.engine, character: characterMode,
     durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl,
@@ -2466,8 +2690,9 @@ async function main() {
     console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
-  await reportStatus('completed', published ? 'Published to YouTube' : 'Video rendered', 100,
-    published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
+  const links = [published?.url, facebookUrl, instagramUrl].filter(Boolean);
+  await reportStatus('completed', links.length ? 'Published' : 'Video rendered', 100,
+    links.length ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${links.join(' · ')}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
     { youtubeUrl: published?.url || '' });
   log(`Done in ${secs}s.`);
   return 0;
