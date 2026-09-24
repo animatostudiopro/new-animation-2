@@ -30,6 +30,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
+import { researchNews, researchRecipe, factSheet, factCheck, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 
 // ---------------------------------------------------------------------------
@@ -409,6 +410,12 @@ interface Script {
   imageCredits?: string[];
   /** Full license attribution for every CC BY / public-domain image used. */
   imageAttributions?: string[];
+  /** The researched facts this script was written from (non-story videos). */
+  factPack?: FactPack;
+  /** True once the independent fact check passed. */
+  factChecked?: boolean;
+  /** Links to the articles the story was verified with. */
+  sourceLinks?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -484,37 +491,51 @@ function lengthSpec() {
     : { words: '360-460', minWords: 280, maxWords: 520, scenes: '16-24', minScenes: 12, maxScenes: 28, seconds: 'about 2.5-3 minutes' };
 }
 
-function categoryBrief(pastStory: string, headlines: { title: string; source: string; date: string }[]): string {
+/** Every non-story video is written from a researched, verified fact sheet. */
+const TRUTH_RULES = `
+TRUTH RULES (the most important rules — viewers must be able to trust every word)
+- Every factual statement (numbers, prices, specs, dates, names, places, quotes, features, outcomes, rankings, "first/only/biggest") must come from the FACT SHEET below, or be universally known stable background. Nothing else.
+- Never invent or "round up" a detail to fill time. If the sheet doesn't say it, don't say it — explain why it matters, give context, or ask the viewer a question instead.
+- Anything marked UNCONFIRMED may only be said as "reportedly" / "according to …", or left out.
+- Don't present speculation, predictions or opinions as facts. Attribute claims to the outlet or company that made them.
+- Your script is checked sentence by sentence against the sheet by an independent fact-checker; anything unsupported is cut.`;
+
+function categoryBrief(pastStory: string, headlines: { title: string; source: string; date: string }[], pack: FactPack | null = null): string {
   const topic = CFG.topic ? `\nCreator's direction: "${CFG.topic}".` : '';
   const sub = CFG.subGenre ? `\nSub-genre: ${CFG.subGenre}.` : '';
-  const news = headlines.length
-    ? `\nFRESH HEADLINES (newest first; none of these has been covered on this channel before). Use ONLY facts stated here — do not invent numbers, prices, specs, quotes, names or dates:\n${headlines.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source}${h.date ? `, ${h.date.slice(0, 16)}` : ''})` : ''}`).join('\n')}\nPick the single most important/interesting story (prefer #1-#3, the newest) and build the whole video around it. Mention the source naturally once. Put the exact headline you used in "sourceHeadline".`
+  const sheet = pack ? `${TRUTH_RULES}\n\nFACT SHEET (researched and verified on the live web for this video)\n"""\n${factSheet(pack)}\n"""` : '';
+  const news = pack?.headline
+    ? `\nTHE STORY FOR THIS VIDEO (verified by ${pack.outlets.length} independent outlet(s)): "${pack.headline.title}"${pack.headline.source ? ` (${pack.headline.source})` : ''}. Build the whole video around it. Mention a source naturally once. Put this exact headline in "sourceHeadline".${sheet}`
+    : headlines.length
+    ? `\nFRESH HEADLINES (newest first; none of these has been covered on this channel before). Use ONLY facts stated here — do not invent numbers, prices, specs, quotes, names or dates:\n${headlines.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source}${h.date ? `, ${h.date.slice(0, 16)}` : ''})` : ''}`).join('\n')}\nPick the single most important/interesting story (prefer #1-#3, the newest) and build the whole video around it. Mention the source naturally once. Put the exact headline you used in "sourceHeadline".${TRUTH_RULES}`
     : '';
   switch (CFG.category) {
     case 'cooking':
-      return `FORMAT: a narrated cooking tutorial${sub}${topic}
-- Pick ONE specific, genuinely good dish (different from the previous videos listed below).
+      return `FORMAT: a narrated cooking tutorial${sub}${topic}${pack?.recipe ? `\n- THE DISH: ${pack.subject}. Teach exactly the VERIFIED RECIPE in the fact sheet (same amounts, times, temperatures and order).${sheet}` : `${TRUTH_RULES}\n- Pick ONE specific, genuinely good dish (different from the previous videos listed below) and use a standard, well-tested recipe for it with correct, food-safe times and temperatures.`}
 - Scene 1 is the HOOK: a mouth-watering promise or a surprising tip, max 14 words ("The secret to crispy fried rice is day-old rice, and here's why.").
 - Then: ingredients with exact amounts, then clear step-by-step instructions with times/temperatures, one pro tip, and a satisfying final plating moment.
 - End with a one-line call to action (ask a question viewers will answer in the comments).
 - Use shot "panel" for ingredient and step scenes (the presenter points at the photo), "scene" for the hook and the final dish.
-- searchQuery: the real dish, ingredient or cooking step to find a REAL photo of (e.g. "jollof rice", "fresh scotch bonnet peppers", "frying plantain"). The video uses real photos found on the web — never generated images.`;
+- ONE thing per scene on screen: an ingredient scene shows that ingredient, a step scene shows that step, so the viewer is guided visually step by step.
+- searchQuery (every scene): the ONE main thing visible at that moment in its plain common name, 1-3 words, as you'd type it into a photo search — an ingredient ("tomatoes", "red onions", "scotch bonnet peppers", "parboiled rice"), or the dish/step ("jollof rice", "frying plantain", "chopped tomatoes"). Never a sentence, never two ingredients.
+- imagePrompt (every scene): a realistic overhead or 45-degree food photo of exactly that ingredient or step (e.g. "fresh ripe tomatoes on a wooden board, natural light"). Used only if no real photo is found.`;
     case 'tech':
       return `FORMAT: a tech / AI tool tutorial-review${sub}${topic}${news}
-- Cover ONE real, newly released or trending AI tool, app, model or gadget${headlines.length ? ' from the headlines above' : ''}.
+- Cover ONE real, newly released or trending AI tool, app, model or gadget${pack ? ' — the one in the verified story above' : headlines.length ? ' from the headlines above' : ''}.
 - Scene 1 is the HOOK (max 14 words): the most useful or surprising thing it does for the viewer ("This free AI tool turns a photo into a 3D model in seconds.").
 - Then, tutorial style: WHAT it is (one line) → the problem it solves / who it helps → WHERE to get it (official website, app store or platform by name — never invent a URL) → HOW to use it in 3-5 concrete steps ("Open…", "Upload…", "Type a prompt like…", "Export…") → one pro tip → one honest limitation → a clear verdict.
-- Talk like a friendly expert showing a friend, not an ad. Never state a spec, price, date or feature that is not in the headlines or widely known.
+- Talk like a friendly expert showing a friend, not an ad. Never state a spec, price, date or feature that is not in the fact sheet.
 - Teach, don't announce: the viewer should finish knowing exactly what it does for THEM, where to find it and what to click first. Say the steps out loud ("[count] Step one: open…"), and react to what impresses you.
 - Use shot "panel" for most scenes: the presenter points at the image of the tool/step.
 - The pictures are REAL images found on the web — the product's own website and screenshots, the news articles about it, press photos — never generated. So:
   - "officialUrl": the tool's official website or product page (e.g. "https://gemini.google.com"). Only a URL you are sure is real; otherwise leave it empty.
-  - searchQuery (every scene): name the real product, company, person or device exactly as a news photo would be captioned (e.g. "Google Gemini app", "Nvidia Blackwell GPU", "Sam Altman"), 2-6 words, no generic words like "technology" or "AI concept".${headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real AI tool and stay factual.'}`;
+  - searchQuery (every scene): name the real product, company, person or device EXACTLY, with the full model name/number (e.g. "Samsung Galaxy S25 Ultra", "iPhone 16 Pro", "Nvidia Blackwell GPU", "Sam Altman"), 2-6 words, no generic words like "technology" or "AI concept". The picture must show that exact product.${pack || headlines.length ? '' : '\n- No headlines were available: pick a well-known, clearly real AI tool and stay factual.'}`;
     case 'ads': {
       const brief = CFG.adBrief
         ? `\nTHE PRODUCT (read from the advertiser's own PDF — use ONLY these facts, never invent a price, feature, claim or link):\n"""${CFG.adBrief.slice(0, 5000)}"""`
         : '\nNo product document was provided: write a clean, honest teaser for the product named in the creator\'s direction and invent nothing.';
-      return `FORMAT: a short, honest product advert that viewers actually enjoy${sub}${topic}${brief}
+      const adRules = CFG.adBrief ? TRUTH_RULES.replace(/the FACT SHEET below/g, 'THE PRODUCT document above').replace(/the sheet/g, 'the document') : '';
+      return `FORMAT: a short, honest product advert that viewers actually enjoy${sub}${topic}${brief}${adRules}
 - Scene 1 is the HOOK (max 14 words): the problem the viewer has, or the single best thing this product does ("Your meeting notes write themselves now — here's how.").
 - Then: what it is in one line → who it's for → the 2-3 features that matter, each with the benefit in plain words → how to get it (the exact site, app store or plan named in the document) → the offer or price ONLY if the document states it → a clear call to action.
 - The presenter genuinely likes it and speaks from experience: warm, specific, never shouty, no fake urgency, no invented testimonials.
@@ -524,11 +545,11 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
     case 'news':
       return `FORMAT: a 60-second news explainer${sub}${topic}${news}
 - Scene 1 is the HOOK: what happened, in max 14 words, in plain language.
-- Then: the key facts (who, what, where, when), why it matters to the viewer, and what happens next. Neutral, accurate, no speculation, no opinions.
+- Then: the key facts (who, what, where, when) exactly as the fact sheet states them, why it matters to the viewer, and what happens next. Neutral, accurate, no speculation, no opinions.
 - It must be a story that is NOT in the list of previous video titles below.
 - Use shot "panel" for fact scenes. The pictures are the REAL photos from the news articles about this story (never generated), so searchQuery must name the real place/person/organisation/event exactly as a news photo caption would (e.g. "Lagos flooding", "Bola Tinubu", "SpaceX Starship launch"), 2-6 words.
 - The presenter reacts like someone who has followed the story: a beat of surprise at the number that matters, [lean_in] for the human detail, [serious] for the consequence. Viewers must feel this really happened, not that a page is being read.
-- Close with what to watch for next and when.${headlines.length ? '' : '\n- No headlines were available: explain one important, well-established recent development without inventing details.'}`;
+- Close with what to watch for next — only what the sources say is scheduled or expected, never your own prediction.${pack || headlines.length ? '' : '\n- No headlines were available: explain one important, well-established recent development without inventing details.'}`;
     default: {
       const tone = /horror|suspense|scary/i.test(CFG.subGenre) ? 'village/small-town horror: slow dread, a real folk-evil or haunting, sensory detail (cold air, oil lamps, footsteps on sand), frightening but never gory'
         : /mystery/i.test(CFG.subGenre) ? 'a gripping mystery with clues the viewer can follow and a fair, surprising answer'
@@ -569,11 +590,11 @@ ${part >= last ? '- The title must NOT contain "(Part ...)" if the story ends he
   }
 }
 
-function buildPrompt(pastStory: string, pastTitles: string[], headlines: any[]): string {
+function buildPrompt(pastStory: string, pastTitles: string[], headlines: any[], pack: FactPack | null = null): string {
   const L = lengthSpec();
   const avoid = pastTitles.length ? `\nPrevious video titles (do NOT repeat these topics): ${pastTitles.slice(-15).join(' | ')}` : '';
   return `You are writing a ${IS_SHORTS ? 'YouTube Short (vertical)' : 'YouTube video (16:9)'} of ${L.seconds}, narrated by an animated presenter.
-${categoryBrief(pastStory, headlines)}${avoid}
+${categoryBrief(pastStory, headlines, pack)}${avoid}
 
 RULES
 - Total narration: ${L.words} words across ${L.scenes} scenes. Each scene is 1-3 spoken sentences (8-40 words).
@@ -709,13 +730,90 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
   };
 }
 
+/** Research context shared by the fact research, the fact check and the image check. */
+let RESEARCH_CTX: ResearchCtx | null = null;
+const researchCtx = (pastTitles: string[] = []): ResearchCtx => (RESEARCH_CTX ||= {
+  llm: LLM, log, offline: CFG.offline, category: CFG.category, subGenre: CFG.subGenre, topic: CFG.topic, pastTitles, adBrief: CFG.adBrief
+});
+
+/** Research BEFORE writing: every non-story video starts from verified facts. */
+async function researchFor(pastTitles: string[], headlines: any[]): Promise<FactPack | null> {
+  const ctx = researchCtx(pastTitles);
+  if (CFG.category === 'news' || CFG.category === 'tech') {
+    const pack = await researchNews(ctx, headlines);
+    if (!pack && !CFG.offline) {
+      throw new PipelineError('fact_check_failed', `None of the fresh ${CFG.category === 'tech' ? 'tech' : 'news'} stories could be confirmed by independent sources right now, so nothing was posted (no unverified story is ever published). The next attempt runs automatically.`);
+    }
+    return pack;
+  }
+  if (CFG.category === 'cooking') return researchRecipe(ctx);
+  if (CFG.category === 'ads' && CFG.adBrief) return { subject: 'the advertised product', facts: [], excerpts: [{ source: 'advertiser PDF', url: '', text: CFG.adBrief.slice(0, 6000) }], outlets: ['advertiser document'], links: [], confirmed: true };
+  return null;
+}
+
+/** "[serious] Heavy rain…" — the scene's narration with its performance tags put back in. */
+function taggedOf(s: Scene): string {
+  const toks = s.narration.split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  toks.forEach((t, i) => { for (const c of s.cues) if (c.index === i) out.push(`[${c.tag}]`); out.push(t); });
+  for (const c of s.cues) if (c.index >= toks.length) out.push(`[${c.tag}]`);
+  return out.join(' ');
+}
+
+/**
+ * The independent fact check. Wrong / unsupported sentences are corrected or
+ * cut; if the script is still not clean after two rounds, nothing is published.
+ */
+async function verifyScript(script: Script, pack: FactPack | null): Promise<void> {
+  if (CFG.category === 'stories' || CFG.offline || script.usedFallbackTemplate) return;
+  const ctx = researchCtx();
+  const sheet = pack ? factSheet(pack)
+    : 'No external source document. Judge every claim against well-established, verifiable knowledge only; anything specific you cannot verify (numbers, dates, prices, specs, quotes, names) is a problem.';
+  const L = lengthSpec();
+  for (let round = 1; round <= 3; round++) {
+    const res = await factCheck(ctx, sheet, script.scenes.map((sc) => ({ tagged: taggedOf(sc) })), script.title, script.description);
+    if (!res) {
+      if (pack?.confirmed && round > 1) { log('Fact check: no checker model answered for the re-check; the corrected script stands.'); return; }
+      throw new PipelineError('fact_check_failed', 'The fact-checker could not be reached, so the script was not verified and nothing was posted. The next attempt runs automatically.');
+    }
+    if (res.titleFix) script.title = res.titleFix.replace(/[#"]/g, '').trim() || script.title;
+    if (res.descriptionFix) script.description = res.descriptionFix.replace(/#\w+/g, '').trim() || script.description;
+    if (res.ok || !res.fixes.size) { log(`Fact check (${res.model}), round ${round}: every statement is supported by the sources ✔`); script.factChecked = true; return; }
+    log(`Fact check (${res.model}), round ${round}: ${res.fixes.size} scene(s) corrected — ${res.issues.slice(0, 4).join(' | ')}`);
+    const drop: number[] = [];
+    for (const [i, fixed] of res.fixes) {
+      const t = parseTaggedNarration(fixed);
+      if (!fixed || t.text.split(' ').length < 3) drop.push(i);
+      else { script.scenes[i].narration = t.text; script.scenes[i].cues = t.cues; }
+    }
+    for (const i of drop.sort((a, b) => b - a)) script.scenes.splice(i, 1);
+    if (script.scenes.length < Math.ceil(L.minScenes * 0.6)) {
+      throw new PipelineError('fact_check_failed', `The fact-checker removed too much of the script (${script.scenes.length} scenes left) because it was not supported by the sources. Nothing was posted; the next attempt writes a new one.`);
+    }
+  }
+  throw new PipelineError('fact_check_failed', 'The script still had unsupported claims after three fact-check rounds, so nothing was posted. The next attempt runs automatically.');
+}
+
 async function generateScript(pastStory: string, pastTitles: string[], pastSources: string[]): Promise<Script> {
   const headlines = (CFG.category === 'tech' || CFG.category === 'news') ? await recentHeadlines(pastTitles, pastSources) : [];
-  const prompt = buildPrompt(pastStory, pastTitles, headlines);
+  const pack = CFG.category === 'stories' ? null : await researchFor(pastTitles, headlines);
+  const prompt = buildPrompt(pastStory, pastTitles, pack?.headline ? [pack.headline] : headlines, pack);
   const system = 'You are an award-winning short-form video writer and director. Your videos open with an irresistible hook, make complete sense, stay engaging every single second and end with a reason to follow. You answer with one valid JSON object and nothing else.';
   let nearMiss: { script: Script; words: number } | null = null;
   let lastError = '';
+  let factFailure: PipelineError | null = null;
   const withSources = (sc: Script) => {
+    sc.factPack = pack || undefined;
+    if (pack?.headline) {
+      // The verified story is what the video is about; cite every outlet that confirmed it.
+      sc.sourceHeadline = pack.headline.title;
+      sc.sources = [`${pack.headline.title} (${pack.outlets.slice(0, 4).join(', ') || pack.headline.source})`];
+      sc.sourceStory = { title: pack.headline.title, source: pack.headline.source, link: pack.links[0]?.url || pack.headline.link };
+      if (!sc.officialUrl && pack.officialUrl) sc.officialUrl = cleanOfficialUrl(pack.officialUrl);
+      sc.sourceLinks = pack.links.map((l) => l.url).filter(Boolean).slice(0, 4);
+      return sc;
+    }
+    if (pack?.recipe) { sc.sources = [`Recipe checked against: ${pack.outlets.slice(0, 4).join(', ') || 'published recipes'}`]; return sc; }
     const used = headlines.find((h) => sc.sourceHeadline && sameStory(h.title, sc.sourceHeadline)) || (headlines.length ? headlines.find((h) => sc.scenes.some((x) => sameStory(h.title, x.narration))) : null);
     // Cite only what the video is really about — never a neighbouring headline.
     sc.sources = used ? [`${used.title} (${used.source})`] : sc.sourceHeadline ? [sc.sourceHeadline] : [];
@@ -753,10 +851,17 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
           throw validation;
         }
         withSources(script);
+        await verifyScript(script, pack);
         log(`Script by ${label} in ${((Date.now() - t0) / 1000).toFixed(1)}s: "${script.title}" — ${script.scenes.length} scenes, ${script.scenes.reduce((n, x) => n + x.narration.split(' ').length, 0)} words, ${script.scenes.reduce((n, x) => n + x.cues.length, 0)} performance cues.`);
         return script;
       } catch (err: any) {
         lastError = `${label}: ${err?.message}`;
+        if (err instanceof PipelineError && err.code === 'fact_check_failed') {
+          factFailure = err;
+          if (/could not be reached/.test(err.message)) throw err;
+          log(`${label}'s script failed the fact check (${err.message}) — asking the next model for a new script.`);
+          continue;
+        }
         log(`${label} answered but the script was unusable (${err?.message}) — asking the next model.`);
       }
     }
@@ -764,9 +869,12 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
   } else {
     lastError = 'offline test mode';
   }
+  if (factFailure) throw factFailure; // never fall back to an unchecked script
   if (nearMiss) {
     log(`Using the best AI script (${nearMiss.words} words — a little shorter than asked) from ${nearMiss.script.model}.`);
-    return withSources(nearMiss.script);
+    const sc = withSources(nearMiss.script);
+    await verifyScript(sc, pack);
+    return sc;
   }
   log(`⚠️ AI script generation failed (${lastError}).`);
   return { ...templateScript(), aiError: lastError };
@@ -1091,6 +1199,8 @@ interface WebImage {
   kind: 'screenshot' | 'wiki' | 'library' | 'product' | 'advertiser';
   /** Full attribution for the description (title, author, license, source page). */
   attribution?: string;
+  /** What the image is of, from its source (file title, caption, tags) — used to check it matches the scene. */
+  meta?: string;
 }
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 /** Logos, icons, avatars, tracking pixels, placeholders — never used as a scene picture. */
@@ -1177,7 +1287,8 @@ async function commonsFiles(params: string, forAds = false): Promise<WebImage[]>
     const title = plain(md.ObjectName?.value || String(p.title || '').replace(/^File:/, '').replace(/\.[a-z]+$/i, ''));
     const page = ii.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(String(p.title || ''))}`;
     const licUrl = plain(md.LicenseUrl?.value || '');
-    out.push({ url, credit: shortCredit(author, lic), kind: 'library',
+    const desc = plain(md.ImageDescription?.value || '').slice(0, 300);
+    out.push({ url, credit: shortCredit(author, lic), kind: 'library', meta: `${title} ${desc} ${plain(md.Categories?.value || '').replace(/\|/g, ' ')}`,
       attribution: `"${title}" by ${author || 'unknown author'} — ${lic}${licUrl ? ` (${licUrl})` : ''} — ${page}` });
   }
   return out;
@@ -1187,10 +1298,15 @@ async function commonsFiles(params: string, forAds = false): Promise<WebImage[]>
 async function wikiImages(query: string, forAds = false): Promise<WebImage[]> {
   if (!query) return [];
   const d = await fetchJson(`${CFG.wikiApiBase}?action=query&format=json&origin=*&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=2&prop=pageimages&piprop=name`);
-  const names = (Object.values(d?.query?.pages || {}) as any[]).sort((a, b) => (a.index || 0) - (b.index || 0)).map((p) => p?.pageimage).filter(Boolean);
-  if (!names.length) return [];
+  const pages = (Object.values(d?.query?.pages || {}) as any[]).sort((a, b) => (a.index || 0) - (b.index || 0)).filter((p) => p?.pageimage);
+  if (!pages.length) return [];
   // Non-free files (fair-use logos, posters) live on Wikipedia itself, not on Commons → they come back "missing" and are skipped.
-  return (await commonsFiles(`titles=${names.map((n: string) => encodeURIComponent(`File:${n}`)).join('|')}`, forAds)).map((x) => ({ ...x, kind: 'wiki' as const }));
+  // The article's title counts as the image's subject (the lead image of "iPhone 16 Pro" shows the iPhone 16 Pro).
+  const out: WebImage[] = [];
+  for (const p of pages) {
+    for (const x of await commonsFiles(`titles=${encodeURIComponent(`File:${p.pageimage}`)}`, forAds)) out.push({ ...x, kind: 'wiki', meta: `${p.title} ${x.meta || ''}` });
+  }
+  return out;
 }
 
 /** Freely licensed photo libraries: Wikimedia Commons, Openverse (CC0/PDM/CC BY), Pexels, Pixabay. */
@@ -1200,20 +1316,22 @@ async function libraryImages(query: string, forAds = false): Promise<WebImage[]>
   const out: WebImage[] = [];
   if (CFG.pexelsKey) {
     const d = await fetchJson(`https://api.pexels.com/v1/search?query=${q}&per_page=4&orientation=${orientation}`, { Authorization: CFG.pexelsKey });
-    for (const p of d?.photos || []) out.push({ url: orientation === 'portrait' ? p.src?.portrait || p.src?.large2x : p.src?.large2x || p.src?.large, credit: `Photo: ${String(p.photographer || 'Pexels').slice(0, 24)} · Pexels`, kind: 'library', attribution: `Photo by ${p.photographer || 'unknown'} on Pexels (Pexels License) — ${p.url || 'https://www.pexels.com'}` });
+    for (const p of d?.photos || []) out.push({ url: orientation === 'portrait' ? p.src?.portrait || p.src?.large2x : p.src?.large2x || p.src?.large, meta: String(p.alt || ''), credit: `Photo: ${String(p.photographer || 'Pexels').slice(0, 24)} · Pexels`, kind: 'library', attribution: `Photo by ${p.photographer || 'unknown'} on Pexels (Pexels License) — ${p.url || 'https://www.pexels.com'}` });
   }
   if (CFG.pixabayKey) {
     const d = await fetchJson(`https://pixabay.com/api/?key=${CFG.pixabayKey}&q=${q}&image_type=photo&safesearch=true&per_page=4&orientation=${orientation === 'landscape' ? 'horizontal' : 'vertical'}`);
-    for (const h of d?.hits || []) out.push({ url: h.largeImageURL, credit: `Photo: ${String(h.user || 'Pixabay').slice(0, 24)} · Pixabay`, kind: 'library', attribution: `Image by ${h.user || 'unknown'} on Pixabay (Pixabay Content License) — ${h.pageURL || 'https://pixabay.com'}` });
+    for (const h of d?.hits || []) out.push({ url: h.largeImageURL, meta: String(h.tags || ''), credit: `Photo: ${String(h.user || 'Pixabay').slice(0, 24)} · Pixabay`, kind: 'library', attribution: `Image by ${h.user || 'unknown'} on Pixabay (Pixabay Content License) — ${h.pageURL || 'https://pixabay.com'}` });
   }
   out.push(...await commonsFiles(`generator=search&gsrnamespace=6&gsrlimit=12&gsrsearch=${q}%20filetype:bitmap`, forAds));
-  if (out.length < 3) {
-    const o = await fetchJson(`${CFG.openverseBase}?q=${q}&page_size=10&mature=false&license=cc0,pdm,by`);
+  // Openverse (millions of CC0 / CC BY photos, e.g. Flickr food photography) is always asked:
+  // Commons alone often has nothing for everyday ingredients and cooking steps.
+  {
+    const o = await fetchJson(`${CFG.openverseBase}?q=${q}&page_size=12&mature=false&license=cc0,pdm,by`);
     for (const r of o?.results || []) {
       if ((r.width || 0) < 800) continue;
       const lic = reusableLicense(`${r.license === 'by' ? 'CC BY' : String(r.license || '').toUpperCase()} ${r.license_version || ''}`.trim());
       if (!lic) continue;
-      out.push({ url: r.url, credit: shortCredit(r.creator || '', lic), kind: 'library', attribution: `"${plain(r.title) || 'Untitled'}" by ${plain(r.creator) || 'unknown author'} — ${lic}${r.license_url ? ` (${r.license_url})` : ''} — ${r.foreign_landing_url || r.url}` });
+      out.push({ url: r.url, meta: `${plain(r.title)} ${(Array.isArray(r.tags) ? r.tags : []).map((t: any) => t?.name || '').join(' ')}`, credit: shortCredit(r.creator || '', lic), kind: 'library', attribution: `"${plain(r.title) || 'Untitled'}" by ${plain(r.creator) || 'unknown author'} — ${lic}${r.license_url ? ` (${r.license_url})` : ''} — ${r.foreign_landing_url || r.url}` });
     }
   }
   return out.filter((x) => x.url && !BAD_IMAGE.test(x.url));
@@ -1542,6 +1660,38 @@ const animatedPrompt = (p: string) => {
   return out.replace(/\bcartoon cartoon\b/gi, 'cartoon').replace(/\s+/g, ' ').trim();
 };
 
+/**
+ * Does the downloaded picture really show what the presenter is talking about?
+ * A vision model looks at it (Gemini, then Groq's vision model). null = no
+ * vision model available (the metadata check alone decides).
+ */
+let visionBudget = 40;
+async function looksRight(file: string, subject: string): Promise<boolean | null> {
+  if (visionBudget <= 0 || CFG.offline || !LLM.hasKeys || !subject) return null;
+  visionBudget--;
+  const small = `${file}.vis.jpg`;
+  const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', file, '-vf', 'scale=512:-2', '-q:v', '5', small], { timeoutMs: 20000 });
+  if (r.code !== 0 || !fs.existsSync(small)) return null;
+  const v = await visionMatches(researchCtx(), fs.readFileSync(small).toString('base64'), subject, CFG.category);
+  try { fs.unlinkSync(small); } catch {}
+  if (!v) { visionBudget = 0; log('Image check: no vision model answered — relying on the images\' own titles/tags from now on.'); return null; }
+  if (!v.match) log(`Image check: rejected a picture for "${subject}" (it shows ${v.shows || 'something else'}).`);
+  return v.match;
+}
+
+/** Realistic food photo when no real photo of that ingredient / step exists (cooking only). */
+async function foodImage(s: Scene, subject: string, seed: number, raw: string, out: string): Promise<boolean> {
+  const what = (s.imagePrompt && !/\b(person|people|man|woman|chef|hand|hands|face)\b/i.test(s.imagePrompt) ? s.imagePrompt : `${subject}, fresh, on a kitchen counter`).slice(0, 300);
+  const prompt = `${what}. Realistic professional food photography of ${subject}, appetizing, natural window light, shallow depth of field, sharp focus, true-to-life colours, no people, no hands, no text, no labels, no logos, no watermark`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const got = await aiImage(prompt, seed + attempt * 101, raw);
+    if (!got || !(await toJpeg(raw, out, got === 'ai' ? 0.04 : 0))) continue;
+    if ((await looksRight(out, subject)) === false) continue;
+    return true;
+  }
+  return false;
+}
+
 async function gatherImages(script: Script): Promise<{ files: (string | null)[]; aiCount: number; credits: (string | null)[] }> {
   const isStory = CFG.category === 'stories';
   const n = script.scenes.length;
@@ -1668,12 +1818,29 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
       return free[0] || null;
     };
 
-    const tryList = async (list: WebImage[], raw: string, out: string): Promise<WebImage | null> => {
-      for (const img of list) { if (Date.now() > deadline) return null; if (await takeImage(img, raw, out)) return img; }
+    /**
+     * The first image that really shows `subject`:
+     *   1. its own title / caption / tags name it — for a specific product every
+     *      model identifier must be there ("Galaxy S25 Ultra" ≠ "Galaxy S23"), and
+     *   2. a vision model looking at it agrees.
+     */
+    const tryList = async (list: WebImage[], raw: string, out: string, subject: string): Promise<WebImage | null> => {
+      const strict = identifierTokens(subject).length > 0;
+      let checked = 0;
+      for (const img of list) {
+        if (Date.now() > deadline || checked >= 5) return null;
+        const needsCheck = img.kind === 'library' || img.kind === 'wiki';
+        if (needsCheck && subject && !metadataMatches(subject, img.meta || '', strict)) continue;
+        if (!(await takeImage(img, raw, out))) continue;
+        checked++;
+        if (needsCheck && (await looksRight(out, subject)) === false) continue;
+        return img;
+      }
       return null;
     };
     const fromPool = () => pool.filter((x) => !usedImageUrls.has(x.url));
     const attributions: string[] = [];
+    let generatedFood = 0;
 
     const fetchOne = async (i: number) => {
       const s = script.scenes[i];
@@ -1694,12 +1861,21 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
       sources.push(async () => libraryImages(q, forAds));
       if (q !== subject) sources.push(async () => wikiImages(subject.split(/\s+/).slice(0, 6).join(' '), forAds));
       if (q !== subject) sources.push(async () => libraryImages(subject.split(/\s+/).slice(0, 5).join(' '), forAds));
-      for (const src of sources) {
+      for (const [k, src] of sources.entries()) {
         if (Date.now() > deadline) break;
-        const got = await tryList(await src(), raw, out);
+        // Scene-level sources must show the scene's subject; topic-level ones the topic.
+        const subj = k < (forAds ? 3 : 2) ? q : (script.factPack?.productName || subject.split(/\s+/).slice(0, 6).join(' '));
+        const got = await tryList(await src(), raw, out, cat === 'ads' && k === 0 ? '' : subj);
         if (got) { set(out, got.credit); if (got.attribution && !attributions.includes(got.attribution)) attributions.push(got.attribution); return; }
+        // Cooking: a picture of something else never beats a picture of THIS ingredient/step.
+        if (cat === 'cooking' && k >= 1) break;
       }
-      const sh = nextShot();
+      // Cooking: no real photo of this ingredient / step → a realistic food photo of exactly it.
+      if (cat === 'cooking' && Date.now() < deadline + 90_000) {
+        if (await foodImage(s, q, 9000 + i * 13, raw, out)) { set(out, 'AI-generated image'); generatedFood++; return; }
+      }
+      // Tech: the product's own verified website shows the exact product — better than a wrong one.
+      const sh = nextShot() || (cat === 'tech' ? shots.sort((a, b) => a.uses - b.uses)[0] || null : null);
       if (sh) { sh.uses++; shotUses++; s.shot = 'panel'; set(sh.file, sh.credit); }
     };
     const queue = script.scenes.map((_, i) => i);
@@ -1707,6 +1883,8 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     // Leftover product photos still beat a repeated image for ads.
     for (let i = 0; i < n && productFiles.length; i++) if (!files[i]) { files[i] = productFiles[productCursor++ % productFiles.length]; credits[i] = 'Product image'; }
     script.imageAttributions = attributions;
+    aiCount += generatedFood;
+    if (generatedFood) log(`Cooking: ${generatedFood} ingredient/step picture(s) had no real photo and were generated as realistic food photos.`);
   }
 
   // Scenes without an image reuse the nearest one so nothing is ever blank (never an invented picture).
@@ -2235,6 +2413,8 @@ async function main() {
         : `\nPart ${CFG.partNumber} of ${CFG.arcParts}. Part ${CFG.partNumber + 1} is coming — follow so you don't miss it.`)
       : '',
     script.sources?.length ? `\nSources: ${script.sources.join('; ')}` : '',
+    script.sourceLinks?.length ? script.sourceLinks.map((u) => `• ${u}`).join('\n') : '',
+    script.factChecked ? 'Every fact in this video was checked against the sources above before publishing.' : '',
     script.officialUrl ? `Official site: ${script.officialUrl}` : '',
     script.imageAttributions?.length
       ? `\nImage credits (images may be cropped):\n${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)

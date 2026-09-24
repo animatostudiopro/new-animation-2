@@ -32,15 +32,27 @@ export interface LlmRequest {
   maxTokens?: number;
   json?: boolean;
   timeoutMs?: number;
+  /**
+   * Live web research: Gemini answers with Google Search grounding, Groq with its
+   * built-in web-search "compound" models. The answer carries the web sources used.
+   */
+  webSearch?: boolean;
+  /** Images to look at (vision check). Gemini models, then Groq's vision model. */
+  images?: { mime: string; data: string }[];
 }
-export interface LlmAttempt { provider: Provider; model: string; text: string; ms: number }
+export interface WebSource { title: string; uri: string }
+export interface LlmAttempt { provider: Provider; model: string; text: string; ms: number; sources?: WebSource[] }
 
 export const GEMINI_MODELS_DEFAULT = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 export const GROQ_MODELS_DEFAULT = ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b'];
+/** Groq models that search the web themselves (used for fact research). */
+export const GROQ_SEARCH_MODELS = ['groq/compound', 'groq/compound-mini'];
+/** Groq models that can look at an image (used for image verification). */
+export const GROQ_VISION_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
 
 const tail = (k: string) => `…${String(k).slice(-4)}`;
 type Outcome =
-  | { kind: 'ok'; text: string }
+  | { kind: 'ok'; text: string; sources?: WebSource[] }
   | { kind: 'dead-key'; why: string }
   | { kind: 'rate'; why: string; daily: boolean }
   | { kind: 'model-gone'; why: string }
@@ -85,16 +97,22 @@ export class LlmPool {
     }
     return out;
   }
-  models(p: Provider): string[] {
-    return (p === 'gemini' ? this.cfg.geminiModels || GEMINI_MODELS_DEFAULT : this.cfg.groqModels || GROQ_MODELS_DEFAULT).filter((m) => !this.exhausted.has(`${p}:${m}`));
+  models(p: Provider, req?: LlmRequest): string[] {
+    let list = p === 'gemini' ? this.cfg.geminiModels || GEMINI_MODELS_DEFAULT : this.cfg.groqModels || GROQ_MODELS_DEFAULT;
+    // Research and vision need special Groq models (the Gemini ones do both natively).
+    if (p === 'groq' && req?.webSearch) list = GROQ_SEARCH_MODELS;
+    else if (p === 'groq' && req?.images?.length) list = GROQ_VISION_MODELS;
+    const mode = this.modeOf(req);
+    return list.filter((m) => !this.exhausted.has(`${p}:${m}${mode}`));
   }
+  private modeOf(req?: LlmRequest): string { return req?.webSearch ? '#search' : req?.images?.length ? '#vision' : ''; }
 
   /** Every usable (provider, model) answer, best first. Stop iterating once an answer is good enough. */
   async *attempts(req: LlmRequest): AsyncGenerator<LlmAttempt> {
     let user = req.user;
     for (const provider of ['gemini', 'groq'] as Provider[]) {
       if (!(provider === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys).length) continue;
-      for (const model of this.models(provider)) {
+      for (const model of this.models(provider, req)) {
         let serverErrors = 0;
         let withExtras = true;
         let answered = false;
@@ -107,7 +125,7 @@ export class LlmPool {
           if (out.kind === 'ok') {
             this.cursor[provider] = (provider === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys).indexOf(key);
             answered = true;
-            yield { provider, model, text: out.text, ms };
+            yield { provider, model, text: out.text, ms, sources: out.sources };
             break; // the caller wants another answer → next MODEL, never the same one again
           }
           const note = `${provider}/${model} key ${tail(key)}: ${out.why}`;
@@ -132,7 +150,7 @@ export class LlmPool {
         }
         // Either every key is spent / the model is gone, or it answered and the caller wants a
         // different answer: never ask this model again in this run.
-        this.exhausted.add(`${provider}:${model}`);
+        this.exhausted.add(`${provider}:${model}${this.modeOf(req)}`);
         if (!answered && !this.keysFor(provider).length) break; // no live keys left for this provider
       }
     }
@@ -145,14 +163,19 @@ export class LlmPool {
       if (p === 'gemini') {
         const base = (this.cfg.geminiBase || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '');
         const gen: any = { temperature: req.temperature ?? 0.8, maxOutputTokens: req.maxTokens || 8192 };
-        if (req.json) gen.responseMimeType = 'application/json';
+        // Grounded (search) answers cannot be forced into JSON mode: the JSON is parsed from the text.
+        if (req.json && !req.webSearch) gen.responseMimeType = 'application/json';
         if (extras) {
           if (/2\.5-flash(?!-lite)/.test(model)) gen.thinkingConfig = { thinkingBudget: 512 };
           else if (/gemini-3/.test(model)) gen.thinkingConfig = { thinkingLevel: 'low' };
         }
         const body = {
           systemInstruction: { parts: [{ text: req.system }] },
-          contents: [{ role: 'user', parts: [{ text: req.user }] }],
+          contents: [{ role: 'user', parts: [
+            ...(req.images || []).map((im) => ({ inline_data: { mime_type: im.mime, data: im.data } })),
+            { text: req.user }
+          ] }],
+          ...(req.webSearch ? { tools: [{ google_search: {} }] } : {}),
           generationConfig: gen,
           safetySettings: ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
             .map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' }))
@@ -175,16 +198,27 @@ export class LlmPool {
           if (/SAFETY|PROHIBITED|BLOCKLIST|SPII/.test(fr)) return { kind: 'blocked', why: `answer blocked (${fr})` };
           return { kind: 'server', why: `empty answer (${fr})` };
         }
-        return { kind: 'ok', text: out };
+        const chunks = cand?.groundingMetadata?.groundingChunks || [];
+        const sources: WebSource[] = chunks.map((c: any) => ({ title: String(c?.web?.title || c?.web?.domain || ''), uri: String(c?.web?.uri || '') })).filter((x: WebSource) => x.title || x.uri);
+        if (req.webSearch && !sources.length && !/search/i.test(JSON.stringify(cand?.groundingMetadata || {}))) {
+          // The model answered from memory instead of searching: not good enough for research.
+          return { kind: 'model-gone', why: 'answered without searching the web' };
+        }
+        return { kind: 'ok', text: out, sources };
       }
       const base = (this.cfg.groqBase || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
       const body: any = {
         model,
         temperature: req.temperature ?? 0.8,
         max_completion_tokens: req.maxTokens || 8192,
-        messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user }]
+        messages: [{ role: 'system', content: req.system }, {
+          role: 'user',
+          content: req.images?.length
+            ? [...req.images.map((im) => ({ type: 'image_url', image_url: { url: `data:${im.mime};base64,${im.data}` } })), { type: 'text', text: req.user }]
+            : req.user
+        }]
       };
-      if (req.json && extras) body.response_format = { type: 'json_object' };
+      if (req.json && extras && !req.webSearch) body.response_format = { type: 'json_object' };
       if (extras && /gpt-oss/.test(model)) body.reasoning_effort = 'low';
       const res = await f(`${base}/chat/completions`, {
         method: 'POST',
@@ -196,9 +230,18 @@ export class LlmPool {
       if (!res.ok) return this.classify(p, res.status, text);
       let data: any;
       try { data = JSON.parse(text); } catch { return { kind: 'server', why: 'unreadable response' }; }
-      const out = String(data?.choices?.[0]?.message?.content || '').trim();
+      const msg = data?.choices?.[0]?.message || {};
+      const out = String(msg.content || '').trim();
       if (!out) return { kind: 'server', why: `empty answer (${data?.choices?.[0]?.finish_reason || 'none'})` };
-      return { kind: 'ok', text: out };
+      // Compound models report the searches they ran (executed_tools[].search_results).
+      const sources: WebSource[] = [];
+      for (const t of Array.isArray(msg.executed_tools) ? msg.executed_tools : []) {
+        for (const r of t?.search_results?.results || []) if (r?.url) sources.push({ title: String(r.title || ''), uri: String(r.url) });
+      }
+      if (req.webSearch && !sources.length) {
+        for (const m of out.matchAll(/https?:\/\/[^\s)\]"'<>]+/g)) sources.push({ title: '', uri: m[0] });
+      }
+      return { kind: 'ok', text: out, sources };
     } catch (err: any) {
       const m = String(err?.name === 'TimeoutError' ? `timed out after ${Math.round(timeout / 1000)}s` : err?.message || err);
       return { kind: 'server', why: m.slice(0, 160) };
