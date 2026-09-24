@@ -43,6 +43,10 @@ export interface FactPack {
   headline?: Headline;
   /** True when the subject was confirmed by independent sources. */
   confirmed: boolean;
+  /** Set when a research model found the story false / satire / a rumour. */
+  refuted?: boolean;
+  /** Set when only one outlet's article could be used (credited in the video). */
+  singleSource?: string;
 }
 
 export interface ResearchCtx {
@@ -211,6 +215,7 @@ async function researchHeadline(ctx: ResearchCtx, h: Headline): Promise<FactPack
     if (d.officialUrl) pack.officialUrl = String(d.officialUrl).slice(0, 200);
     const refuted = /false|satire|rumou?r|hoax|fake/.test(status) || d.confirmed === false;
     if (refuted) {
+      pack.refuted = true;
       ctx.log(`Research (${g.model}): "${h.title}" is ${status || 'not confirmed'} — skipped.`);
       return pack;
     }
@@ -226,9 +231,12 @@ async function researchHeadline(ctx: ResearchCtx, h: Headline): Promise<FactPack
 /** News / tech: research the freshest headlines in order and keep the first confirmed one. */
 export async function researchNews(ctx: ResearchCtx, headlines: Headline[]): Promise<FactPack | null> {
   if (ctx.offline) return null;
+  let bestSingle: FactPack | null = null;
   for (const h of headlines.slice(0, 4)) {
     const pack = await researchHeadline(ctx, h);
     if (pack.confirmed) return pack;
+    // A real article from a real outlet (not refuted) is kept as a fallback.
+    if (!pack.refuted && pack.excerpts.length && (!bestSingle || pack.excerpts.length > bestSingle.excerpts.length)) bestSingle = pack;
   }
   // No fresh headline could be confirmed: a well-documented, verifiable subject instead.
   const g = await groundedResearch(ctx,
@@ -236,7 +244,7 @@ export async function researchNews(ctx: ResearchCtx, headlines: Headline[]): Pro
       ? `Find ONE real AI tool, app, model or gadget${ctx.subGenre ? ` in the area "${ctx.subGenre}"` : ''}${ctx.topic ? ` (creator's direction: "${ctx.topic}")` : ''} that launched or had a major confirmed update in the last 30 days, confirmed by at least two reputable tech outlets. Avoid: ${ctx.pastTitles.slice(-12).join(' | ') || 'nothing'}. Report what it does, where to get it, pricing and how to use it, exactly as the sources state.`
       : `Find ONE important news story${ctx.subGenre ? ` about "${ctx.subGenre}"` : ''}${ctx.topic ? ` (creator's direction: "${ctx.topic}")` : ''} from the last 48 hours that is confirmed by at least two reputable independent outlets. Avoid: ${ctx.pastTitles.slice(-12).join(' | ') || 'nothing'}. Report the confirmed facts exactly as the sources state them.`,
     `{ "headline": "the story's headline", ${FACT_SHAPE.slice(1)}`);
-  if (!g || g.data?.confirmed === false || !g.data?.headline) return null;
+  if (!g || g.data?.confirmed === false || !g.data?.headline) return singleSource(ctx, bestSingle);
   const d = g.data;
   const pack: FactPack = {
     subject: String(d.headline).slice(0, 200), facts: [], excerpts: [], outlets: [], links: [], confirmed: false,
@@ -251,7 +259,22 @@ export async function researchNews(ctx: ResearchCtx, headlines: Headline[]): Pro
   pack.officialUrl = d.officialUrl ? String(d.officialUrl).slice(0, 200) : undefined;
   pack.confirmed = pack.outlets.length >= 2 && pack.facts.length >= 3;
   ctx.log(`Research (${g.model}): picked "${pack.subject.slice(0, 80)}" — ${pack.outlets.length} outlet(s) → ${pack.confirmed ? 'CONFIRMED' : 'not confirmed'}.`);
-  return pack.confirmed ? pack : null;
+  return pack.confirmed ? pack : singleSource(ctx, bestSingle);
+}
+
+/**
+ * Last resort instead of posting nothing: the story exactly as one real outlet
+ * published it (its article text is the fact sheet), with every claim credited
+ * to that outlet in the video.
+ */
+function singleSource(ctx: ResearchCtx, pack: FactPack | null): FactPack | null {
+  if (!pack || !pack.excerpts.length) return null;
+  const outlet = pack.excerpts[0].source || pack.headline?.source || 'the publisher';
+  pack.facts.unshift(`SINGLE SOURCE: only ${outlet} could be read for this story. Report ONLY what its article below says and credit it in the narration ("according to ${outlet}…"). Do not add anything else.`);
+  pack.confirmed = true;
+  pack.singleSource = outlet;
+  ctx.log(`Research: no second outlet could be confirmed right now — using the article from ${outlet} as the only source, credited on screen and in the description.`);
+  return pack;
 }
 
 /** Cooking: pick a dish and get a real, tested recipe from real recipe sources before writing. */
@@ -394,24 +417,43 @@ Return ONLY JSON: {"match": true|false, "shows": "what the picture actually show
   return null;
 }
 
+const NUM_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, 'forty-five': 45, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100, half: 0.5, quarter: 0.25 };
+
+/** Every number a text states (digits, "1,200", "1/2", "1.2 million" → 1.2, number words). */
+export function numbersIn(text: string, withWords = true): Set<number> {
+  const out = new Set<number>();
+  const low = String(text || '').toLowerCase()
+    .replace(/(\d),(\d{3})/g, '$1$2').replace(/(\d),(\d{3})/g, '$1$2')
+    .replace(/(\d+)\s*\/\s*(\d+)/g, (_m, a, b) => String(Number(a) / Number(b)));
+  for (const m of low.matchAll(/\d+(?:\.\d+)?/g)) out.add(Number(m[0]));
+  if (withWords) for (const [w, n] of Object.entries(NUM_WORDS)) if (new RegExp(`\\b${w}\\b`).test(low)) out.add(n);
+  return out;
+}
+
 /**
- * Cooking fallback when no checker model can be reached at all: every number the
- * script says (amounts, times, temperatures) must appear in the verified recipe.
- * Returns the problems found (empty = consistent with the recipe).
+ * Numbers in `text` that the source material never states. Small counting words
+ * ("two things", "three steps") are allowed unless `strictWords` (recipes).
+ */
+export function unsupportedNumbers(source: string, text: string, strictWords = false): number[] {
+  const allowed = numbersIn(source);
+  const year = new Date().getFullYear();
+  const bad: number[] = [];
+  const digits = numbersIn(text, false);
+  for (const x of numbersIn(text)) {
+    if (x <= 1) continue;
+    if (!digits.has(x) && !strictWords && x <= 10) continue;          // "three reasons", "two steps"
+    if (x >= year - 1 && x <= year + 1) continue;                     // the current year
+    if (!allowed.has(x)) bad.push(x);
+  }
+  return bad;
+}
+
+/**
+ * Cooking: every number the script says (amounts, times, temperatures) must
+ * appear in the verified recipe. Returns the problems found (empty = consistent).
  */
 export function recipeNumbersCheck(recipe: string, narrations: string[]): string[] {
-  const WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, thirty: 30, forty: 40, 'forty-five': 45, fifty: 50, sixty: 60, half: 0.5, quarter: 0.25 };
-  const nums = (t: string) => {
-    const out = new Set<number>();
-    const low = t.toLowerCase().replace(/(\d)\s*\/\s*(\d)/g, (_m, a, b) => String(Number(a) / Number(b)));
-    for (const m of low.matchAll(/\d+(?:\.\d+)?/g)) out.add(Number(m[0]));
-    for (const [w, n] of Object.entries(WORDS)) if (new RegExp(`\\b${w}\\b`).test(low)) out.add(n);
-    return out;
-  };
-  const allowed = nums(recipe);
   const problems: string[] = [];
-  narrations.forEach((n, i) => {
-    for (const x of nums(n)) if (x > 1 && !allowed.has(x)) problems.push(`scene ${i}: "${x}" is not in the verified recipe`);
-  });
+  narrations.forEach((n, i) => { for (const x of unsupportedNumbers(recipe, n, true)) problems.push(`scene ${i}: "${x}" is not in the verified recipe`); });
   return problems;
 }

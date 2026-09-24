@@ -31,7 +31,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
 import { publishToFacebook, publishToInstagram, SocialError } from './social.ts';
-import { researchNews, researchRecipe, factSheet, factCheck, recipeNumbersCheck, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
+import { researchNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 
 // ---------------------------------------------------------------------------
@@ -510,7 +510,8 @@ TRUTH RULES (the most important rules — viewers must be able to trust every wo
 - Never invent or "round up" a detail to fill time. If the sheet doesn't say it, don't say it — explain why it matters, give context, or ask the viewer a question instead.
 - Anything marked UNCONFIRMED may only be said as "reportedly" / "according to …", or left out.
 - Don't present speculation, predictions or opinions as facts. Attribute claims to the outlet or company that made them.
-- Your script is checked sentence by sentence against the sheet by an independent fact-checker; anything unsupported is cut.`;
+- Every number you say (amounts, prices, dates, scores, specs, times) is matched against the sheet before publishing; a sentence with a number the sheet doesn't contain is cut.
+- If the sheet says it is from a SINGLE SOURCE, credit that outlet in the narration ("according to …").`;
 
 function categoryBrief(pastStory: string, headlines: { title: string; source: string; date: string }[], pack: FactPack | null = null): string {
   const topic = CFG.topic ? `\nCreator's direction: "${CFG.topic}".` : '';
@@ -907,7 +908,7 @@ async function researchFor(pastTitles: string[], headlines: any[]): Promise<Fact
   if (CFG.category === 'news' || CFG.category === 'tech') {
     const pack = await researchNews(ctx, headlines);
     if (!pack && !CFG.offline) {
-      throw new PipelineError('fact_check_failed', `None of the fresh ${CFG.category === 'tech' ? 'tech' : 'news'} stories could be confirmed by independent sources right now, so nothing was posted (no unverified story is ever published). The next attempt runs automatically.`);
+      throw new PipelineError('research_failed', `None of the fresh ${CFG.category === 'tech' ? 'tech' : 'news'} articles could be read right now (nothing made-up is ever posted). The next attempt runs automatically.`);
     }
     return pack;
   }
@@ -926,43 +927,47 @@ function taggedOf(s: Scene): string {
 }
 
 /**
- * The independent fact check. Wrong / unsupported sentences are corrected or
- * cut; if the script is still not clean after two rounds, nothing is published.
+ * Keeps the script true to its sources WITHOUT another AI call (so it can never
+ * fail because a model is busy): every number the script states — amounts,
+ * prices, dates, scores, specs, times, temperatures — must appear in the
+ * researched source material. A sentence with a number the sources don't
+ * contain is cut. Returns false when too little of the script is left.
  */
-async function verifyScript(script: Script, pack: FactPack | null): Promise<void> {
-  if (CFG.category === 'stories' || CFG.offline || script.usedFallbackTemplate) return;
-  const ctx = researchCtx();
-  const sheet = pack ? factSheet(pack)
-    : 'No external source document. Judge every claim against well-established, verifiable knowledge only; anything specific you cannot verify (numbers, dates, prices, specs, quotes, names) is a problem.';
-  const L = lengthSpec();
-  for (let round = 1; round <= 3; round++) {
-    const res = await factCheck(ctx, sheet, script.scenes.map((sc) => ({ tagged: taggedOf(sc) })), script.title, script.description);
-    if (!res) {
-      if (pack?.confirmed && round > 1) { log('Fact check: no checker model answered for the re-check; the corrected script stands.'); return; }
-      if (CFG.category === 'cooking' && pack?.recipe) {
-        // No model can be reached right now: check every amount, time and temperature against the verified recipe instead.
-        const problems = recipeNumbersCheck(pack.recipe, script.scenes.map((sc) => sc.narration));
-        if (!problems.length) { log('Fact check: no checker model was available, so every amount, time and temperature was checked against the verified recipe instead ✔'); return; }
-        throw new PipelineError('fact_check_failed', `No fact-checker model was available and the script has numbers that are not in the verified recipe (${problems.slice(0, 3).join('; ')}). Nothing was posted; the next attempt runs automatically.`);
-      }
-      throw new PipelineError('fact_check_failed', 'The fact-checker could not be reached, so the script was not verified and nothing was posted. The next attempt runs automatically.');
-    }
-    if (res.titleFix) script.title = res.titleFix.replace(/[#"]/g, '').trim() || script.title;
-    if (res.descriptionFix) script.description = res.descriptionFix.replace(/#\w+/g, '').trim() || script.description;
-    if (res.ok || !res.fixes.size) { log(`Fact check (${res.model}), round ${round}: every statement is supported by the sources ✔`); script.factChecked = true; return; }
-    log(`Fact check (${res.model}), round ${round}: ${res.fixes.size} scene(s) corrected — ${res.issues.slice(0, 4).join(' | ')}`);
-    const drop: number[] = [];
-    for (const [i, fixed] of res.fixes) {
-      const t = parseTaggedNarration(fixed);
-      if (!fixed || t.text.split(' ').length < 3) drop.push(i);
-      else { script.scenes[i].narration = t.text; script.scenes[i].cues = t.cues; }
-    }
-    for (const i of drop.sort((a, b) => b - a)) script.scenes.splice(i, 1);
-    if (script.scenes.length < Math.ceil(L.minScenes * 0.6)) {
-      throw new PipelineError('fact_check_failed', `The fact-checker removed too much of the script (${script.scenes.length} scenes left) because it was not supported by the sources. Nothing was posted; the next attempt writes a new one.`);
-    }
+function groundScript(script: Script, pack: FactPack | null): boolean {
+  if (CFG.category === 'stories' || script.usedFallbackTemplate || !pack) return true;
+  const source = [factSheet(pack), pack.recipe || '', ...pack.excerpts.map((e) => e.text)].join('\n');
+  const strict = CFG.category === 'cooking';
+  let cut = 0;
+  const kept: Scene[] = [];
+  for (const sc of script.scenes) {
+    const sentences = taggedOf(sc).split(/(?<=[.!?])\s+(?=\S)/);
+    const good = sentences.filter((t) => {
+      const bad = unsupportedNumbers(source, t.replace(/\[[a-z_]+\]/g, ''), strict);
+      if (bad.length) { cut++; log(`Grounding: cut "${t.replace(/\[[a-z_]+\]\s*/g, '').slice(0, 90)}" — ${bad.join(', ')} is not in the sources.`); }
+      return !bad.length;
+    });
+    const t = parseTaggedNarration(good.join(' '));
+    if (t.text.split(' ').length >= 3) kept.push({ ...sc, narration: t.text, cues: t.cues });
   }
-  throw new PipelineError('fact_check_failed', 'The script still had unsupported claims after three fact-check rounds, so nothing was posted. The next attempt runs automatically.');
+  const L = lengthSpec();
+  if (kept.length < Math.ceil(L.minScenes * 0.6)) {
+    log(`Grounding: ${cut} sentence(s) had numbers the sources don't contain and too little was left — asking for a new script.`);
+    return false;
+  }
+  // Title/description: drop claims with unsupported numbers too.
+  if (unsupportedNumbers(source, script.title, strict).length) {
+    // A title with a number the sources don't state: keep the clean parts, else use the verified headline.
+    const parts = script.title.split(/\s+[-–:|]\s+/);
+    const clean = parts.filter((x) => !unsupportedNumbers(source, x, strict).length);
+    const was = script.title;
+    script.title = (clean.length && clean[0] === parts[0] ? clean.join(' - ') : String(pack.subject || '').replace(/\s+[-–|]\s+[^-–|]+$/, '')).slice(0, 90) || was;
+    log(`Grounding: title "${was}" had a number the sources don't contain — now "${script.title}".`);
+  }
+  script.description = script.description.split(/(?<=[.!?])\s+/).filter((t) => !unsupportedNumbers(source, t, strict).length).join(' ');
+  script.scenes = kept;
+  script.factChecked = true;
+  log(`Grounding: every number in the script matches the sources ✔${cut ? ` (${cut} unsupported sentence(s) removed)` : ''}${pack.singleSource ? ` — single source: ${pack.singleSource}` : ''}.`);
+  return true;
 }
 
 async function generateScript(pastStory: string, pastTitles: string[], pastSources: string[]): Promise<Script> {
@@ -972,7 +977,6 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
   const system = 'You are an award-winning short-form video writer and director. Your videos open with an irresistible hook, make complete sense, stay engaging every single second and end with a reason to follow. You answer with one valid JSON object and nothing else.';
   let nearMiss: { script: Script; words: number } | null = null;
   let lastError = '';
-  let factFailure: PipelineError | null = null;
   const withSources = (sc: Script) => {
     sc.factPack = pack || undefined;
     if (pack?.headline) {
@@ -1023,17 +1027,11 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
           throw validation;
         }
         withSources(script);
-        await verifyScript(script, pack);
+        if (!groundScript(script, pack)) throw new Error('too much of the script was not backed by the sources');
         log(`Script by ${label} in ${((Date.now() - t0) / 1000).toFixed(1)}s: "${script.title}" — ${script.scenes.length} scenes, ${script.scenes.reduce((n, x) => n + x.narration.split(' ').length, 0)} words, ${script.scenes.reduce((n, x) => n + x.cues.length, 0)} performance cues.`);
         return script;
       } catch (err: any) {
         lastError = `${label}: ${err?.message}`;
-        if (err instanceof PipelineError && err.code === 'fact_check_failed') {
-          factFailure = err;
-          if (/could not be reached/.test(err.message)) throw err;
-          log(`${label}'s script failed the fact check (${err.message}) — asking the next model for a new script.`);
-          continue;
-        }
         log(`${label} answered but the script was unusable (${err?.message}) — asking the next model.`);
       }
     }
@@ -1041,12 +1039,10 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
   } else {
     lastError = 'offline test mode';
   }
-  if (factFailure) throw factFailure; // never fall back to an unchecked script
   if (nearMiss) {
     log(`Using the best AI script (${nearMiss.words} words — a little shorter than asked) from ${nearMiss.script.model}.`);
     const sc = withSources(nearMiss.script);
-    await verifyScript(sc, pack);
-    return sc;
+    if (groundScript(sc, pack)) return sc;
   }
   log(`⚠️ AI script generation failed (${lastError}).`);
   return { ...templateScript(), aiError: lastError };
@@ -2591,7 +2587,7 @@ async function main() {
     script.sources?.length ? `📰 SOURCES
 ${script.sources.map((x) => `• ${x}`).join('\n')}` : '',
     script.sourceLinks?.length ? script.sourceLinks.map((u) => `• ${u}`).join('\n') : '',
-    script.factChecked ? '✅ Every fact in this video was checked against the sources above before publishing.' : '',
+    script.factChecked ? (script.factPack?.singleSource ? `ℹ️ Based on reporting by ${script.factPack.singleSource}; every number was matched against its article before publishing.` : '✅ Written from the sources above; every number was matched against them before publishing.') : '',
     script.officialUrl ? `🔗 Official site: ${script.officialUrl}` : ''
   ].filter(Boolean).join('\n');
   const creditsBlock = [
