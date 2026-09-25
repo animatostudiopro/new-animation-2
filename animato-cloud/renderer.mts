@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
 import { researchNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
+import { runAnimated, ANIM_CATEGORIES } from './anim/runner.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -126,6 +127,12 @@ const CFG = {
   groqModels: listOf(pick(JOB.groq_models, ENV.GROQ_MODELS)),
   nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
   characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
+  // Podcasts: the hosts designed in the app, and the studio.
+  castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); return Array.isArray(v) ? v.slice(0, 3) : []; } catch { return []; } })(),
+  studio: (() => { try { return JSON.parse(pick(JOB.studio, ENV.STUDIO) || 'null'); } catch { return null; } })(),
+  storyGenre: pick(JOB.story_genre, ENV.STORY_GENRE),
+  animStyle: pick(JOB.anim_style, ENV.ANIM_STYLE),
+  podcastAbout: pick(JOB.podcast_about, ENV.PODCAST_ABOUT),
   // Story arcs: every story is told in at most 3 parts and then finished for good.
   arcParts: Math.max(1, parseInt(pick(JOB.arc_parts, '3'), 10) || 3),
   storyPremise: pick(JOB.story_premise),
@@ -178,6 +185,7 @@ const WANT = { youtube: CFG.targets.has('youtube') };
 const PUBLISH = WANT.youtube;
 
 const [W, H] = DIMENSIONS[CFG.aspect];
+const FRAME_W = W, FRAME_H = H;
 const FPS = 30;
 const IS_SHORTS = CFG.format === 'shorts';
 
@@ -563,6 +571,12 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
         : /mystery/i.test(CFG.subGenre) ? 'a gripping mystery with clues the viewer can follow and a fair, surprising answer'
         : /twist/i.test(CFG.subGenre) ? 'a clean setup, quiet misdirection and a twist that recontextualises everything'
         : /love|romance/i.test(CFG.subGenre) ? 'warm, emotional, bittersweet and hopeful'
+        : /comed|funny/i.test(CFG.subGenre) ? 'a comedy: a silly situation that keeps escalating, funny characters, a laugh-out-loud payoff'
+        : /drama/i.test(CFG.subGenre) ? 'a human drama: real people, a hard choice, an honest and moving turn'
+        : /sci-?fi|science/i.test(CFG.subGenre) ? 'science fiction: one surprising invention or future idea changes an ordinary life'
+        : /thrill/i.test(CFG.subGenre) ? 'a thriller: a secret, a threat, rising tension and a sharp twist'
+        : /fantasy/i.test(CFG.subGenre) ? 'fantasy adventure: magic in the everyday world, wonder and courage'
+        : /folk/i.test(CFG.subGenre) ? 'a folk tale told around a fire: a clever hero, a lesson, a memorable ending'
         : 'gripping, emotional, cinematic';
       const part = CFG.partNumber, last = CFG.arcParts;
       const known = CFG.storyPremise
@@ -2182,11 +2196,6 @@ async function renderWithStage(opts: {
   narration: Narration; scenes: Scene[]; times: { start: number; end: number }[]; cues: { t: number; tag: string }[]; images: (string | null)[];
   title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[];
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
-  const chrome = findChrome();
-  if (!chrome) return { ok: false, character: 'none', reason: 'Chrome not found on the runner' };
-  const stageJs = path.join(HERE, 'stage.js');
-  if (!fs.existsSync(stageJs)) return { ok: false, character: 'none', reason: 'stage.js missing' };
-
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
   const job = {
@@ -2204,9 +2213,30 @@ async function renderWithStage(opts: {
     fontUrl: '/font/Poppins-Bold.ttf'
   };
 
+  const audioExt2 = path.extname(opts.narration.audioPath) || '.mp3';
+  const r = await runStage({
+    stageFile: 'stage.js', job, duration: opts.duration,
+    audio: audioArgs(opts.narration.audioPath, opts.music, 1),
+    files: { [`/audio/narration${audioExt2}`]: opts.narration.audioPath }
+  });
+  return { ok: r.ok, character: r.character || 'none', reason: r.reason };
+}
+
+/**
+ * Runs a stage bundle (stage.js: the presenter; anim.js: podcasts, films,
+ * stickman) in headless Chrome and encodes its frames with the given audio.
+ */
+async function runStage(opts: { stageFile: string; job: any; duration: number; audio: { inputs: string[]; filter: string }; files: Record<string, string>; size?: { w: number; h: number } }): Promise<{ ok: boolean; character?: string; reason?: string }> {
+  const W = opts.size?.w || FRAME_W, H = opts.size?.h || FRAME_H;
+  const chrome = findChrome();
+  if (!chrome) return { ok: false, character: 'none', reason: 'Chrome not found on the runner' };
+  const stageJs = path.join(HERE, opts.stageFile);
+  if (!fs.existsSync(stageJs)) return { ok: false, character: 'none', reason: `${opts.stageFile} missing` };
+  const job = opts.job;
+  try { fs.writeFileSync(path.join(WORK_DIR, `job_${opts.stageFile.replace(/\W+/g, '_')}.json`), JSON.stringify(job)); } catch {}
   const totalFrames = Math.ceil(opts.duration * FPS);
   const frameBytes = W * H * 4;
-  const aud = audioArgs(opts.narration.audioPath, opts.music, 1);
+  const aud = opts.audio;
   const ffArgs = ['-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', String(FPS), '-i', 'pipe:0',
     ...aud.inputs, '-filter_complex', aud.filter, '-map', '0:v', '-map', '[aout]',
@@ -2240,7 +2270,7 @@ async function renderWithStage(opts: {
       if (p === '/job.json') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(job)); return; }
       if (p === '/font/Poppins-Bold.ttf') return serveFile(res, path.join(HERE, 'assets/fonts/Poppins-Bold.ttf'));
       if (p.startsWith('/img/')) return serveFile(res, path.join(WORK_DIR, path.basename(p)));
-      if (p.startsWith('/audio/narration')) return serveFile(res, opts.narration.audioPath);
+      if (opts.files[p]) return serveFile(res, opts.files[p]);
       res.writeHead(404); res.end(); return;
     }
     const chunks: Buffer[] = [];
@@ -2400,10 +2430,10 @@ const YT_CATEGORY: Record<string, string> = { cooking: '26', tech: '28', stories
 function sanitizeYouTubeDescription(input: unknown): string {
   let text = String(input || '')
     .normalize('NFC')
-    .replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/[<>]/g, '')
-    .replace(/[ \\t]+\\n/g, '\\n')
-    .replace(/\\n{4,}/g, '\\n\\n\\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{4,}/g, '\n\n\n')
     .trim();
   if (!text) text = 'Created automatically with Animato AutoPoster Studio.';
   while (Buffer.byteLength(text, 'utf8') > 4900) {
@@ -2477,6 +2507,82 @@ async function uploadToYouTube(meta: { title: string; description: string; tags:
 }
 
 // ---------------------------------------------------------------------------
+// 2D animation & podcasts (anim/runner.ts) → publish → report back
+// ---------------------------------------------------------------------------
+async function produceAnimated(t0: number, pastTitles: string[]): Promise<number> {
+  // Podcasts are always filmed in landscape. On a Short (vertical frame) the
+  // landscape picture is placed in the middle of the vertical video.
+  const landscapePodcast = CFG.category === 'podcast' && H >= W;
+  const RW = landscapePodcast ? 1920 : W, RH = landscapePodcast ? 1080 : H;
+  const kit = {
+    CFG, W: RW, H: RH, FPS, IS_SHORTS, WORK_DIR, HERE, LLM, extractJsonObject, log, reportStatus,
+    run: (cmd: string, args: string[], o: { timeoutMs?: number } = {}) => run(cmd, args, o),
+    probeDuration, pastTitles, PipelineError,
+    composeMusic: (mood: string, seconds: number, seed: string) => composeBuffers(mood as any, Math.max(10, seconds), seed),
+    automateLevel, eqForVoice,
+    runStage: (o: { stageFile: string; job: any; audioFinal: string; files: Record<string, string>; duration: number }) => runStage({
+      stageFile: o.stageFile, job: o.job, duration: o.duration, files: o.files, size: { w: RW, h: RH },
+      audio: { inputs: ['-i', o.audioFinal], filter: '[1:a]aresample=48000,apad[aout]' }
+    })
+  };
+  const out = await runAnimated(kit as any);
+  if (landscapePodcast) await landscapeIntoFrame(out.showName || '');
+  const outDur = await probeDuration(OUTPUT_VIDEO);
+  if (outDur < 3) throw new PipelineError('render_failed', `Rendered video is only ${outDur.toFixed(1)}s long.`);
+  log(`Video: ${(fs.statSync(OUTPUT_VIDEO).size / 1e6).toFixed(1)} MB, ${outDur.toFixed(1)}s (${out.character}).`);
+  const hashtagLine = youtubeHashtagLine([...out.hashtags, ...(IS_SHORTS ? ['shorts'] : [])]);
+  const description = sanitizeYouTubeDescription([
+    out.description,
+    '🎬 Original animation, voices and music, made for this channel.',
+    hashtagLine
+  ].filter(Boolean).join('\n\n').trim());
+  fs.writeFileSync(OUTPUT_META, JSON.stringify({ campaignId: CFG.campaignId, partNumber: CFG.partNumber, category: CFG.category, title: out.title, description, durationSec: outDur, model: out.model, createdAt: new Date().toISOString() }, null, 2));
+  let published: { videoId: string; url: string; privacy: string } | null = null;
+  if (!PUBLISH) log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
+  else if (CFG.dryRun) log('Dry run — skipping publishing.');
+  else {
+    await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
+    published = await uploadToYouTube({ title: out.title, description, tags: out.tags, synthetic: false });
+    log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
+  }
+  const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
+    partNumber: CFG.partNumber, title: out.title, script: out.script, description,
+    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published,
+    privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
+    durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl, sources: out.sources, model: out.model
+  });
+  if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
+  const secs = ((Date.now() - t0) / 1000).toFixed(0);
+  await reportStatus('completed', published ? 'Published' : 'Video rendered', 100,
+    published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
+    { youtubeUrl: published?.url || '' });
+  log(`Done in ${secs}s.`);
+  return 0;
+}
+
+/**
+ * Places the landscape podcast in the vertical frame: the full 16:9 picture in the
+ * middle, a blurred, darkened copy filling the rest, the show name above it.
+ */
+async function landscapeIntoFrame(showName: string): Promise<void> {
+  const src = path.join(WORK_DIR, 'landscape.mp4');
+  fs.renameSync(OUTPUT_VIDEO, src);
+  const font = path.join(HERE, 'assets/fonts/Poppins-Bold.ttf');
+  const nameFile = path.join(WORK_DIR, 'showname.txt');
+  fs.writeFileSync(nameFile, showName.toUpperCase().slice(0, 32));
+  const fgH = Math.round((W * 9) / 16 / 2) * 2, top = Math.round((H - fgH) / 2);
+  const text = showName && fs.existsSync(font)
+    ? `,drawtext=fontfile='${font}':textfile='${nameFile}':fontcolor=white:fontsize=${Math.round(W * 0.06)}:x=(w-text_w)/2:y=${Math.max(20, top - Math.round(W * 0.12))}:shadowcolor=black@0.6:shadowx=2:shadowy=3`
+    : '';
+  const filter = `[0:v]split=2[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=28:2,eq=brightness=-0.22:saturation=1.15[bg];[b]scale=${W}:${fgH}[fg];[bg][fg]overlay=0:${top}${text}[v]`;
+  const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-filter_complex', filter, '-map', '[v]', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', OUTPUT_VIDEO], { timeoutMs: 20 * 60 * 1000 });
+  if (r.code !== 0 || !fs.existsSync(OUTPUT_VIDEO)) {
+    log(`⚠️ Could not place the landscape podcast in the vertical frame (${r.stderr.trim().split('\n').slice(-1)[0]}) — posting it as a landscape video.`);
+    fs.renameSync(src, OUTPUT_VIDEO);
+  } else log(`Landscape podcast placed in the ${W}x${H} frame.`);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -2517,6 +2623,9 @@ async function main() {
     await youtubeAccessToken();
     log('YouTube connection verified.');
   }
+
+  // 2D animation (stickman, short films) and podcasts have their own pipeline.
+  if (ANIM_CATEGORIES.has(CFG.category)) return await produceAnimated(t0, pastTitles);
 
   // 1. Script
   const script = await generateScript(pastStory, pastTitles, pastSources);

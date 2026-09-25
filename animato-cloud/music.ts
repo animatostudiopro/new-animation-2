@@ -6,13 +6,14 @@
  * rendered by a small synthesiser, so every soundtrack is new and owned by the
  * channel. No third-party music, no attribution, no Content ID claims.
  *
- * Moods: story (warm), emotional (piano), mystery, horror, news, tech, upbeat.
+ * Moods: story (warm), emotional (piano), mystery, horror, news, tech, upbeat,
+ * action (fights: driving drums and power chords), comedy (bouncy, playful).
  * A seed (campaign + part) varies the key, tempo, progression and patterns, so
  * no two videos sound identical. Pure TypeScript with no imports, so it runs in
  * Node (the cloud renderer) and in the browser (the app) alike.
  */
 
-export type MusicMood = 'story' | 'emotional' | 'mystery' | 'horror' | 'news' | 'tech' | 'upbeat';
+export type MusicMood = 'story' | 'emotional' | 'mystery' | 'horror' | 'news' | 'tech' | 'upbeat' | 'action' | 'comedy';
 
 const SR = 44100;
 const TAU = Math.PI * 2;
@@ -164,6 +165,8 @@ function planFor(mood: MusicMood, r: ReturnType<typeof rng>): Plan {
     case 'news': return { scale: MINOR, root: r.pick([45, 47, 48, 50]), bpm: r.range(100, 112), progs: [[0, 5, 2, 6], [0, 5, 3, 4], [0, 2, 5, 4]], barsPerChord: 1 };
     case 'tech': return { scale: MAJOR, root: r.pick([48, 50, 52, 53]), bpm: r.range(98, 110), progs: [[5, 3, 0, 4], [0, 4, 5, 3], [3, 4, 5, 5]], barsPerChord: 1 };
     case 'upbeat': return { scale: MAJOR, root: r.pick([48, 50, 53, 55]), bpm: r.range(100, 112), progs: [[0, 5, 3, 4], [0, 3, 4, 3], [0, 4, 5, 3]], barsPerChord: 1 };
+    case 'action': return { scale: MINOR, root: r.pick([40, 41, 43, 45]), bpm: r.range(138, 150), progs: [[0, 5, 6, 4], [0, 0, 5, 6], [0, 6, 5, 6]], barsPerChord: 1 };
+    case 'comedy': return { scale: MAJOR, root: r.pick([53, 55, 57]), bpm: r.range(118, 128), progs: [[0, 3, 4, 0], [0, 5, 3, 4]], barsPerChord: 1 };
     default: return { scale: MAJOR, root: r.pick([48, 50, 53, 55]), bpm: r.range(72, 84), progs: [[0, 4, 5, 3], [0, 5, 3, 4], [3, 0, 4, 5]], barsPerChord: 1 };
   }
 }
@@ -247,6 +250,27 @@ function compose(bus: Bus, mood: MusicMood, seconds: number, r: ReturnType<typeo
         if (full) for (let i = 0; i < 4; i++) { kick(bus, t0 + i * beat, 0.1); noiseHit(bus, t0 + i * beat + beat / 2, 0.028, 0.025, 0.95, -0.2, r.next); }
         break;
       }
+      case 'action': {
+        // Driving 8th-note bass, kick on every beat, snare on 2 and 4, power-chord stabs, a 16th hat.
+        const pc = [ch[0], ch[0] + 7, ch[0] + 12];
+        for (let i = 0; i < 8; i++) note(bus, { table: BASS, hz: midiHz(ch[0] - 12), start: t0 + i * beat / 2, dur: beat * 0.38, gain: 0.06, attack: 0.003, pluck: 0.14, release: 0.04, cutoff: 1000, reverb: 0.03 });
+        if (full) {
+          for (let i = 0; i < 4; i++) kick(bus, t0 + i * beat, 0.2);
+          for (const i of [1, 3]) noiseHit(bus, t0 + i * beat, 0.11, 0.07, 0.55, 0, r.next);
+          for (let i = 0; i < 16; i++) noiseHit(bus, t0 + i * beat / 4, i % 2 ? 0.014 : 0.022, 0.012, 0.98, 0.3, r.next);
+          for (const at of [0, 1.5, 3]) for (const m of pc) note(bus, { table: SAW, hz: midiHz(m + 12), start: t0 + at * beat, dur: beat * 0.45, gain: 0.022, pan: m === pc[1] ? 0.3 : -0.3, attack: 0.004, decay: 0.1, sustain: 0.6, release: 0.08, cutoff: 2400, reverb: 0.15 });
+        } else {
+          for (let i = 0; i < 16; i++) noiseHit(bus, t0 + i * beat / 4, 0.012, 0.012, 0.98, 0.3, r.next);
+        }
+        break;
+      }
+      case 'comedy': {
+        // Bouncy pizzicato: bass on 1 and 3, chord plucks on the off-beats, a skipping melody.
+        for (const i of [0, 2]) note(bus, { table: BASS, hz: midiHz(ch[0] - 12), start: t0 + i * beat, dur: beat * 0.5, gain: 0.06, attack: 0.004, pluck: 0.2, release: 0.05, cutoff: 900, reverb: 0.05 });
+        for (const i of [1, 3]) for (const m of ch) note(bus, { table: PLUCK, hz: midiHz(m + 12), start: t0 + i * beat, dur: beat * 0.25, gain: 0.03, pan: 0.2, attack: 0.002, pluck: 0.1, release: 0.05, cutoff: 3600, reverb: 0.2 });
+        if (full) for (let i = 0; i < 8; i++) if (r.next() < 0.6) note(bus, { table: PLUCK, hz: midiHz(ch[(i + b) % 3] + 24 + (i % 4 === 3 ? 2 : 0)), start: t0 + i * beat / 2, dur: beat * 0.2, gain: 0.035, pan: -0.2, attack: 0.002, pluck: 0.09, release: 0.05, cutoff: 4200, reverb: 0.25 });
+        break;
+      }
       case 'upbeat': {
         // Bouncy off-beat chord stabs, walking bass, claps on 2 and 4.
         for (let i = 0; i < 4; i++) for (const m of ch) note(bus, { table: PLUCK, hz: midiHz(m + 12), start: t0 + i * beat + beat / 2, dur: beat * 0.35, gain: 0.03, pan: 0.2, attack: 0.003, pluck: 0.16, release: 0.08, cutoff: 3800, reverb: 0.25 });
@@ -267,6 +291,8 @@ export function moodFor(category: string, subGenre = ''): MusicMood {
   if (/horror|scary|suspense|creepy/.test(s)) return 'horror';
   if (/mystery|crime|thriller|twist/.test(s)) return 'mystery';
   if (/love|romance|sad|emotional|drama|inspir/.test(s)) return 'emotional';
+  if (/comed|funny/.test(s)) return 'comedy';
+  if (/sci-?fi|science/.test(s)) return 'tech';
   return 'story';
 }
 
