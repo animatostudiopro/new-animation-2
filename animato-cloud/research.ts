@@ -22,7 +22,7 @@
  */
 import { LlmPool, extractJsonObject, type WebSource } from './llm.ts';
 
-export interface Headline { title: string; source: string; date: string; link: string }
+export interface Headline { title: string; source: string; date: string; link: string; /** Google News RSS description (the same story at other outlets). */ desc?: string }
 export interface FactPack {
   /** The headline / dish / product this video is about. */
   subject: string;
@@ -47,6 +47,8 @@ export interface FactPack {
   refuted?: boolean;
   /** Set when only one outlet's article could be used (credited in the video). */
   singleSource?: string;
+  /** A roundup of several real headlines (each credited), when no single story could be read in full. */
+  roundup?: number;
 }
 
 export interface ResearchCtx {
@@ -99,6 +101,32 @@ export function articleText(html: string): string {
   return paras.join('\n').slice(0, 6000);
 }
 
+/**
+ * Reads an article through a public reader service when the site blocks
+ * GitHub's servers (many news sites do): r.jina.ai returns the page as text.
+ */
+async function readerText(url: string, ms = 25000): Promise<{ text: string; url: string } | null> {
+  if (!url) return null;
+  try {
+    const res = await fetch(`https://r.jina.ai/${url}`, { headers: { 'User-Agent': UA, Accept: 'text/plain', 'X-Return-Format': 'text' }, signal: AbortSignal.timeout(ms) });
+    if (!res.ok) return null;
+    const raw = (await res.text()).slice(0, 400_000);
+    const final = (raw.match(/^URL Source:\s*(\S+)/m) || [])[1] || url;
+    const body = raw.replace(/^(Title|URL Source|Published Time|Markdown Content|Warning):.*$/gm, '')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .split('\n').map((l) => l.replace(/[#>*_`|]+/g, ' ').replace(/\s+/g, ' ').trim())
+      .filter((l) => l.length > 60 && !/cookie|subscribe|newsletter|sign up|all rights reserved|advertis|javascript|log in/i.test(l)).join('\n');
+    return body.length > 400 ? { text: body.slice(0, 6000), url: final } : null;
+  } catch { return null; }
+}
+
+/** The outlets listed in a Google News item's description (the same story, clustered). */
+function clusterOutlets(desc?: string): string[] {
+  if (!desc) return [];
+  const html = decode(desc);
+  return Array.from(html.matchAll(/<font[^>]*>([\s\S]*?)<\/font>/gi)).map((m) => plain(m[1])).filter((x) => x && x.length < 60);
+}
+
 /** Google News RSS links are wrapped; this unwraps them to the publisher's URL (best effort). */
 async function unwrapGoogleNews(link: string): Promise<string> {
   if (!/news\.google\.com\/(rss\/)?articles\//.test(link)) return link;
@@ -121,7 +149,7 @@ async function unwrapGoogleNews(link: string): Promise<string> {
 }
 
 /** Other outlets covering the same story (Bing News RSS gives the publishers' real URLs). */
-async function bingNews(query: string): Promise<{ title: string; url: string; desc: string; outlet: string }[]> {
+export async function bingNews(query: string): Promise<{ title: string; url: string; desc: string; outlet: string }[]> {
   const r = await getText(`https://www.bing.com/news/search?q=${encodeURIComponent(query)}&format=rss&setlang=en-US&cc=US`, 15000, 600_000);
   if (!r) return [];
   const out: { title: string; url: string; desc: string; outlet: string }[] = [];
@@ -183,20 +211,28 @@ async function researchHeadline(ctx: ResearchCtx, h: Headline): Promise<FactPack
   const pack: FactPack = { subject: h.title, facts: [], excerpts: [], outlets: [], links: [], confirmed: false, headline: h };
   const addOutlet = (name: string) => { const k = outletKey(name); if (k && k.length > 1 && !NOT_OUTLETS.test(k) && !pack.outlets.some((o) => outletKey(o) === k)) pack.outlets.push(name); };
   if (h.source) addOutlet(h.source);
+  // Google News already groups the same story from several outlets.
+  for (const o of clusterOutlets(h.desc)) addOutlet(o);
 
   // 1. The same story at other outlets + the article text itself.
   const [coverage, publisherUrl] = await Promise.all([bingNews(h.title.slice(0, 150)), unwrapGoogleNews(h.link)]);
   const related = coverage.filter((c) => overlap(h.title, `${c.title} ${c.desc}`) >= 0.5);
   for (const c of related) addOutlet(c.outlet || hostOf(c.url));
   const urls = Array.from(new Set([publisherUrl, ...related.map((c) => c.url)].filter(Boolean))).slice(0, 5);
-  const bodies = await Promise.all(urls.map(async (u) => {
+  // Direct first; many news sites block GitHub's servers, so fall back to a reader service.
+  const read = async (u: string) => {
     const page = await getText(u, 15000);
-    if (!page) return null;
-    const text = articleText(page.text);
-    return text.length > 400 && overlap(h.title, text) >= 0.4 ? { source: hostOf(page.url), url: page.url, text } : null;
-  }));
-  for (const b of bodies) if (b && pack.excerpts.length < 3) { pack.excerpts.push({ ...b, text: b.text.slice(0, 2800) }); addOutlet(b.source); pack.links.push({ title: b.source, url: b.url }); }
-  for (const c of related.slice(0, 4)) if (c.desc) pack.facts.push(`${c.desc} (${c.outlet || hostOf(c.url)})`);
+    const direct = page ? articleText(page.text) : '';
+    if (direct.length > 400 && overlap(h.title, direct) >= 0.4) return { source: hostOf(page!.url), url: page!.url, text: direct };
+    const r = await readerText(u);
+    return r && overlap(h.title, r.text) >= 0.4 ? { source: hostOf(r.url), url: r.url, text: r.text } : null;
+  };
+  let bodies = await Promise.all(urls.map(read));
+  // The Google News link itself (the reader follows its redirect) when nothing else could be read.
+  if (!bodies.some(Boolean) && h.link) bodies = [await read(h.link)];
+  for (const b of bodies) if (b && pack.excerpts.length < 3 && !/news\.google\.com$/.test(b.source)) { pack.excerpts.push({ ...b, text: b.text.slice(0, 2800) }); addOutlet(b.source); pack.links.push({ title: b.source, url: b.url }); }
+  const descs = related.filter((c) => c.desc && c.desc.length > 60);
+  for (const c of descs.slice(0, 5)) pack.facts.push(`${c.desc} (${c.outlet || hostOf(c.url)})`);
 
   // 2. Web-grounded research pass.
   const g = await groundedResearch(ctx,
@@ -221,8 +257,10 @@ async function researchHeadline(ctx: ResearchCtx, h: Headline): Promise<FactPack
     }
     pack.confirmed = pack.outlets.length >= 2 || (pack.excerpts.length >= 1 && g.sources.length >= 1);
   } else {
-    // No research model answered: only independent coverage with real article text counts.
-    pack.confirmed = pack.outlets.length >= 2 && pack.excerpts.length >= 1;
+    // No research model answered: independent coverage counts when there is real
+    // text to write from — an article, or the summaries of at least two outlets.
+    const summaryOutlets = new Set(descs.map((c) => outletKey(c.outlet || hostOf(c.url)))).size;
+    pack.confirmed = pack.outlets.length >= 2 && (pack.excerpts.length >= 1 || summaryOutlets >= 2);
   }
   ctx.log(`Research: "${h.title.slice(0, 80)}" — ${pack.outlets.length} outlet(s) [${pack.outlets.slice(0, 6).join(', ')}], ${pack.excerpts.length} article text(s), ${pack.facts.length} fact line(s) → ${pack.confirmed ? 'CONFIRMED' : 'not confirmed, skipped'}.`);
   return pack;
@@ -232,19 +270,24 @@ async function researchHeadline(ctx: ResearchCtx, h: Headline): Promise<FactPack
 export async function researchNews(ctx: ResearchCtx, headlines: Headline[]): Promise<FactPack | null> {
   if (ctx.offline) return null;
   let bestSingle: FactPack | null = null;
-  for (const h of headlines.slice(0, 4)) {
+  const tried: FactPack[] = [];
+  const deadline = Date.now() + 7 * 60 * 1000;
+  for (const h of headlines.slice(0, 8)) {
+    if (Date.now() > deadline) break;
     const pack = await researchHeadline(ctx, h);
+    tried.push(pack);
     if (pack.confirmed) return pack;
     // A real article from a real outlet (not refuted) is kept as a fallback.
     if (!pack.refuted && pack.excerpts.length && (!bestSingle || pack.excerpts.length > bestSingle.excerpts.length)) bestSingle = pack;
   }
+  const last = (): FactPack | null => singleSource(ctx, bestSingle) || roundup(ctx, headlines, tried);
   // No fresh headline could be confirmed: a well-documented, verifiable subject instead.
   const g = await groundedResearch(ctx,
     ctx.category === 'tech'
       ? `Find ONE real AI tool, app, model or gadget${ctx.subGenre ? ` in the area "${ctx.subGenre}"` : ''}${ctx.topic ? ` (creator's direction: "${ctx.topic}")` : ''} that launched or had a major confirmed update in the last 30 days, confirmed by at least two reputable tech outlets. Avoid: ${ctx.pastTitles.slice(-12).join(' | ') || 'nothing'}. Report what it does, where to get it, pricing and how to use it, exactly as the sources state.`
       : `Find ONE important news story${ctx.subGenre ? ` about "${ctx.subGenre}"` : ''}${ctx.topic ? ` (creator's direction: "${ctx.topic}")` : ''} from the last 48 hours that is confirmed by at least two reputable independent outlets. Avoid: ${ctx.pastTitles.slice(-12).join(' | ') || 'nothing'}. Report the confirmed facts exactly as the sources state them.`,
     `{ "headline": "the story's headline", ${FACT_SHAPE.slice(1)}`);
-  if (!g || g.data?.confirmed === false || !g.data?.headline) return singleSource(ctx, bestSingle);
+  if (!g || g.data?.confirmed === false || !g.data?.headline) return last();
   const d = g.data;
   const pack: FactPack = {
     subject: String(d.headline).slice(0, 200), facts: [], excerpts: [], outlets: [], links: [], confirmed: false,
@@ -259,7 +302,7 @@ export async function researchNews(ctx: ResearchCtx, headlines: Headline[]): Pro
   pack.officialUrl = d.officialUrl ? String(d.officialUrl).slice(0, 200) : undefined;
   pack.confirmed = pack.outlets.length >= 2 && pack.facts.length >= 3;
   ctx.log(`Research (${g.model}): picked "${pack.subject.slice(0, 80)}" — ${pack.outlets.length} outlet(s) → ${pack.confirmed ? 'CONFIRMED' : 'not confirmed'}.`);
-  return pack.confirmed ? pack : singleSource(ctx, bestSingle);
+  return pack.confirmed ? pack : last();
 }
 
 /**
@@ -275,6 +318,32 @@ function singleSource(ctx: ResearchCtx, pack: FactPack | null): FactPack | null 
   pack.singleSource = outlet;
   ctx.log(`Research: no second outlet could be confirmed right now — using the article from ${outlet} as the only source, credited on screen and in the description.`);
   return pack;
+}
+
+/**
+ * The very last resort (nothing could be read in full anywhere): a roundup of
+ * the freshest real headlines, each exactly as its outlet published it (with
+ * the outlets' own summaries where available) and credited on screen. Needs at
+ * least three headlines from different outlets, never invents anything.
+ */
+function roundup(ctx: ResearchCtx, headlines: Headline[], tried: FactPack[]): FactPack | null {
+  const refuted = new Set(tried.filter((p) => p.refuted).map((p) => p.subject));
+  const seen = new Set<string>();
+  const pick = headlines.filter((h) => h.source && !refuted.has(h.title) && !seen.has(outletKey(h.source)) && seen.add(outletKey(h.source))).slice(0, 5);
+  if (pick.length < 3) return null;
+  const topic = ctx.topic || ctx.subGenre || (ctx.category === 'tech' ? 'tech' : 'news');
+  const facts: string[] = [`ROUNDUP: ${pick.length} separate headlines. Report each one ONLY as its outlet headlined it, credit the outlet by name ("${pick[0].source} reports…"), add no details the lines below don't state.`];
+  pick.forEach((h, i) => {
+    facts.push(`HEADLINE ${i + 1}: "${h.title}" (${h.source}${h.date ? `, ${h.date.slice(0, 16)}` : ''})`);
+    const more = tried.find((p) => p.subject === h.title)?.facts.filter((f) => !/^(SUMMARY|DATE|UNCONFIRMED)/.test(f)).slice(0, 2) || [];
+    for (const m of more) facts.push(`  detail for headline ${i + 1}: ${m}`);
+  });
+  const title = `Today's top ${topic.toLowerCase()} headlines`;
+  ctx.log(`Research: no single story could be read in full right now — making a credited roundup of ${pick.length} fresh headlines (${pick.map((h) => h.source).join(', ')}).`);
+  return {
+    subject: title, facts, excerpts: [], outlets: pick.map((h) => h.source), links: pick.filter((h) => h.link).map((h) => ({ title: h.source, url: h.link })),
+    confirmed: true, roundup: pick.length, headline: { title, source: pick.map((h) => h.source).slice(0, 3).join(', '), date: pick[0].date, link: pick[0].link },
+  };
 }
 
 /** Cooking: pick a dish and get a real, tested recipe from real recipe sources before writing. */

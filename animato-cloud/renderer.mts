@@ -30,7 +30,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
-import { researchNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
+import { researchNews, bingNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 import { runAnimated, ANIM_CATEGORIES } from './anim/runner.ts';
 
@@ -517,7 +517,7 @@ function sameStory(a: string, b: string): boolean {
 }
 
 /** Real, recent headlines for tech/news — freshest first, never one we already covered. */
-async function recentHeadlines(pastTitles: string[], pastSources: string[]): Promise<{ title: string; source: string; date: string; link: string }[]> {
+async function recentHeadlines(pastTitles: string[], pastSources: string[]): Promise<{ title: string; source: string; date: string; link: string; desc?: string }[]> {
   if (CFG.offline) return [];
   const topicBySub: Record<string, string> = {
     'latest smartphone': 'smartphone launch', 'ai reasoning models': 'new AI model released', 'silicon & processors': 'new processor chip announced',
@@ -526,7 +526,7 @@ async function recentHeadlines(pastTitles: string[], pastSources: string[]): Pro
   };
   const base = CFG.topic || topicBySub[CFG.subGenre.toLowerCase()] || (CFG.category === 'tech' ? 'new AI tool launched' : 'breaking news');
   const seen = [...pastTitles, ...pastSources, ...CFG.usedHeadlines];
-  const items: { title: string; source: string; date: string; link: string; ts: number }[] = [];
+  const items: { title: string; source: string; date: string; link: string; desc?: string; ts: number }[] = [];
   // Freshest window first; widen only if everything recent was already covered.
   for (const window of CFG.category === 'news' ? ['when:1d', 'when:2d', 'when:4d'] : ['when:2d', 'when:5d', 'when:10d']) {
     const url = `${CFG.newsBase}?q=${encodeURIComponent(`${base} ${window}`)}&hl=en-US&gl=US&ceid=US:en`;
@@ -540,15 +540,26 @@ async function recentHeadlines(pastTitles: string[], pastSources: string[]): Pro
         const source = stripTags((block.match(/<source[^>]*>([\s\S]*?)<\/source>/) || [])[1] || '');
         const date = stripTags((block.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || '');
         const link = stripTags((block.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || '');
+        const desc = ((block.match(/<description>([\s\S]*?)<\/description>/) || [])[1] || '').slice(0, 4000);
         if (!title) continue;
         const clean = source && title.endsWith(` - ${source}`) ? title.slice(0, -(source.length + 3)) : title;
         if (seen.some((s) => sameStory(s, clean)) || items.some((x) => sameStory(x.title, clean))) continue;
-        items.push({ title: clean, source, date, link, ts: Date.parse(date) || 0 });
+        items.push({ title: clean, source, date, link, desc, ts: Date.parse(date) || 0 });
       }
     } catch (err: any) {
       log(`Headline lookup failed (${err?.message}).`);
     }
     if (items.length >= 6) break;
+  }
+  // Google News unreachable or thin: Bing News gives real headlines with the publishers' own links.
+  if (items.length < 4) {
+    try {
+      for (const b of await bingNews(base)) {
+        if (seen.some((x) => sameStory(x, b.title)) || items.some((x) => sameStory(x.title, b.title))) continue;
+        items.push({ title: b.title, source: b.outlet, date: '', link: b.url, desc: '', ts: 0 });
+      }
+      log(`Bing News added headlines (now ${items.length}).`);
+    } catch { /* keep what we have */ }
   }
   items.sort((a, b) => b.ts - a.ts);
   log(`Found ${items.length} fresh headlines for "${base}" (skipped anything already covered).`);
@@ -576,7 +587,9 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
   const sub = CFG.subGenre ? `\nSub-genre: ${CFG.subGenre}.` : '';
   const sheet = pack ? `${TRUTH_RULES}\n\nFACT SHEET (researched and verified on the live web for this video)\n"""\n${factSheet(pack)}\n"""` : '';
   const news = pack?.headline
-    ? `\nTHE STORY FOR THIS VIDEO (verified by ${pack.outlets.length} independent outlet(s)): "${pack.headline.title}"${pack.headline.source ? ` (${pack.headline.source})` : ''}. Build the whole video around it. Mention a source naturally once. Put this exact headline in "sourceHeadline".${sheet}`
+    ? pack.roundup
+      ? `\nTHIS VIDEO IS A QUICK ROUNDUP of ${pack.roundup} fresh headlines (listed in the fact sheet). Give each headline its own short beat (one or two scenes), credit its outlet by name, and say only what the headline and its details state. Open with a hook about the day's biggest one. Put "${pack.headline.title}" in "sourceHeadline".${sheet}`
+      : `\nTHE STORY FOR THIS VIDEO (verified by ${pack.outlets.length} independent outlet(s)): "${pack.headline.title}"${pack.headline.source ? ` (${pack.headline.source})` : ''}. Build the whole video around it. Mention a source naturally once. Put this exact headline in "sourceHeadline".${sheet}`
     : headlines.length
     ? `\nFRESH HEADLINES (newest first; none of these has been covered on this channel before). Use ONLY facts stated here — do not invent numbers, prices, specs, quotes, names or dates:\n${headlines.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source}${h.date ? `, ${h.date.slice(0, 16)}` : ''})` : ''}`).join('\n')}\nPick the single most important/interesting story (prefer #1-#3, the newest) and build the whole video around it. Mention the source naturally once. Put the exact headline you used in "sourceHeadline".${TRUTH_RULES}`
     : '';
