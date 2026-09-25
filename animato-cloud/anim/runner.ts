@@ -33,6 +33,8 @@ export interface Kit {
   automateLevel: (L: Float32Array, R: Float32Array, sr: number, o: { speech: { start: number; end: number }[]; speechGain: number; pauseGain: number }) => void;
   eqForVoice: (L: Float32Array, R: Float32Array, sr: number) => void;
   pastTitles: string[];
+  /** Voice of the automation's presenter when it hosts the podcast. */
+  hostVoice?: string;
   PipelineError: new (code: string, message: string) => Error;
 }
 export interface AnimResult { title: string; description: string; hashtags: string[]; tags: string[]; script: string; durationSec: number; character: string; model: string; sources: string[]; showName?: string }
@@ -314,7 +316,14 @@ async function podcast(kit: Kit): Promise<AnimResult> {
   for (const q of queries) for (const h of await headlinesFor(kit, q)) if (news.length < 10 && !news.some((n) => n.title === h.title)) news.push(h);
   const shorts = lengthOf(kit);
   const n = shorts ? '12-16 lines, 130-160 words in total (under 60 seconds)' : '40-60 lines, 480-620 words in total (3-4 minutes)';
-  const user = `Write one episode of "${studio.showName}", a video podcast with ${hosts.length} hosts: ${hosts.map((h, i) => `${i + 1} = ${h.name} (${h.gender}${i === 0 ? ', the lead host who opens and closes' : ', co-host with their own opinions'})`).join('; ')}.
+  const guestMode = !!CFG.podcastGuests && hosts.length > 1;
+  const guestNames = hosts.slice(1).map((h) => h.name).join(' and ');
+  const cast = guestMode
+    ? `hosted by ${hosts[0].name} (${hosts[0].gender}), the channel's regular presenter. Today's GUEST${hosts.length > 2 ? 'S' : ''} on the show: ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (${h.gender})`).join('; ')}.
+Speakers: 1 = ${hosts[0].name} (the host), ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (guest)`).join(', ')}.
+THE HOST OPENS: welcomes the viewers back, then introduces the guest by name — e.g. "We have ${hosts[1].name} on the show today" — and says what they will talk about. The host asks the questions and steers; the guest${hosts.length > 2 ? 's bring' : ' brings'} expertise, strong opinions and predictions. The host thanks ${guestNames} by name at the end and asks viewers to follow`
+    : `with ${hosts.length} hosts: ${hosts.map((h, i) => `${i + 1} = ${h.name} (${h.gender}${i === 0 ? ', the lead host who opens and closes' : ', co-host with their own opinions'})`).join('; ')}`;
+  const user = `Write one episode of "${studio.showName}", a video podcast ${cast}.
 TOPIC: ${topic}
 ${news.length ? `FRESH HEADLINES (last 3 days). Facts may ONLY come from these; everything else is clearly the hosts' opinion, questions or reactions:\n${news.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : 'No live headlines were found: talk about the topic in general terms — opinions, experiences, tips — and do not invent news, numbers, dates or quotes.'}
 EPISODES ALREADY MADE (never repeat one of these angles):
@@ -332,7 +341,7 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
   const script = got?.j || {
     title: `${topic}: what everyone is missing`, description: `The hosts of ${studio.showName} talk about ${topic}.`, hashtags: ['podcast', 'talk'],
     lines: [
-      { host: 1, text: `[excited] Welcome back to ${studio.showName}! Today we are talking about ${topic}.` },
+      { host: 1, text: guestMode ? `[excited] Welcome back to ${studio.showName}! We have ${hosts[1].name} on the show today, and we are talking about ${topic}.` : `[excited] Welcome back to ${studio.showName}! Today we are talking about ${topic}.` },
       { host: 2, text: `[curious] Honestly, I have a strong opinion on this one.` },
       { host: 1, text: `[laugh] Of course you do. Go on then.` },
       { host: 2, text: `[explain] Most people only look at the headline, not what it means for them.` },
@@ -347,7 +356,8 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
   // Voices: one per host, distinct.
   const used = new Set<string>();
   const voiceOf = (g: 'female' | 'male', i: number) => { const v = VOICE_POOL[g].find((x) => !used.has(x)) || VOICE_POOL[g][i % VOICE_POOL[g].length]; used.add(v); return v; };
-  const voices = hosts.map((h, i) => voiceOf(h.gender, i));
+  if (guestMode && kit.hostVoice) used.add(kit.hostVoice);
+  const voices = hosts.map((h, i) => (i === 0 && guestMode && kit.hostVoice ? kit.hostVoice : voiceOf(h.gender, i)));
   const lines = script.lines.map((l: any, i: number) => ({ host: clamp(Math.round(Number(l.host)), 1, hosts.length) - 1, ...parseTags(clean(l.text, 400)), i })).filter((l: any) => l.text);
   const clips = await pool(lines, 4, (l: any) => speak(kit, l.text, voices[l.host], '+4%', hosts[l.host].gender, `p${l.i}`));
   // Natural pacing: quick exchanges, a beat longer on a change of speaker.
@@ -369,7 +379,7 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
   const res = await render(kit, job, mix, duration);
   const text = lines.map((l: any) => `${hosts[l.host].name}: ${l.text}`).join('\n');
   return {
-    title: clean(script.title, 95), description: `${clean(script.description, 900)}\n\nHosts: ${hosts.map((h) => h.name).join(', ')}.${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
+    title: clean(script.title, 95), description: `${clean(script.description, 900)}\n\n${guestMode ? `Host: ${hosts[0].name}. Guest${hosts.length > 2 ? 's' : ''}: ${guestNames}.` : `Hosts: ${hosts.map((h) => h.name).join(', ')}.`}${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
     hashtags: [...cleanTags(script.hashtags), 'podcast'], tags: [topic, studio.showName, 'podcast', ...hosts.map((h) => h.name)].map((x) => clean(x, 40)).filter(Boolean),
     script: text, durationSec: duration, character: res.character || 'podcast', model: got?.model || 'template', sources: news.slice(0, 4).map((h) => h.title), showName: studio.showName,
   };

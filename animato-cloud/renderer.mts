@@ -133,6 +133,8 @@ const CFG = {
   storyGenre: pick(JOB.story_genre, ENV.STORY_GENRE),
   animStyle: pick(JOB.anim_style, ENV.ANIM_STYLE),
   podcastAbout: pick(JOB.podcast_about, ENV.PODCAST_ABOUT),
+  podcastGuests: pick(JOB.podcast_guests, ENV.PODCAST_GUESTS) === 'true',
+  hostCategory: pick(JOB.host_category, ENV.HOST_CATEGORY),
   // Story arcs: every story is told in at most 3 parts and then finished for good.
   arcParts: Math.max(1, parseInt(pick(JOB.arc_parts, '3'), 10) || 3),
   storyPremise: pick(JOB.story_premise),
@@ -224,6 +226,49 @@ async function appRequest(method: string, route: string, body?: any, timeoutMs =
 }
 
 const campaignPath = () => `/api/automation/campaigns/${encodeURIComponent(CFG.campaignId)}`;
+
+/**
+ * Keeps a copy of the finished video in the app's video library (the same
+ * storage bucket as the AI video editor), so it can be watched, downloaded
+ * and deleted from the app's "Videos" screen. Never fails the run.
+ */
+async function saveToLibrary(meta: { title: string; topic?: string; kind?: string; durationSec: number; width: number; height: number }): Promise<string> {
+  if (!CFG.appUrl || !CFG.campaignId || CFG.offline || !fs.existsSync(OUTPUT_VIDEO)) return '';
+  try {
+    const size = fs.statSync(OUTPUT_VIDEO).size;
+    const r = await appRequest('POST', `${campaignPath()}/videos`, { ...meta, size, partNumber: CFG.partNumber, format: CFG.format }, 30000);
+    if (!r || r.status >= 300 || !r.data?.video?.id) { log(`⚠️ Video library: not saved (${r ? `HTTP ${r.status} ${r.data?.error || ''}` : 'app unreachable'}).`); return ''; }
+    const id = String(r.data.video.id), up = r.data.upload, chunk = Number(up.chunkSize) || 6 * 1024 * 1024;
+    const n = Math.max(1, Math.ceil(size / chunk));
+    const etags: string[] = new Array(n).fill('');
+    const fd = fs.openSync(OUTPUT_VIDEO, 'r');
+    let next = 0;
+    const worker = async () => {
+      while (next < n) {
+        const i = next++;
+        const len = Math.min(chunk, size - i * chunk);
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, i * chunk);
+        for (let a = 0; a < 4 && !etags[i]; a++) {
+          try {
+            const res = await fetch(`${CFG.appUrl}${up.base}/${i}`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream', 'X-Animato-Runner-Key': CFG.runnerKey || '' }, body: buf, signal: AbortSignal.timeout(120000) });
+            const d: any = await res.json().catch(() => ({}));
+            if (res.ok && d.etag) etags[i] = String(d.etag);
+            else await new Promise((z) => setTimeout(z, 1500 * (a + 1)));
+          } catch { await new Promise((z) => setTimeout(z, 1500 * (a + 1))); }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, n) }, worker));
+    fs.closeSync(fd);
+    if (etags.some((e) => !e)) { log('⚠️ Video library: some pieces did not arrive — not saved.'); return ''; }
+    const done = await appRequest('POST', `/api/videos/${id}/complete`, { parts: etags }, 60000);
+    if (!done || done.status >= 300) { log(`⚠️ Video library: could not finish (${done ? `HTTP ${done.status}` : 'app unreachable'}).`); return ''; }
+    log(`Saved to the video library (${(size / 1e6).toFixed(1)} MB).`);
+    return id;
+  } catch (e: any) { log(`⚠️ Video library: ${e?.message || e}`); return ''; }
+}
+const linkLibraryVideo = async (id: string, url: string) => { if (id && url) await appRequest('POST', `/api/videos/${id}/youtube`, { youtubeUrl: url }); };
 
 async function reportStatus(status: 'running' | 'failed' | 'completed' | 'skipped', step: string, progress: number, logLine: string, extra: Record<string, any> = {}) {
   const res = await appRequest('POST', `${campaignPath()}/status`, {
@@ -2514,7 +2559,13 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
   // landscape picture is placed in the middle of the vertical video.
   const landscapePodcast = CFG.category === 'podcast' && H >= W;
   const RW = landscapePodcast ? 1920 : W, RH = landscapePodcast ? 1080 : H;
+  // A podcast hosted by the automation's own presenter keeps the presenter's usual voice.
+  let hostVoice = '';
+  if (CFG.podcastGuests) {
+    try { const cs = JSON.parse(String(CFG.castSpecs ? JSON.stringify(CFG.castSpecs) : '[]')); const g = cs[0]?.gender === 'male' ? 'male' : 'female'; hostVoice = (VOICES[g][CFG.hostCategory] || VOICES[g].default)[0]; } catch {}
+  }
   const kit = {
+    hostVoice,
     CFG, W: RW, H: RH, FPS, IS_SHORTS, WORK_DIR, HERE, LLM, extractJsonObject, log, reportStatus,
     run: (cmd: string, args: string[], o: { timeoutMs?: number } = {}) => run(cmd, args, o),
     probeDuration, pastTitles, PipelineError,
@@ -2537,6 +2588,7 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
     hashtagLine
   ].filter(Boolean).join('\n\n').trim());
   fs.writeFileSync(OUTPUT_META, JSON.stringify({ campaignId: CFG.campaignId, partNumber: CFG.partNumber, category: CFG.category, title: out.title, description, durationSec: outDur, model: out.model, createdAt: new Date().toISOString() }, null, 2));
+  const libId = await saveToLibrary({ title: out.title, topic: CFG.topic || CFG.podcastAbout || CFG.subGenre, kind: CFG.category, durationSec: Math.round(outDur), width: W, height: H });
   let published: { videoId: string; url: string; privacy: string } | null = null;
   if (!PUBLISH) log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
   else if (CFG.dryRun) log('Dry run — skipping publishing.');
@@ -2544,6 +2596,7 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
     await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
     published = await uploadToYouTube({ title: out.title, description, tags: out.tags, synthetic: false });
     log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
+    await linkLibraryVideo(libId, published.url);
   }
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
     partNumber: CFG.partNumber, title: out.title, script: out.script, description,
@@ -2722,7 +2775,8 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     voice: narration.engine, character: characterMode, durationSec: outDur, createdAt: new Date().toISOString()
   }, null, 2));
 
-  // 5. Publish on YouTube.
+  // 5. Keep a copy in the app's video library, then publish on YouTube.
+  const libId = await saveToLibrary({ title: script.title, topic: CFG.topic || CFG.subGenre, kind: CFG.category, durationSec: Math.round(outDur), width: W, height: H });
   let published: { videoId: string; url: string; privacy: string } | null = null;
   if (!PUBLISH) {
     log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
@@ -2732,6 +2786,7 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
     published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
     log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
+    await linkLibraryVideo(libId, published.url);
   }
 
   // 6. Report back — the app records the episode and schedules the next one.
