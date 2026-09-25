@@ -37,7 +37,11 @@ export interface Kit {
   hostVoice?: string;
   PipelineError: new (code: string, message: string) => Error;
 }
-export interface AnimResult { title: string; description: string; hashtags: string[]; tags: string[]; script: string; durationSec: number; character: string; model: string; sources: string[]; showName?: string }
+/** Strong moments for the thumbnail (seconds; w = how strong). */
+export interface Highlight { t: number; w: number }
+const STRONG = new Set(['excited', 'surprised', 'laugh', 'happy', 'angry', 'scared', 'crying', 'shocked']);
+const emotionMoments = (cues: Record<string, { t: number; tag: string }[]>, w = 0.6): Highlight[] => Object.values(cues).flat().filter((c) => STRONG.has(c.tag)).map((c) => ({ t: c.t, w }));
+export interface AnimResult { title: string; description: string; hashtags: string[]; tags: string[]; script: string; durationSec: number; character: string; model: string; sources: string[]; showName?: string; highlights?: Highlight[] }
 
 const SR = 48000;
 const sleep = (ms: number) => new Promise((z) => setTimeout(z, ms));
@@ -379,6 +383,7 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
   const res = await render(kit, job, mix, duration);
   const text = lines.map((l: any) => `${hosts[l.host].name}: ${l.text}`).join('\n');
   return {
+    highlights: emotionMoments(mix.cues),
     title: clean(script.title, 95), description: `${clean(script.description, 900)}\n\n${guestMode ? `Host: ${hosts[0].name}. Guest${hosts.length > 2 ? 's' : ''}: ${guestNames}.` : `Hosts: ${hosts.map((h) => h.name).join(', ')}.`}${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
     hashtags: [...cleanTags(script.hashtags), 'podcast'], tags: [topic, studio.showName, 'podcast', ...hosts.map((h) => h.name)].map((x) => clean(x, 40)).filter(Boolean),
     script: text, durationSec: duration, character: res.character || 'podcast', model: got?.model || 'template', sources: news.slice(0, 4).map((h) => h.title), showName: studio.showName,
@@ -510,6 +515,8 @@ Return ONLY JSON: {"title": "max 60 chars", "logline": "one sentence", "descript
   };
   const res = await render(kit, job, mix, duration);
   return {
+    // Big reactions, but not while the camera moves between places.
+    highlights: emotionMoments(mix.cues, 0.7).filter((h) => !scenes.some((sc, i) => i > 0 && Math.abs(h.t - sc.start) < 0.8)),
     title: clean(s.title, 95), description: `${clean(s.logline, 300)}\n\n${clean(s.description, 800)}\n\nCast: ${chars.map((c) => c.name).join(', ')}. An original 2D animated short film.`,
     hashtags: [...cleanTags(s.hashtags), 'animation', 'shortfilm'], tags: ['2d animation', 'short film', 'animated story', ...(genre ? [`${genre} short film`] : []), ...chars.map((c) => c.name)],
     script: scenesIn.map((sc) => sc.lines.map((l: any) => `${l.speaker === 'narrator' ? 'Narrator' : chars.find((c) => c.id === l.speaker)?.name}: ${l.text}`).join('\n')).join('\n\n'),
@@ -652,6 +659,8 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
   const res = await render(kit, job, mix, duration);
   const score = `${champSide.label} wins ${Math.max(wins.A, wins.B)}-${Math.min(wins.A, wins.B)}`;
   return {
+    // The VS face-off card and the big hits.
+    highlights: [{ t: Math.max(0.6, introEnd - 0.9), w: 0.5 }, ...fights.flatMap((f: any) => (f.choreo?.impacts || []).filter((im: any) => im.ko || im.ground || ['down', 'launchFar'].includes(im.kind) || (im.kind !== 'block' && im.strength >= 0.9)).map((im: any) => ({ t: im.t - 0.1, w: im.ko ? 0.8 : 0.5 })))],
     title,
     description: `${clean(j.description, 700)}\n\n${rounds.map((r, i) => `Round ${i + 1}: ${sides.find((x) => x.id === r.winner)!.label}`).join('\n')}\n🏆 ${score}.\n\nWho should fight next? Tell us in the comments.\nAn original stickman animation, just for fun — not a real-world test.`,
     hashtags: [...cleanTags(j.hashtags), 'stickman', 'stickfight', 'whowins'], tags: ['stickman', 'stick fight', 'vs', 'who wins', 'animation', ...sides.map((x) => x.label.toLowerCase())],

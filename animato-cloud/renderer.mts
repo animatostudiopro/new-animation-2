@@ -2294,7 +2294,7 @@ async function renderWithStage(opts: {
  * Runs a stage bundle (stage.js: the presenter; anim.js: podcasts, films,
  * stickman) in headless Chrome and encodes its frames with the given audio.
  */
-async function runStage(opts: { stageFile: string; job: any; duration: number; audio: { inputs: string[]; filter: string }; files: Record<string, string>; size?: { w: number; h: number } }): Promise<{ ok: boolean; character?: string; reason?: string }> {
+async function runStage(opts: { stageFile: string; job: any; duration: number; audio: { inputs: string[]; filter: string } | null; files: Record<string, string>; size?: { w: number; h: number }; imageOut?: string }): Promise<{ ok: boolean; character?: string; reason?: string }> {
   const W = opts.size?.w || FRAME_W, H = opts.size?.h || FRAME_H;
   const chrome = findChrome();
   if (!chrome) return { ok: false, character: 'none', reason: 'Chrome not found on the runner' };
@@ -2305,7 +2305,9 @@ async function runStage(opts: { stageFile: string; job: any; duration: number; a
   const totalFrames = Math.ceil(opts.duration * FPS);
   const frameBytes = W * H * 4;
   const aud = opts.audio;
-  const ffArgs = ['-hide_banner', '-loglevel', 'error', '-y',
+  const ffArgs = opts.imageOut || !aud
+    ? ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', String(FPS), '-i', 'pipe:0', '-frames:v', '1', '-q:v', '2', opts.imageOut || path.join(WORK_DIR, 'frame.jpg')]
+    : ['-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', String(FPS), '-i', 'pipe:0',
     ...aud.inputs, '-filter_complex', aud.filter, '-map', '0:v', '-map', '[aout]',
     '-t', opts.duration.toFixed(3), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-profile:v', 'high',
@@ -2519,9 +2521,12 @@ function youtubeHashtagLine(values: unknown[]): string {
       seen.add(h);
       out.push(`#${h}`);
     }
-    if (out.length >= 9) break;
+    if (out.length >= 7) break;
   }
-  return out.join(' ');
+  // The first three hashtags show above the title: the two most specific ones, then #shorts.
+  const i = out.indexOf('#shorts');
+  if (i > 2) { out.splice(i, 1); out.splice(2, 0, '#shorts'); }
+  return out.slice(0, 6).join(' ');
 }
 
 async function uploadToYouTube(meta: { title: string; description: string; tags: string[]; synthetic: boolean }): Promise<{ videoId: string; url: string; privacy: string }> {
@@ -2612,6 +2617,9 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
   ].filter(Boolean).join('\n\n').trim());
   fs.writeFileSync(OUTPUT_META, JSON.stringify({ campaignId: CFG.campaignId, partNumber: CFG.partNumber, category: CFG.category, title: out.title, description, durationSec: outDur, model: out.model, createdAt: new Date().toISOString() }, null, 2));
   const libId = await saveToLibrary({ title: out.title, topic: CFG.topic || CFG.podcastAbout || CFG.subGenre, kind: CFG.category, durationSec: Math.round(outDur), width: W, height: H });
+  const picked = await pickBestFrame(OUTPUT_VIDEO, outDur, out.highlights || []);
+  const thumb = picked?.file || null;
+  await saveLibraryThumbnail(libId, thumb);
   let published: { videoId: string; url: string; privacy: string } | null = null;
   if (!PUBLISH) log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
   else if (CFG.dryRun) log('Dry run — skipping publishing.');
@@ -2619,6 +2627,7 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
     await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
     published = await uploadToYouTube({ title: out.title, description, tags: out.tags, synthetic: false });
     log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
+    await setYouTubeThumbnail(published.videoId, thumb);
     await linkLibraryVideo(libId, published.url);
   }
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
@@ -2656,6 +2665,98 @@ async function landscapeIntoFrame(showName: string): Promise<void> {
     log(`⚠️ Could not place the landscape podcast in the vertical frame (${r.stderr.trim().split('\n').slice(-1)[0]}) — posting it as a landscape video.`);
     fs.renameSync(src, OUTPUT_VIDEO);
   } else log(`Landscape podcast placed in the ${W}x${H} frame.`);
+}
+
+// ---------------------------------------------------------------------------
+// Thumbnail = the most engaging frame of the finished video. The whole video
+// is decoded once at 4 frames a second (small), every frame is scored — sharp
+// detail, colour, contrast, good brightness, not mid-cut or mid-flash — and
+// moments the story marks as strong (a big reaction, a hit, a new picture)
+// get a bonus. The winner is saved full size as a JPEG.
+// ---------------------------------------------------------------------------
+type Highlight = { t: number; w: number };
+async function pickBestFrame(video: string, duration: number, highlights: Highlight[] = []): Promise<{ file: string; t: number } | null> {
+  try {
+    const portraitV = H > W;
+    const sw = portraitV ? 108 : 192, sh = portraitV ? 192 : 108, FPSs = 4;
+    const r = await run('ffmpeg', ['-v', 'error', '-i', video, '-vf', `fps=${FPSs},scale=${sw}:${sh}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { timeoutMs: 240000 });
+    const size = sw * sh * 3, n = Math.floor(r.stdout.length / size);
+    if (r.code !== 0 || n < 4) { log(`⚠️ Thumbnail: could not read the video frames (${r.stderr.trim().slice(-160)}).`); return null; }
+    const luma = (f: number) => { const Y = new Float32Array(sw * sh); const o = f * size; for (let i = 0; i < sw * sh; i++) Y[i] = (0.299 * r.stdout[o + i * 3] + 0.587 * r.stdout[o + i * 3 + 1] + 0.114 * r.stdout[o + i * 3 + 2]) / 255; return Y; };
+    const Ys = Array.from({ length: n }, (_, f) => luma(f));
+    const diff = (a: Float32Array, b: Float32Array) => { let d = 0; for (let i = 0; i < a.length; i += 3) d += Math.abs(a[i] - b[i]); return d / (a.length / 3); };
+    const stats = Ys.map((Y, f) => {
+      const o = f * size;
+      let sum = 0, sq = 0, rg = 0, rg2 = 0, yb = 0, yb2 = 0, lap = 0, lapC = 0, cnt = 0;
+      for (let y = 1; y < sh - 1; y++) for (let x = 1; x < sw - 1; x++) {
+        const i = y * sw + x, v = Y[i];
+        sum += v; sq += v * v; cnt++;
+        const l = Math.abs(4 * v - Y[i - 1] - Y[i + 1] - Y[i - sw] - Y[i + sw]);
+        lap += l;
+        // The middle of the frame is where the subject is.
+        if (x > sw * 0.2 && x < sw * 0.8 && y > sh * 0.15 && y < sh * 0.75) lapC += l;
+        const R = r.stdout[o + i * 3], G = r.stdout[o + i * 3 + 1], B = r.stdout[o + i * 3 + 2];
+        const a1 = R - G, b1 = 0.5 * (R + G) - B; rg += a1; rg2 += a1 * a1; yb += b1; yb2 += b1 * b1;
+      }
+      const mean = sum / cnt, std = Math.sqrt(Math.max(0, sq / cnt - mean * mean));
+      const sRG = Math.sqrt(Math.max(0, rg2 / cnt - (rg / cnt) ** 2)), sYB = Math.sqrt(Math.max(0, yb2 / cnt - (yb / cnt) ** 2));
+      const color = Math.sqrt(sRG * sRG + sYB * sYB) + 0.3 * Math.sqrt((rg / cnt) ** 2 + (yb / cnt) ** 2);
+      const motion = Math.max(f > 0 ? diff(Y, Ys[f - 1]) : 0, f < n - 1 ? diff(Y, Ys[f + 1]) : 0);
+      return { t: f / FPSs, mean, std, color, detail: lap / cnt, centre: lapC / cnt, motion };
+    });
+    const endCard = duration > 12 ? 2.8 : 1.5;
+    const ok = stats.filter((x) => x.t >= Math.min(1, duration * 0.1) && x.t <= duration - endCard);
+    if (!ok.length) return null;
+    const max = (k: 'detail' | 'centre' | 'color' | 'std') => Math.max(1e-6, ...ok.map((x) => x[k]));
+    const mD = max('detail'), mC = max('centre'), mCol = max('color'), mS = max('std');
+    const score = (x: typeof ok[number]) => {
+      let s = 0.5 * x.detail / mD + 0.7 * x.centre / mC + 0.8 * x.color / mCol + 0.5 * x.std / mS;
+      if (x.mean < 0.16) s -= (0.16 - x.mean) * 6; else if (x.mean > 0.85) s -= (x.mean - 0.85) * 6;
+      if (x.motion > 0.1) s -= 1.5; else if (x.motion > 0.05) s -= (x.motion - 0.05) * 12; // cuts, flashes, blur
+      for (const h of highlights) s += h.w * Math.exp(-((x.t - h.t - 0.35) ** 2) / (2 * 0.45 ** 2));
+      return s;
+    };
+    const best = ok.reduce((a, b) => (score(b) > score(a) ? b : a));
+    const out = path.join(WORK_DIR, 'thumbnail.jpg');
+    // Full size (16:9 videos: 1280×720), under YouTube's 2 MB limit.
+    const scale = portraitV ? 'scale=1080:-2' : 'scale=1280:-2';
+    for (const q of [2, 4, 7]) {
+      const e = await run('ffmpeg', ['-v', 'error', '-y', '-ss', best.t.toFixed(2), '-i', video, '-frames:v', '1', '-vf', scale, '-q:v', String(q), out], { timeoutMs: 60000 });
+      if (e.code === 0 && fs.existsSync(out) && fs.statSync(out).size < 1.9e6) break;
+    }
+    if (!fs.existsSync(out)) return null;
+    log(`Thumbnail: picked the frame at ${best.t.toFixed(1)}s of ${ok.length} candidates (${(fs.statSync(out).size / 1024).toFixed(0)} KB).`);
+    return { file: out, t: best.t };
+  } catch (e: any) { log(`⚠️ Thumbnail not picked (${e?.message || e}).`); return null; }
+}
+
+/** Keeps the thumbnail with the video in the app's Videos section. */
+async function saveLibraryThumbnail(libId: string, file: string | null): Promise<void> {
+  if (!libId || !file || !CFG.appUrl) return;
+  try {
+    const res = await fetch(`${CFG.appUrl}/api/videos/${libId}/thumbnail`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'X-Animato-Runner-Key': CFG.runnerKey || '' }, body: fs.readFileSync(file), signal: AbortSignal.timeout(60000) });
+    if (!res.ok) log(`⚠️ Thumbnail not saved to the Videos section (HTTP ${res.status}).`);
+  } catch (e: any) { log(`⚠️ Thumbnail not saved to the Videos section (${e?.message || e}).`); }
+}
+
+/**
+ * Sets the picked frame as the YouTube thumbnail. YouTube only accepts this
+ * from verified channels; otherwise it keeps choosing a frame itself, and the
+ * picked frame is still in the app's Videos section.
+ */
+async function setYouTubeThumbnail(videoId: string, file: string | null): Promise<void> {
+  if (!file || !videoId) return;
+  try {
+    const token = await youtubeAccessToken();
+    const r = await fetch(`${CFG.youtubeUploadBase}/thumbnails/set?videoId=${encodeURIComponent(videoId)}&uploadType=media`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'image/jpeg' }, body: fs.readFileSync(file), signal: AbortSignal.timeout(60000)
+    });
+    if (r.ok) { log('Thumbnail set on YouTube ✔'); return; }
+    const t = await r.text();
+    log(/forbidden|verif|permission/i.test(t)
+      ? 'Thumbnail: YouTube only takes custom thumbnails from verified channels, so it picks a frame itself for now (the picked frame is in the Videos section).'
+      : `Thumbnail not set on YouTube (HTTP ${r.status}): ${t.slice(0, 200)}`);
+  } catch (e: any) { log(`Thumbnail not set on YouTube (${e?.message || e}).`); }
 }
 
 // ---------------------------------------------------------------------------
@@ -2800,6 +2901,14 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
 
   // 5. Keep a copy in the app's video library, then publish on YouTube.
   const libId = await saveToLibrary({ title: script.title, topic: CFG.topic || CFG.subGenre, kind: CFG.category, durationSec: Math.round(outDur), width: W, height: H });
+  // Strong moments: big expressions and each new picture on screen.
+  const highlights: Highlight[] = [
+    ...cues.filter((c) => ['excited', 'surprised', 'happy', 'laugh', 'shocked', 'angry', 'scared'].includes(c.tag)).map((c) => ({ t: c.t, w: 0.5 })),
+    ...times.map((x, i) => ((images as (string | null)[])[i] ? { t: x.start + 0.6, w: 0.35 } : null)).filter(Boolean) as Highlight[],
+  ];
+  const picked = await pickBestFrame(OUTPUT_VIDEO, outDur, highlights);
+  const thumb = picked?.file || null;
+  await saveLibraryThumbnail(libId, thumb);
   let published: { videoId: string; url: string; privacy: string } | null = null;
   if (!PUBLISH) {
     log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
@@ -2809,6 +2918,7 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
     published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
     log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
+    await setYouTubeThumbnail(published.videoId, thumb);
     await linkLibraryVideo(libId, published.url);
   }
 
