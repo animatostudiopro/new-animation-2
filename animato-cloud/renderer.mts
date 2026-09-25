@@ -208,21 +208,31 @@ function log(msg: string) {
 // ---------------------------------------------------------------------------
 async function appRequest(method: string, route: string, body?: any, timeoutMs = 20000): Promise<{ status: number; data: any } | null> {
   if (!CFG.appUrl || !CFG.campaignId) return null;
-  try {
-    const res = await fetch(`${CFG.appUrl}${route}`, {
-      method,
-      headers: { 'Content-Type': 'application/json', 'X-Animato-Runner-Key': CFG.runnerKey || '' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-    const text = await res.text();
-    let data: any = null;
-    try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text.slice(0, 300) }; }
-    return { status: res.status, data };
-  } catch (err: any) {
-    console.warn(`App request ${method} ${route} failed: ${err?.message}`);
-    return null;
+  // The app may be briefly busy (Cloudflare per-request CPU limit, a deploy, a
+  // network blip): retry with growing pauses. The episode report matters most
+  // (it records the video and schedules the next one), so it tries longest.
+  const tries = /\/episodes$/.test(route) ? 7 : /\/status$/.test(route) ? 3 : 4;
+  let last: { status: number; data: any } | null = null;
+  for (let a = 0; a < tries; a++) {
+    if (a) await new Promise((z) => setTimeout(z, Math.min(30000, 2000 * 2 ** (a - 1))));
+    try {
+      const res = await fetch(`${CFG.appUrl}${route}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-Animato-Runner-Key': CFG.runnerKey || '' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      const text = await res.text();
+      let data: any = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text.slice(0, 300) }; }
+      last = { status: res.status, data };
+      if (res.status !== 429 && res.status < 500) return last;
+      console.warn(`App request ${method} ${route}: HTTP ${res.status} (attempt ${a + 1}/${tries}).`);
+    } catch (err: any) {
+      console.warn(`App request ${method} ${route} failed: ${err?.message} (attempt ${a + 1}/${tries}).`);
+    }
   }
+  return last;
 }
 
 const campaignPath = () => `/api/automation/campaigns/${encodeURIComponent(CFG.campaignId)}`;
