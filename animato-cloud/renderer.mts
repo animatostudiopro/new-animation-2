@@ -142,6 +142,8 @@ const CFG = {
   storyTitle: pick(JOB.story_title),
   adBrief: pick(JOB.ad_brief),
   adImages: String(pick(JOB.ad_images) || '').split(',').map((x) => x.trim()).filter(Boolean),
+  /** Ads: the advertiser's name, whether it is a service (no app/website — people message them) and how to reach them. */
+  adProfile: (() => { try { const j = JSON.parse(pick(JOB.ad_profile) || '{}'); return { company: String(j.company || '').slice(0, 80), service: j.service === true, contact: String(j.contact || '').slice(0, 160) }; } catch { return { company: '', service: false, contact: '' }; } })(),
   usedHeadlines: String(pick(JOB.used_headlines)).split('\n').map((x) => x.trim()).filter(Boolean),
   pollinationsKey: pick(AUTH.pollinations_key, ENV.POLLINATIONS_API_KEY),
   pexelsKey: pick(AUTH.pexels_key, ENV.PEXELS_API_KEY),
@@ -619,9 +621,19 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
         ? `\nTHE PRODUCT (read from the advertiser's own PDF — use ONLY these facts, never invent a price, feature, claim or link):\n"""${CFG.adBrief.slice(0, 5000)}"""`
         : '\nNo product document was provided: write a clean, honest teaser for the product named in the creator\'s direction and invent nothing.';
       const adRules = CFG.adBrief ? TRUTH_RULES.replace(/the FACT SHEET below/g, 'THE PRODUCT document above').replace(/the sheet/g, 'the document') : '';
-      return `FORMAT: a short, honest product advert that viewers actually enjoy${sub}${topic}${brief}${adRules}
-- Scene 1 is the HOOK (max 14 words): the problem the viewer has, or the single best thing this product does ("Your meeting notes write themselves now — here's how.").
-- Then: what it is in one line → who it's for → the 2-3 features that matter, each with the benefit in plain words → how to get it (the exact site, app store or plan named in the document) → the offer or price ONLY if the document states it → a clear call to action.
+      const P = CFG.adProfile;
+      const who = P.company
+        ? `\nTHE ADVERTISER: "${P.company}". Name them in the hook or the first two scenes and again in the call to action, as the ones behind it (e.g. "${P.company} just built…", "${P.company} sets this up for you"). Put "${P.company}" in the title too.`
+        : '';
+      const service = P.service
+        ? `\nTHIS IS A SERVICE, NOT SOMETHING TO DOWNLOAD: there is no app to install and no website to sign up on. Never say "download", "install", "get the app", "visit the website", "link in bio" or name an app store or URL. ${P.company || 'The company'} sets it up and customises it for each customer's own business or channel, so they don't have to do anything themselves. The call to action is to MESSAGE ${P.company || 'them'}${P.contact ? ` — say exactly: "${P.contact}"` : ' (say "send us a message" / "DM us")'} to have it built for their business. Frame features as what the customer gets ("you get…", "we set up…"), and leave "officialUrl" empty.`
+        : '';
+      const steps = P.service
+        ? 'what it does in one line → who it is for → the 2-3 features that matter, each with the benefit in plain words → that ' + (P.company || 'the company') + ' sets it all up for them (done for you) → the offer or price ONLY if the document states it → the call to action: message them.'
+        : 'what it is in one line → who it\'s for → the 2-3 features that matter, each with the benefit in plain words → how to get it (the exact site, app store or plan named in the document) → the offer or price ONLY if the document states it → a clear call to action.';
+      return `FORMAT: a short, honest ${P.service ? 'advert for a done-for-you service' : 'product advert'} that viewers actually enjoy${sub}${topic}${brief}${adRules}${who}${service}
+- Scene 1 is the HOOK (max 14 words): the problem the viewer has, or the single best thing this ${P.service ? 'service' : 'product'} does ("Your meeting notes write themselves now — here's how.").
+- Then: ${steps}
 - The presenter genuinely likes it and speaks from experience: warm, specific, never shouty, no fake urgency, no invented testimonials.
 - Use shot "panel" whenever the product is shown, and set "productShot": true on those scenes so the real product photo from the PDF is used.
 - searchQuery (scenes without a product photo): the product or company name as written in the document, or the real everyday setting it is used in ("small business owner laptop"). Real photos only — nothing is generated.`;
@@ -969,7 +981,8 @@ function normaliseScript(parsed: any, model: string, relaxed = false): Script {
     model,
     sourceHeadline: String(parsed.sourceHeadline || '').slice(0, 300),
     premise: String(parsed.premise || '').replace(/\s+/g, ' ').slice(0, 900),
-    officialUrl: cleanOfficialUrl(parsed.officialUrl)
+    // A service ad has no website to send people to.
+    officialUrl: CFG.category === 'ads' && CFG.adProfile.service ? '' : cleanOfficialUrl(parsed.officialUrl)
   };
 }
 
@@ -1010,6 +1023,7 @@ function taggedOf(s: Scene): string {
  * researched source material. A sentence with a number the sources don't
  * contain is cut. Returns false when too little of the script is left.
  */
+const SERVICE_WRONG_CTA = /\b(download|install|app store|play store|google play|get the app|visit (our|the) (web)?site|link in (the )?(bio|description)|sign up (at|on)|www\.|https?:\/\/|\.com\b)/i;
 function groundScript(script: Script, pack: FactPack | null): boolean {
   if (CFG.category === 'stories' || script.usedFallbackTemplate || !pack) return true;
   const source = [factSheet(pack), pack.recipe || '', ...pack.excerpts.map((e) => e.text)].join('\n');
@@ -1019,6 +1033,8 @@ function groundScript(script: Script, pack: FactPack | null): boolean {
   for (const sc of script.scenes) {
     const sentences = taggedOf(sc).split(/(?<=[.!?])\s+(?=\S)/);
     const good = sentences.filter((t) => {
+      // A service ad never tells people to download an app or visit a website.
+      if (CFG.category === 'ads' && CFG.adProfile.service && SERVICE_WRONG_CTA.test(CFG.adProfile.contact ? t.split(CFG.adProfile.contact).join(' ') : t)) { cut++; log(`Service ad: cut "${t.replace(/\[[a-z_]+\]\s*/g, '').slice(0, 90)}" — there is no app or website to get; people message the company.`); return false; }
       const bad = unsupportedNumbers(source, t.replace(/\[[a-z_]+\]/g, ''), strict);
       if (bad.length) { cut++; log(`Grounding: cut "${t.replace(/\[[a-z_]+\]\s*/g, '').slice(0, 90)}" — ${bad.join(', ')} is not in the sources.`); }
       return !bad.length;
@@ -1981,7 +1997,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     const productFiles: string[] = [];
     if (cat === 'ads' && CFG.adImages.length && CFG.appUrl && !CFG.offline) {
       let k = 0;
-      for (const id of CFG.adImages.slice(0, 8)) {
+      for (const id of CFG.adImages.slice(0, 12)) {
         const raw = path.join(WORK_DIR, `product_${k}.raw`), out = path.join(WORK_DIR, `product_${k}.jpg`);
         if (await download(`${CFG.appUrl}/api/automation/assets/${encodeURIComponent(id)}`, raw, 45000) && await toJpeg(raw, out)) { productFiles.push(out); k++; }
       }
@@ -1995,8 +2011,9 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     // on tutorial steps (showing how to use it — review / instruction use).
     const forAds = cat === 'ads';
     const pool: WebImage[] = [];
-    const briefUrl = forAds ? cleanOfficialUrl((CFG.adBrief.match(/\bhttps?:\/\/[^\s)"'<>]+|\bwww\.[a-z0-9-]+\.[a-z.]{2,}[^\s)"'<>]*/i) || [])[0]) : '';
-    const official = script.officialUrl || briefUrl;
+    const briefUrl = forAds && !CFG.adProfile.service ? cleanOfficialUrl((CFG.adBrief.match(/\bhttps?:\/\/[^\s)"'<>]+|\bwww\.[a-z0-9-]+\.[a-z.]{2,}[^\s)"'<>]*/i) || [])[0]) : '';
+    // A service has no website to show: never screenshot one for it.
+    const official = forAds && CFG.adProfile.service ? '' : (script.officialUrl || briefUrl);
     /** News / tech: the page the story itself was published on. */
     const storyLink = cleanOfficialUrl(script.sourceStory?.link || '');
     // ---- REAL SCREENSHOTS (everything except stories)
@@ -2835,10 +2852,11 @@ async function main() {
   await reportStatus('running', '4/5 Rendering the video', 58, `${images.filter(Boolean).length} scene images ready; character: ${presenter}.`);
 
   // 4. Render
-  const badge = CFG.category === 'ads' ? 'SPONSORED' : CFG.category === 'stories' ? `${CFG.partNumber >= CFG.arcParts ? 'FINALE' : `PART ${CFG.partNumber}`}${CFG.subGenre ? ` · ${CFG.subGenre.toUpperCase()}` : ''}`
+  const badge = CFG.category === 'ads' ? (CFG.adProfile.company ? CFG.adProfile.company.toUpperCase().slice(0, 28) : 'SPONSORED') : CFG.category === 'stories' ? `${CFG.partNumber >= CFG.arcParts ? 'FINALE' : `PART ${CFG.partNumber}`}${CFG.subGenre ? ` · ${CFG.subGenre.toUpperCase()}` : ''}`
     : CFG.category === 'cooking' ? 'RECIPE' : CFG.category === 'tech' ? 'TECH' : CFG.category === 'news' ? 'NEWS' : CFG.category.toUpperCase();
   const endCard = CFG.category === 'stories'
     ? (CFG.partNumber >= CFG.arcParts ? 'New story next — follow!' : `Part ${CFG.partNumber + 1} next — follow!`)
+    : CFG.category === 'ads' && CFG.adProfile.service ? `Message ${CFG.adProfile.company || 'us'} to set it up`.slice(0, 44)
     : 'Follow for more';
   const title = script.title.replace(/\s*\(part \d+\)\s*$/i, '');
   const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration, credits });
@@ -2883,8 +2901,13 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     CFG.category !== 'stories' ? '' : 'Story art is original and AI-generated for this video.',
     '🎵 Music: original, composed for this video.'
   ].filter(Boolean).join('\n');
+  const P = CFG.adProfile;
+  const adContact = CFG.category !== 'ads' || !(P.company || P.contact) ? ''
+    : P.service ? `📩 Want this for your business? Message ${P.company || 'us'}${P.contact ? `: ${P.contact}` : ''} — we set it up for you.`
+    : P.company ? `By ${P.company}.` : '';
   const description = sanitizeYouTubeDescription([
     script.description || script.title,
+    adContact,
     descriptionDetails(script),
     series,
     sourcesBlock,
