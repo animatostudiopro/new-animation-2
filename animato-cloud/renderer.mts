@@ -2783,7 +2783,9 @@ async function main() {
     if (!camp) log('⚠️ The app is not reachable from GitHub right now — continuing without live status updates.');
     const hist = await appRequest('GET', `${campaignPath()}/history`);
     const episodes: any[] = Array.isArray(hist?.data?.storyHistory) ? hist!.data.storyHistory : [];
-    pastTitles = episodes.map((e) => String(e.title || '')).filter(Boolean);
+    // Titles of recent videos (scripts are kept 10 days) + the last 30 video titles the app keeps for good.
+    const kept: string[] = Array.isArray(hist?.data?.coveredTitles) ? hist!.data.coveredTitles.map((x: any) => String(x || '')) : [];
+    pastTitles = Array.from(new Set([...kept, ...episodes.map((e) => String(e.title || ''))].filter(Boolean)));
     pastSources = [
       ...episodes.flatMap((e) => (Array.isArray(e.sources) ? e.sources : [])),
       ...(Array.isArray(hist?.data?.usedHeadlines) ? hist!.data.usedHeadlines : [])
