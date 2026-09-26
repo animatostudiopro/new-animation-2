@@ -110,8 +110,9 @@ const CFG = {
   format: FMT.format,
   aspect: FMT.aspect,
   autoPost: pick(JOB.auto_post_youtube, INPUTS.auto_post_youtube, ENV.AUTO_POST_YOUTUBE, 'false').toLowerCase() === 'true',
-  // Where to publish: YouTube only.
-  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter((x) => x === 'youtube')),
+  // Publishing destinations selected by the automation. Credentials are fetched
+  // from the app server with the runner key; they are never embedded in the job payload.
+  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter((x) => ['youtube', 'facebook', 'instagram', 'threads'].includes(x))),
   previousScript: pick(JOB.previous_script, ENV.PREVIOUS_SCRIPT),
   privacy: pick(JOB.privacy, ENV.YOUTUBE_PRIVACY, 'public'),
   ytRefreshToken: pick(AUTH.youtube_refresh_token, ENV.YOUTUBE_REFRESH_TOKEN),
@@ -185,8 +186,9 @@ fs.mkdirSync(WORK_DIR, { recursive: true });
 
 // Older jobs had no target list: YouTube when auto-post is on.
 if (!CFG.targets.size && CFG.autoPost) CFG.targets.add('youtube');
-const WANT = { youtube: CFG.targets.has('youtube') };
-const PUBLISH = WANT.youtube;
+const WANT = { youtube: CFG.targets.has('youtube'), facebook: CFG.targets.has('facebook'), instagram: CFG.targets.has('instagram'), threads: CFG.targets.has('threads') };
+const PUBLISH = WANT.youtube || WANT.facebook || WANT.instagram || WANT.threads;
+let SOCIAL: Record<string, any> = {};
 
 const [W, H] = DIMENSIONS[CFG.aspect];
 const FRAME_W = W, FRAME_H = H;
@@ -281,6 +283,102 @@ async function saveToLibrary(meta: { title: string; topic?: string; kind?: strin
   } catch (e: any) { log(`⚠️ Video library: ${e?.message || e}`); return ''; }
 }
 const linkLibraryVideo = async (id: string, url: string) => { if (id && url) await appRequest('POST', `/api/videos/${id}/youtube`, { youtubeUrl: url }); };
+
+async function loadSocialCredentials(): Promise<void> {
+  if (!CFG.appUrl || !CFG.campaignId || CFG.offline) return;
+  if (!(WANT.facebook || WANT.instagram || WANT.threads)) return;
+  const r = await appRequest('GET', `${campaignPath()}/social-credentials`, undefined, 30000);
+  if (!r || r.status >= 300 || !r.data?.social) throw new PipelineError('social_credentials', `The app could not provide the selected social publishing credentials (HTTP ${r?.status || 'no response'}).`);
+  SOCIAL = r.data.social || {};
+  for (const p of ['facebook', 'instagram', 'threads']) {
+    if (!WANT[p as keyof typeof WANT]) continue;
+    const v = SOCIAL[p];
+    if (p === 'facebook' ? !(v?.pageId && v?.pageAccessToken) : !(v?.userId && v?.accessToken)) {
+      throw new PipelineError(`${p}_not_connected`, `${p[0].toUpperCase()}${p.slice(1)} is selected but its publishing credential is unavailable. Reconnect it in the automation dashboard.`);
+    }
+  }
+}
+
+async function publicVideoUrl(libId: string): Promise<string> {
+  if (!libId) throw new PipelineError('social_media_url', 'The rendered video was not saved to the app storage, so social platforms cannot fetch it.');
+  // The completion response includes a short-lived public URL. Reuse the endpoint
+  // so this remains compatible with older runners that only returned the video id.
+  const r = await appRequest('GET', `/api/videos/${encodeURIComponent(libId)}/publish-url`, undefined, 30000);
+  if (!r || r.status >= 300 || !r.data?.publishUrl) throw new PipelineError('social_media_url', `The app could not create a public video URL (HTTP ${r?.status || 'no response'}).`);
+  return String(r.data.publishUrl);
+}
+
+function socialCaption(title: string, description: string): string {
+  const clean = String(description || title || '').replace(/\s+/g, ' ').trim();
+  return clean.slice(0, 2200);
+}
+
+async function publishFacebookVideo(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
+  const c = SOCIAL.facebook;
+  const body = new URLSearchParams({ file_url: meta.videoUrl, title: meta.title.slice(0, 200), description: socialCaption(meta.title, meta.description), published: 'true', access_token: c.pageAccessToken });
+  const r = await fetch(`https://graph.facebook.com/${encodeURIComponent(c.pageId)}/videos`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, signal: AbortSignal.timeout(120000) });
+  const d: any = await r.json().catch(() => ({}));
+  if (!r.ok || !d.id) throw new PipelineError('facebook_publish', d?.error?.message || `Facebook video publish failed (HTTP ${r.status}).`);
+  try {
+    const pr = await fetch(`https://graph.facebook.com/${encodeURIComponent(d.id)}?fields=permalink_url&access_token=${encodeURIComponent(c.pageAccessToken)}`, { signal: AbortSignal.timeout(30000) });
+    const pd: any = await pr.json().catch(() => ({}));
+    if (pr.ok && pd.permalink_url) return String(pd.permalink_url);
+  } catch {}
+  return `https://www.facebook.com/${d.id}`;
+}
+
+async function waitForContainer(url: string, token: string, kind: 'instagram' | 'threads'): Promise<void> {
+  const deadline = Date.now() + 8 * 60 * 1000;
+  let last = '';
+  while (Date.now() < deadline) {
+    const fields = kind === 'instagram' ? 'status_code,status' : 'status,error_message';
+    const r = await fetch(`${url}?fields=${fields}&access_token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(30000) });
+    const d: any = await r.json().catch(() => ({}));
+    if (!r.ok) throw new PipelineError(`${kind}_publish`, d?.error?.message || `Could not check ${kind} media processing status (HTTP ${r.status}).`);
+    const status = String(d.status_code || d.status || '').toUpperCase();
+    if (status === 'FINISHED' || status === 'PUBLISHED' || status === 'READY') return;
+    if (status === 'ERROR' || status === 'EXPIRED' || status === 'FAILED') throw new PipelineError(`${kind}_publish`, d?.error_message || `${kind} media processing failed (${status}).`);
+    last = status || last;
+    await new Promise((z) => setTimeout(z, 7000));
+  }
+  throw new PipelineError(`${kind}_publish`, `${kind} media processing timed out${last ? ` (last status: ${last})` : ''}.`);
+}
+
+async function publishInstagramVideo(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
+  const c = SOCIAL.instagram;
+  const base = `https://graph.instagram.com/${encodeURIComponent(c.userId)}`;
+  const create = await fetch(`${base}/media`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ media_type: 'REELS', video_url: meta.videoUrl, caption: socialCaption(meta.title, meta.description), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
+  const d: any = await create.json().catch(() => ({}));
+  if (!create.ok || !d.id) throw new PipelineError('instagram_publish', d?.error?.message || `Instagram container creation failed (HTTP ${create.status}).`);
+  await waitForContainer(`${base}/${encodeURIComponent(d.id)}`, c.accessToken, 'instagram');
+  const pub = await fetch(`${base}/media_publish`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ creation_id: String(d.id), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
+  const pd: any = await pub.json().catch(() => ({}));
+  if (!pub.ok || !pd.id) throw new PipelineError('instagram_publish', pd?.error?.message || `Instagram publish failed (HTTP ${pub.status}).`);
+  try {
+    const pr = await fetch(`${base}/${encodeURIComponent(pd.id)}?fields=permalink&access_token=${encodeURIComponent(c.accessToken)}`, { signal: AbortSignal.timeout(30000) });
+    const rd: any = await pr.json().catch(() => ({}));
+    if (pr.ok && rd.permalink) return String(rd.permalink);
+  } catch {}
+  return `https://www.instagram.com/reel/${pd.id}/`;
+}
+
+async function publishThreadsVideo(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
+  const c = SOCIAL.threads;
+  const base = `https://graph.threads.net/${encodeURIComponent(c.userId)}`;
+  const create = await fetch(`${base}/threads`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ media_type: 'VIDEO', video_url: meta.videoUrl, text: socialCaption(meta.title, meta.description), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
+  const d: any = await create.json().catch(() => ({}));
+  if (!create.ok || !d.id) throw new PipelineError('threads_publish', d?.error?.message || `Threads container creation failed (HTTP ${create.status}).`);
+  await waitForContainer(`${base}/${encodeURIComponent(d.id)}`, c.accessToken, 'threads');
+  const pub = await fetch(`${base}/threads_publish`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ creation_id: String(d.id), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
+  const pd: any = await pub.json().catch(() => ({}));
+  if (!pub.ok || !pd.id) throw new PipelineError('threads_publish', pd?.error?.message || `Threads publish failed (HTTP ${pub.status}).`);
+  try {
+    const pr = await fetch(`${base}/${encodeURIComponent(pd.id)}?fields=permalink&access_token=${encodeURIComponent(c.accessToken)}`, { signal: AbortSignal.timeout(30000) });
+    const rd: any = await pr.json().catch(() => ({}));
+    if (pr.ok && rd.permalink) return String(rd.permalink);
+  } catch {}
+  return c.username ? `https://www.threads.net/@${encodeURIComponent(c.username)}/post/${pd.id}` : `https://www.threads.net/`;
+}
 
 async function reportStatus(status: 'running' | 'failed' | 'completed' | 'skipped', step: string, progress: number, logLine: string, extra: Record<string, any> = {}) {
   const res = await appRequest('POST', `${campaignPath()}/status`, {
@@ -2649,8 +2747,8 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
   }
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
     partNumber: CFG.partNumber, title: out.title, script: out.script, description,
-    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published,
-    privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
+    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published || Object.keys(socialPublished).length > 0,
+    socialUrls: socialPublished, socialErrors: publishErrors, privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
     durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl, sources: out.sources, model: out.model
   });
   if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
@@ -2815,9 +2913,15 @@ async function main() {
 
   await reportStatus('running', '1/5 Writing the script', 8, `GitHub runner started Part ${CFG.partNumber} (${CFG.format === 'shorts' ? 'YouTube Short' : 'YouTube video'}, ${CFG.aspect}).`);
 
-  if (WANT.youtube && !CFG.dryRun) {
-    await youtubeAccessToken();
-    log('YouTube connection verified.');
+  if (!CFG.dryRun) {
+    await loadSocialCredentials();
+    if (WANT.youtube) {
+      await youtubeAccessToken();
+      log('YouTube connection verified.');
+    }
+    if (WANT.facebook) log('Facebook publishing connection verified.');
+    if (WANT.instagram) log('Instagram publishing connection verified.');
+    if (WANT.threads) log('Threads publishing connection verified.');
   }
 
   // 2D animation (stickman, short films) and podcasts have their own pipeline.
@@ -2935,23 +3039,64 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
   const thumb = picked?.file || null;
   await saveLibraryThumbnail(libId, thumb);
   let published: { videoId: string; url: string; privacy: string } | null = null;
+  const socialPublished: Record<string, string> = {};
+  const publishErrors: Record<string, string> = {};
   if (!PUBLISH) {
     log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
   } else if (CFG.dryRun) {
     log('Dry run — skipping publishing.');
   } else {
-    await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
-    published = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
-    log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
-    await setYouTubeThumbnail(published.videoId, thumb);
-    await linkLibraryVideo(libId, published.url);
+    let done = 0;
+    const totalTargets = Number(WANT.youtube) + Number(WANT.facebook) + Number(WANT.instagram) + Number(WANT.threads);
+    const publishStep = (label: string) => Math.min(98, 82 + Math.round((done / Math.max(1, totalTargets)) * 16));
+    const attemptPublish = async (platform: string, fn: () => Promise<string>, step: string, message: string) => {
+      await reportStatus('running', step, publishStep(platform), message);
+      let last: any = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const url = await fn();
+          done++;
+          return url;
+        } catch (e: any) {
+          last = e;
+          if (attempt < 3) await new Promise((z) => setTimeout(z, 4000 * attempt));
+        }
+      }
+      const msg = String(last?.message || last || `${platform} publishing failed`);
+      publishErrors[platform] = msg.slice(0, 500);
+      log(`❌ ${platform} publish failed after 3 attempts: ${msg}`);
+      return '';
+    };
+    if (WANT.youtube) {
+      const url = await attemptPublish('YouTube', async () => {
+        const p = await uploadToYouTube({ title: script.title, description, tags: script.tags, synthetic: aiCount > 0 });
+        log(`Published on YouTube: ${p.url} (privacy: ${p.privacy})`);
+        await setYouTubeThumbnail(p.videoId, thumb);
+        await linkLibraryVideo(libId, p.url);
+        published = p;
+        return p.url;
+      }, '5/5 Publishing to YouTube', `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
+      if (!url) log('YouTube did not publish; other selected platforms will still be attempted.');
+    }
+    if (WANT.facebook || WANT.instagram || WANT.threads) {
+      const videoUrl = await publicVideoUrl(libId);
+      const meta = { title: script.title, description, videoUrl };
+      if (WANT.facebook) { socialPublished.facebook = await attemptPublish('Facebook', () => publishFacebookVideo(meta), '5/5 Publishing to Facebook', 'Uploading the finished video to Facebook…') || ''; if (!socialPublished.facebook) delete socialPublished.facebook; }
+      if (WANT.instagram) { socialPublished.instagram = await attemptPublish('Instagram', () => publishInstagramVideo(meta), '5/5 Publishing to Instagram', 'Publishing the finished video as an Instagram Reel…') || ''; if (!socialPublished.instagram) delete socialPublished.instagram; }
+      if (WANT.threads) { socialPublished.threads = await attemptPublish('Threads', () => publishThreadsVideo(meta), '5/5 Publishing to Threads', 'Publishing the finished video to Threads…') || ''; if (!socialPublished.threads) delete socialPublished.threads; }
+    }
+    if (!published && !Object.keys(socialPublished).length) {
+      const firstError = Object.entries(publishErrors)[0]?.[1] || 'All selected publishing destinations rejected the video.';
+      throw new PipelineError('publish_failed', firstError);
+    }
+    if (Object.keys(publishErrors).length) log(`⚠️ Partial publish: ${Object.keys(publishErrors).join(', ')} failed; successful destinations will be recorded so the same part is not posted twice.`);
   }
 
   // 6. Report back — the app records the episode and schedules the next one.
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
     partNumber: CFG.partNumber, title: script.title, script: fullText, description,
-    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published,
-    privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
+    youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published || Object.keys(socialPublished).length > 0,
+    socialUrls: socialPublished, socialErrors: publishErrors, privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect,
     usedFallbackTemplate: script.usedFallbackTemplate, voice: narration.engine, character: characterMode,
     durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl,
     sources: script.sources || [], model: script.model || '',
@@ -2963,10 +3108,10 @@ ${script.imageAttributions.map((a) => `• ${a}`).join('\n')}`.slice(0, 1800)
     console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
-  const links = [published?.url].filter(Boolean);
+  const links = [published?.url, ...Object.values(socialPublished)].filter(Boolean);
   await reportStatus('completed', links.length ? 'Published' : 'Video rendered', 100,
     links.length ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${links.join(' · ')}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
-    { youtubeUrl: published?.url || '' });
+    { youtubeUrl: published?.url || '', socialUrls: socialPublished, socialErrors: publishErrors });
   log(`Done in ${secs}s.`);
   return 0;
 }
