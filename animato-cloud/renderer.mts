@@ -1489,7 +1489,10 @@ async function toJpeg(src: string, dst: string, cropBottom = 0): Promise<boolean
   return r.code === 0 && fs.existsSync(dst);
 }
 
-const orientation = W > H * 1.2 ? 'landscape' : H > W * 1.2 ? 'portrait' : 'square';
+// Ads on a Shorts turn still render their creative at 16:9 (see adLandscapeShort in
+// the main pipeline) and only get framed into the vertical Short afterwards, so the
+// images fetched/generated for them should be landscape too, not portrait.
+const orientation = (CFG.category === 'ads' && IS_SHORTS) ? 'landscape' : W > H * 1.2 ? 'landscape' : H > W * 1.2 ? 'portrait' : 'square';
 let lastPollinationsAt = 0;
 
 // NVIDIA NIM (build.nvidia.com): FLUX text-to-image. The hosted API may only
@@ -2438,11 +2441,14 @@ function audioArgs(narration: string, music: string | null, firstInput: number):
 async function renderWithStage(opts: {
   narration: Narration; scenes: Scene[]; times: { start: number; end: number }[]; cues: { t: number; tag: string }[]; images: (string | null)[];
   title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[];
+  /** Override the canvas the stage renders at (used for ads that render landscape then get framed into a Short — see adLandscapeShort). Defaults to the job's actual frame. */
+  size?: { w: number; h: number };
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
+  const RW = opts.size?.w || W, RH = opts.size?.h || H;
   const job = {
-    width: W, height: H, fps: FPS, duration: opts.duration, category: CFG.category,
+    width: RW, height: RH, fps: FPS, duration: opts.duration, category: CFG.category,
     title: opts.title, badge: opts.badge, endCard: opts.endCard, accent,
     audio: `/audio/narration${audioExt}`,
     words: opts.narration.words.map((w) => ({ text: w.text, start: +w.start.toFixed(3), end: +w.end.toFixed(3) })),
@@ -2460,7 +2466,8 @@ async function renderWithStage(opts: {
   const r = await runStage({
     stageFile: 'stage.js', job, duration: opts.duration,
     audio: audioArgs(opts.narration.audioPath, opts.music, 1),
-    files: { [`/audio/narration${audioExt2}`]: opts.narration.audioPath }
+    files: { [`/audio/narration${audioExt2}`]: opts.narration.audioPath },
+    size: opts.size
   });
   return { ok: r.ok, character: r.character || 'none', reason: r.reason };
 }
@@ -2585,7 +2592,8 @@ async function runStage(opts: { stageFile: string; job: any; duration: number; a
 }
 
 /** Fallback when Chrome is unavailable: scene images + captions, no character. */
-async function renderFallback(opts: { narration: Narration; times: { start: number; end: number }[]; images: (string | null)[]; title: string; badge: string; music: string | null; duration: number }) {
+async function renderFallback(opts: { narration: Narration; times: { start: number; end: number }[]; images: (string | null)[]; title: string; badge: string; music: string | null; duration: number; size?: { w: number; h: number } }) {
+  const W = opts.size?.w || FRAME_W, H = opts.size?.h || FRAME_H;
   const list = path.join(WORK_DIR, 'scenes.ffconcat');
   const lines = ['ffconcat version 1.0'];
   opts.images.forEach((img, i) => {
@@ -2796,14 +2804,57 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
   const thumb = picked?.file || null;
   await saveLibraryThumbnail(libId, thumb);
   let published: { videoId: string; url: string; privacy: string } | null = null;
-  if (!PUBLISH) log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
-  else if (CFG.dryRun) log('Dry run — skipping publishing.');
-  else {
-    await reportStatus('running', '5/5 Publishing to YouTube', 88, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
-    published = await uploadToYouTube({ title: out.title, description, tags: out.tags, synthetic: false });
-    log(`Published on YouTube: ${published.url} (privacy: ${published.privacy})`);
-    await setYouTubeThumbnail(published.videoId, thumb);
-    await linkLibraryVideo(libId, published.url);
+  const socialPublished: Record<string, string> = {};
+  const publishErrors: Record<string, string> = {};
+  if (!PUBLISH) {
+    log('Publishing is OFF for this automation — the video is saved as a run artifact only.');
+  } else if (CFG.dryRun) {
+    log('Dry run — skipping publishing.');
+  } else {
+    let done = 0;
+    const totalTargets = Number(WANT.youtube) + Number(WANT.facebook) + Number(WANT.instagram) + Number(WANT.threads);
+    const publishStep = (platform: string) => Math.min(98, 82 + Math.round((done / Math.max(1, totalTargets)) * 16));
+    const attemptPublish = async (platform: string, fn: () => Promise<string>, step: string, message: string) => {
+      await reportStatus('running', step, publishStep(platform), message);
+      let last: any = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const url = await fn();
+          done++;
+          return url;
+        } catch (e: any) {
+          last = e;
+          if (attempt < 3) await new Promise((z) => setTimeout(z, 4000 * attempt));
+        }
+      }
+      const msg = String(last?.message || last || `${platform} publishing failed`);
+      publishErrors[platform] = msg.slice(0, 500);
+      log(`❌ ${platform} publish failed after 3 attempts: ${msg}`);
+      return '';
+    };
+    if (WANT.youtube) {
+      const url = await attemptPublish('YouTube', async () => {
+        const p = await uploadToYouTube({ title: out.title, description, tags: out.tags, synthetic: false });
+        log(`Published on YouTube: ${p.url} (privacy: ${p.privacy})`);
+        await setYouTubeThumbnail(p.videoId, thumb);
+        await linkLibraryVideo(libId, p.url);
+        published = p;
+        return p.url;
+      }, '5/5 Publishing to YouTube', `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`);
+      if (!url) log('YouTube did not publish; other selected platforms will still be attempted.');
+    }
+    if (WANT.facebook || WANT.instagram || WANT.threads) {
+      const videoUrl = await publicVideoUrl(libId);
+      const meta = { title: out.title, description, videoUrl };
+      if (WANT.facebook) { socialPublished.facebook = await attemptPublish('Facebook', () => publishFacebookVideo(meta), '5/5 Publishing to Facebook', 'Uploading the finished video to Facebook…') || ''; if (!socialPublished.facebook) delete socialPublished.facebook; }
+      if (WANT.instagram) { socialPublished.instagram = await attemptPublish('Instagram', () => publishInstagramVideo(meta), '5/5 Publishing to Instagram', 'Publishing the finished video as an Instagram Reel…') || ''; if (!socialPublished.instagram) delete socialPublished.instagram; }
+      if (WANT.threads) { socialPublished.threads = await attemptPublish('Threads', () => publishThreadsVideo(meta), '5/5 Publishing to Threads', 'Publishing the finished video to Threads…') || ''; if (!socialPublished.threads) delete socialPublished.threads; }
+    }
+    if (!published && !Object.keys(socialPublished).length) {
+      const firstError = Object.entries(publishErrors)[0]?.[1] || 'All selected publishing destinations rejected the video.';
+      throw new PipelineError('publish_failed', firstError);
+    }
+    if (Object.keys(publishErrors).length) log(`⚠️ Partial publish: ${Object.keys(publishErrors).join(', ')} failed; successful destinations will be recorded so the same part is not posted twice.`);
   }
   const episode = await appRequest('POST', `${campaignPath()}/episodes`, {
     partNumber: CFG.partNumber, title: out.title, script: out.script, description,
@@ -2813,9 +2864,10 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
   });
   if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) console.warn(`⚠️ Could not record the episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
-  await reportStatus('completed', published ? 'Published' : 'Video rendered', 100,
-    published ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${published.url}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
-    { youtubeUrl: published?.url || '' });
+  const links = [published?.url, ...Object.values(socialPublished)].filter(Boolean);
+  await reportStatus('completed', links.length ? 'Published' : 'Video rendered', 100,
+    links.length ? `✅ Part ${CFG.partNumber} published in ${secs}s: ${links.join(' · ')}` : `✅ Part ${CFG.partNumber} rendered in ${secs}s (not published).`,
+    { youtubeUrl: published?.url || '', socialUrls: socialPublished, socialErrors: publishErrors });
   log(`Done in ${secs}s.`);
   return 0;
 }
@@ -3023,13 +3075,23 @@ async function main() {
     : CFG.category === 'ads' && CFG.adProfile.service ? `Message ${CFG.adProfile.company || 'us'} to set it up`.slice(0, 44)
     : 'Follow for more';
   const title = script.title.replace(/\s*\(part \d+\)\s*$/i, '');
-  const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration, credits });
+  // Ads: on a Shorts turn, the ad creative itself always renders in the normal
+  // YouTube video ratio (16:9) — the switch does not squeeze or crop it — and is
+  // then placed in the middle of the vertical Short frame with a blurred backdrop,
+  // the same way a landscape podcast is framed into a Short (see landscapeIntoFrame).
+  const adLandscapeShort = CFG.category === 'ads' && IS_SHORTS;
+  const renderSize = adLandscapeShort ? { w: 1920, h: 1080 } : undefined;
+  const stage = await renderWithStage({ narration, scenes: script.scenes, times, cues, images, title, badge, endCard, music, duration, credits, size: renderSize });
   let characterMode = stage.character;
   if (!stage.ok) {
     log(`⚠️ Character renderer unavailable (${stage.reason}). Rendering scenes + captions without the character.`);
     await reportStatus('running', '4/5 Rendering (fallback)', 70, `⚠️ Character renderer failed: ${stage.reason}. Using the fallback renderer.`);
-    await renderFallback({ narration, times, images: images as string[], title, badge, music, duration });
+    await renderFallback({ narration, times, images: images as string[], title, badge, music, duration, size: renderSize });
     characterMode = 'none (fallback)';
+  }
+  if (adLandscapeShort) {
+    await landscapeIntoFrame('');
+    log(`Ad rendered at 16:9, then framed into the ${W}x${H} Short with a blurred backdrop.`);
   }
   const outDur = await probeDuration(OUTPUT_VIDEO);
   if (outDur < 3) throw new PipelineError('render_failed', `Rendered video is only ${outDur.toFixed(1)}s long.`);
