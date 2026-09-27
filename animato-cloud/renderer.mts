@@ -145,6 +145,8 @@ const CFG = {
   adImages: String(pick(JOB.ad_images) || '').split(',').map((x) => x.trim()).filter(Boolean),
   /** Ads: the advertiser's name, whether it is a service (no app/website — people message them) and how to reach them. */
   adProfile: (() => { try { const j = JSON.parse(pick(JOB.ad_profile) || '{}'); return { company: String(j.company || '').slice(0, 80), service: j.service === true, contact: String(j.contact || '').slice(0, 160) }; } catch { return { company: '', service: false, contact: '' }; } })(),
+  /** Ads promo for the current product: only mentioned when switched on in the app. */
+  adPromo: (() => { try { const j = JSON.parse(pick(JOB.ad_promo) || '{}'); return j && j.enabled === true ? { enabled: true, discount: String(j.discount || '').slice(0, 60), details: String(j.details || '').slice(0, 400), code: String(j.code || '').slice(0, 40), ends: String(j.ends || '').slice(0, 60) } : null; } catch { return null; } })(),
   usedHeadlines: String(pick(JOB.used_headlines)).split('\n').map((x) => x.trim()).filter(Boolean),
   pollinationsKey: pick(AUTH.pollinations_key, ENV.POLLINATIONS_API_KEY),
   pexelsKey: pick(AUTH.pexels_key, ENV.PEXELS_API_KEY),
@@ -313,7 +315,54 @@ function socialCaption(title: string, description: string): string {
   return clean.slice(0, 2200);
 }
 
+/**
+ * Facebook Page Reels (vertical Shorts). Needs only pages_manage_posts +
+ * pages_read_engagement + pages_show_list — NOT publish_video, which is what
+ * the classic /videos endpoint rejects with "(#100) No permission to publish
+ * the video" until Meta approves that permission.
+ */
+/**
+ * Threads rejects text over 500 characters — and it counts emoji / some
+ * symbols as more than one. Measure in UTF-8 bytes (always >= Threads' count)
+ * and cut on a word boundary, so the limit can never be exceeded.
+ */
+function threadsText(title: string, description: string, max = 480): string {
+  const t = socialCaption(title, description);
+  const enc = new TextEncoder();
+  if (enc.encode(t).length <= max) return t;
+  let cut = '';
+  for (const ch of Array.from(t)) { if (enc.encode(cut + ch).length > max - 3) break; cut += ch; }
+  const sp = cut.lastIndexOf(' ');
+  return `${(sp > cut.length * 0.6 ? cut.slice(0, sp) : cut).trimEnd()}…`;
+}
+
+async function publishFacebookReel(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
+  const c = SOCIAL.facebook;
+  const g = `https://graph.facebook.com/v24.0/${encodeURIComponent(c.pageId)}/video_reels`;
+  const start = await fetch(g, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ upload_phase: 'start', access_token: c.pageAccessToken }), signal: AbortSignal.timeout(60000) });
+  const sd: any = await start.json().catch(() => ({}));
+  if (!start.ok || !sd.video_id) throw new PipelineError('facebook_publish', sd?.error?.message || `Facebook Reel start failed (HTTP ${start.status}).`);
+  const up = await fetch(`https://rupload.facebook.com/video-upload/v24.0/${encodeURIComponent(sd.video_id)}`, { method: 'POST', headers: { Authorization: `OAuth ${c.pageAccessToken}`, file_url: meta.videoUrl }, signal: AbortSignal.timeout(300000) });
+  const ud: any = await up.json().catch(() => ({}));
+  if (!up.ok || ud?.success === false) throw new PipelineError('facebook_publish', ud?.debug_info?.message || ud?.error?.message || `Facebook Reel upload failed (HTTP ${up.status}).`);
+  const fin = await fetch(g, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ upload_phase: 'finish', video_id: String(sd.video_id), video_state: 'PUBLISHED', title: meta.title.slice(0, 200), description: socialCaption(meta.title, meta.description), access_token: c.pageAccessToken }), signal: AbortSignal.timeout(120000) });
+  const fd: any = await fin.json().catch(() => ({}));
+  if (!fin.ok || fd?.success === false) throw new PipelineError('facebook_publish', fd?.error?.message || `Facebook Reel publish failed (HTTP ${fin.status}).`);
+  return `https://www.facebook.com/reel/${sd.video_id}`;
+}
+
 async function publishFacebookVideo(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
+  // Vertical Shorts go up as Reels (no publish_video permission needed).
+  // If Reels is refused, fall back to a normal Page video below.
+  let reelErr: any = null;
+  if (CFG.format === 'shorts') {
+    try { return await publishFacebookReel(meta); } catch (e) { reelErr = e; log(`Facebook Reel failed (${(e as any)?.message || e}); trying a normal Page video.`); }
+  }
+  try { return await publishFacebookPageVideo(meta); }
+  catch (e) { if (reelErr) throw new PipelineError('facebook_publish', `Reel: ${reelErr.message} · Video: ${(e as any)?.message || e}`); throw e; }
+}
+
+async function publishFacebookPageVideo(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
   const c = SOCIAL.facebook;
   const body = new URLSearchParams({ file_url: meta.videoUrl, title: meta.title.slice(0, 200), description: socialCaption(meta.title, meta.description), published: 'true', access_token: c.pageAccessToken });
   const r = await fetch(`https://graph.facebook.com/${encodeURIComponent(c.pageId)}/videos`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, signal: AbortSignal.timeout(120000) });
@@ -365,8 +414,15 @@ async function publishInstagramVideo(meta: { title: string; description: string;
 async function publishThreadsVideo(meta: { title: string; description: string; videoUrl: string }): Promise<string> {
   const c = SOCIAL.threads;
   const base = `https://graph.threads.net/${encodeURIComponent(c.userId)}`;
-  const create = await fetch(`${base}/threads`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ media_type: 'VIDEO', video_url: meta.videoUrl, text: socialCaption(meta.title, meta.description), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
-  const d: any = await create.json().catch(() => ({}));
+  // If Threads still says the text is too long, shorten and try again (never fail on the caption).
+  let create: Response = null as any; let d: any = {};
+  for (const max of [480, 380, 260, 150, 80]) {
+    create = await fetch(`${base}/threads`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ media_type: 'VIDEO', video_url: meta.videoUrl, text: threadsText(meta.title, meta.description, max), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
+    d = await create.json().catch(() => ({}));
+    if (create.ok && d.id) break;
+    if (!/at most \d+ characters|too long/i.test(String(d?.error?.message || d?.error?.error_user_msg || ''))) break;
+    log(`Threads caption too long at ${max} bytes; shortening and retrying.`);
+  }
   if (!create.ok || !d.id) throw new PipelineError('threads_publish', d?.error?.message || `Threads container creation failed (HTTP ${create.status}).`);
   await waitForContainer(`https://graph.threads.net/${encodeURIComponent(d.id)}`, c.accessToken, 'threads');
   const pub = await fetch(`${base}/threads_publish`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ creation_id: String(d.id), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
@@ -729,7 +785,11 @@ function categoryBrief(pastStory: string, headlines: { title: string; source: st
       const steps = P.service
         ? 'what it does in one line → who it is for → the 2-3 features that matter, each with the benefit in plain words → that ' + (P.company || 'the company') + ' sets it all up for them (done for you) → the offer or price ONLY if the document states it → the call to action: message them.'
         : 'what it is in one line → who it\'s for → the 2-3 features that matter, each with the benefit in plain words → how to get it (the exact site, app store or plan named in the document) → the offer or price ONLY if the document states it → a clear call to action.';
-      return `FORMAT: a short, honest ${P.service ? 'advert for a done-for-you service' : 'product advert'} that viewers actually enjoy${sub}${topic}${brief}${adRules}${who}${service}
+      const PR = CFG.adPromo;
+      const promo = PR
+        ? `\nPROMO RUNNING NOW (set by the advertiser — this overrides "price only if the document states it"): ${PR.discount ? `${PR.discount} off` : 'a special offer'}${PR.details ? ` — ${PR.details}` : ''}${PR.code ? `. Promo code: ${PR.code}` : ''}${PR.ends ? `. Ends: ${PR.ends}` : ''}. Mention the promo clearly in ONE scene near the end, just before the call to action (e.g. "Right now ${P.company || 'they'}'re running a promo — ${PR.discount || 'a special discount'} off${PR.code ? `, use code ${PR.code}` : ''}."), and put it in the description. Use exactly these terms — never invent a different amount, code or deadline.`
+        : '\nNO PROMO is running: never mention a discount, sale, promo code or limited-time offer unless the document itself states one.';
+      return `FORMAT: a short, honest ${P.service ? 'advert for a done-for-you service' : 'product advert'} that viewers actually enjoy${sub}${topic}${brief}${adRules}${who}${service}${promo}
 - Scene 1 is the HOOK (max 14 words): the problem the viewer has, or the single best thing this ${P.service ? 'service' : 'product'} does ("Your meeting notes write themselves now — here's how.").
 - Then: ${steps}
 - The presenter genuinely likes it and speaks from experience: warm, specific, never shouty, no fake urgency, no invented testimonials.
