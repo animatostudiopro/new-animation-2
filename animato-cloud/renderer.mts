@@ -350,12 +350,12 @@ async function publishInstagramVideo(meta: { title: string; description: string;
   const create = await fetch(`${base}/media`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ media_type: 'REELS', video_url: meta.videoUrl, caption: socialCaption(meta.title, meta.description), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
   const d: any = await create.json().catch(() => ({}));
   if (!create.ok || !d.id) throw new PipelineError('instagram_publish', d?.error?.message || `Instagram container creation failed (HTTP ${create.status}).`);
-  await waitForContainer(`${base}/${encodeURIComponent(d.id)}`, c.accessToken, 'instagram');
+  await waitForContainer(`https://graph.instagram.com/${encodeURIComponent(d.id)}`, c.accessToken, 'instagram');
   const pub = await fetch(`${base}/media_publish`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ creation_id: String(d.id), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
   const pd: any = await pub.json().catch(() => ({}));
   if (!pub.ok || !pd.id) throw new PipelineError('instagram_publish', pd?.error?.message || `Instagram publish failed (HTTP ${pub.status}).`);
   try {
-    const pr = await fetch(`${base}/${encodeURIComponent(pd.id)}?fields=permalink&access_token=${encodeURIComponent(c.accessToken)}`, { signal: AbortSignal.timeout(30000) });
+    const pr = await fetch(`https://graph.instagram.com/${encodeURIComponent(pd.id)}?fields=permalink&access_token=${encodeURIComponent(c.accessToken)}`, { signal: AbortSignal.timeout(30000) });
     const rd: any = await pr.json().catch(() => ({}));
     if (pr.ok && rd.permalink) return String(rd.permalink);
   } catch {}
@@ -368,12 +368,12 @@ async function publishThreadsVideo(meta: { title: string; description: string; v
   const create = await fetch(`${base}/threads`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ media_type: 'VIDEO', video_url: meta.videoUrl, text: socialCaption(meta.title, meta.description), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
   const d: any = await create.json().catch(() => ({}));
   if (!create.ok || !d.id) throw new PipelineError('threads_publish', d?.error?.message || `Threads container creation failed (HTTP ${create.status}).`);
-  await waitForContainer(`${base}/${encodeURIComponent(d.id)}`, c.accessToken, 'threads');
+  await waitForContainer(`https://graph.threads.net/${encodeURIComponent(d.id)}`, c.accessToken, 'threads');
   const pub = await fetch(`${base}/threads_publish`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ creation_id: String(d.id), access_token: c.accessToken }), signal: AbortSignal.timeout(120000) });
   const pd: any = await pub.json().catch(() => ({}));
   if (!pub.ok || !pd.id) throw new PipelineError('threads_publish', pd?.error?.message || `Threads publish failed (HTTP ${pub.status}).`);
   try {
-    const pr = await fetch(`${base}/${encodeURIComponent(pd.id)}?fields=permalink&access_token=${encodeURIComponent(c.accessToken)}`, { signal: AbortSignal.timeout(30000) });
+    const pr = await fetch(`https://graph.threads.net/${encodeURIComponent(pd.id)}?fields=permalink&access_token=${encodeURIComponent(c.accessToken)}`, { signal: AbortSignal.timeout(30000) });
     const rd: any = await pr.json().catch(() => ({}));
     if (pr.ok && rd.permalink) return String(rd.permalink);
   } catch {}
