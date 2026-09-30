@@ -127,6 +127,9 @@ const CFG = {
   geminiModels: listOf(pick(JOB.gemini_models, ENV.GEMINI_MODELS)),
   groqModels: listOf(pick(JOB.groq_models, ENV.GROQ_MODELS)),
   nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
+  // Personal/test project fallback. Environment/auth config still takes precedence when provided.
+  airforceKey: pick(AUTH.airforce_api_key, ENV.AIRFORCE_API_KEY, 'sk-air-WbHJLcTArpFku1I1pQZpenjgZJiaoPdR9fK2mbfD6NnbjRVM'),
+  airforceBase: pick(ENV.AIRFORCE_BASE, 'https://api.airforce').replace(/\/+$/, ''),
   characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
   // Podcasts: the hosts designed in the app, and the studio.
   castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); return Array.isArray(v) ? v.slice(0, 3) : []; } catch { return []; } })(),
@@ -171,11 +174,15 @@ const CFG = {
   youtubeUploadBase: pick(ENV.YOUTUBE_UPLOAD_BASE, 'https://www.googleapis.com/upload/youtube/v3'),
   newsBase: pick(ENV.NEWS_RSS_BASE, 'https://news.google.com/rss/search'),
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
-  maxRenderSeconds: parseInt(pick(ENV.MAX_VIDEO_SECONDS, '0'), 10) || 0
+  maxRenderSeconds: parseInt(pick(ENV.MAX_VIDEO_SECONDS, '0'), 10) || 0,
+  // Api.Airforce currently documents no public Suno music status route. When an
+  // account/tenant exposes one, provide a full URL template such as
+  // https://.../tasks/{task_id}; the 202 response may also provide its own status URL.
+  airforceMusicStatusUrlTemplate: pick(ENV.AIRFORCE_MUSIC_STATUS_URL_TEMPLATE, '')
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -925,7 +932,8 @@ const DEFAULT_TAGS: Record<string, string[]> = {
   stories: ['storytime', 'scarystories', 'horrorstory', 'creepy'],
   cooking: ['recipe', 'cooking', 'easyrecipe', 'foodie'],
   tech: ['tech', 'technews', 'gadgets', 'ai'],
-  news: ['news', 'breakingnews', 'worldnews', 'explained']
+  news: ['news', 'breakingnews', 'worldnews', 'explained'],
+  musical: ['originalmusic', 'musicvideo', 'song', 'songs', 'singer', 'choir']
 };
 
 /** What the description's body must cover, per category. */
@@ -950,6 +958,7 @@ const CATEGORY_ROOTS: Record<string, string[]> = {
   cooking: ['food', 'recipe', 'cook', 'kitchen', 'meal', 'dish', 'dinner', 'lunch', 'breakfast', 'bake', 'cuisine', 'foodie', 'snack', 'dessert'],
   tech: ['tech', 'gadget', 'software', 'app', 'phone', 'computer', 'coding', 'digital', 'tutorial', 'howto'],
   news: ['news', 'headline', 'breaking', 'update', 'report', 'explained', 'currentevents'],
+  musical: ['music', 'song', 'songs', 'singer', 'vocal', 'vocals', 'choir', 'musicvideo', 'originalmusic', 'afrobeats', 'gospel', 'nasheed', 'rnb', 'pop', 'dance'],
   ads: ['review', 'product', 'shop', 'business', 'brand', 'deal'],
   stories: ['story', 'stories', 'tale', 'storytime', 'drama', 'romance', 'mystery']
 };
@@ -980,6 +989,7 @@ const NICHE_TAGS: Record<string, string[]> = {
   cooking: ['recipe', 'recipes', 'cooking', 'easyrecipe', 'easyrecipes', 'homecooking', 'cookingtutorial', 'foodie', 'dinnerideas', 'lunchideas', 'breakfastideas', 'mealprep', 'comfortfood', 'healthyrecipes'],
   tech: ['tech', 'technews', 'technology', 'gadgets', 'ai', 'artificialintelligence', 'techtips', 'tutorial', 'howto', 'software', 'apps', 'smartphone', 'productivity'],
   news: ['news', 'breakingnews', 'worldnews', 'newsupdate', 'currentevents', 'explained', 'headlines', 'politics', 'economy'],
+  musical: ['originalmusic', 'musicvideo', 'song', 'songs', 'singer', 'choir', 'afrobeats', 'gospelmusic', 'worshipmusic', 'nasheed', 'devotionalmusic', 'rnbmusic', 'popmusic', 'dancemusic'],
   ads: ['productreview', 'smallbusiness', 'shopsmall', 'musthave', 'productdemo']
 };
 
@@ -1344,7 +1354,7 @@ const VOICES: Record<string, Record<string, string[]>> = {
     default: ['en-US-AndrewMultilingualNeural', 'en-US-BrianMultilingualNeural', 'en-US-GuyNeural']
   }
 };
-const RATE: Record<string, string> = { stories: '-3%', cooking: '+4%', tech: '+5%', news: '+5%', ads: '+4%' };
+const RATE: Record<string, string> = { stories: '-3%', cooking: '+4%', tech: '+5%', news: '+5%', ads: '+4%', musical: '0%' };
 
 function cleanForSpeech(text: string): string {
   return text.replace(/[*_#`>~]/g, ' ').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ').replace(/\s+/g, ' ').trim();
@@ -2440,7 +2450,7 @@ function audioArgs(narration: string, music: string | null, firstInput: number):
 
 async function renderWithStage(opts: {
   narration: Narration; scenes: Scene[]; times: { start: number; end: number }[]; cues: { t: number; tag: string }[]; images: (string | null)[];
-  title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[];
+  title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[]; musicalStage?: boolean; chorusIntervals?: { start: number; end: number }[];
   /** Override the canvas the stage renders at (used for ads that render landscape then get framed into a Short — see adLandscapeShort). Defaults to the job's actual frame. */
   size?: { w: number; h: number };
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
@@ -2455,6 +2465,8 @@ async function renderWithStage(opts: {
     wordsReliable: opts.narration.wordsReliable,
     segments: opts.scenes.map((s, i) => ({ start: opts.times[i].start, end: opts.times[i].end, text: s.narration, image: opts.images[i] ? `/img/${path.basename(opts.images[i]!)}` : null, shot: s.shot, emotion: s.emotion, credit: opts.credits?.[i] || null })),
     cues: opts.cues,
+    musicalStage: !!opts.musicalStage,
+    chorusIntervals: opts.chorusIntervals || [],
     // The presenter: the CSS character spec designed in the app (the stage draws it).
     characterSpec: CFG.characterSpec,
     gender: CFG.gender,
@@ -2673,7 +2685,7 @@ async function youtubeAccessToken(): Promise<string> {
   return cachedYouTubeToken;
 }
 
-const YT_CATEGORY: Record<string, string> = { cooking: '26', tech: '28', stories: '24', news: '25', ads: '22' };
+const YT_CATEGORY: Record<string, string> = { cooking: '26', tech: '28', stories: '24', news: '25', ads: '22', musical: '10' };
 
 /** Build a YouTube-safe description. YouTube's limit is 5,000 UTF-8 bytes,
  * not 5,000 JavaScript characters. Strip controls and invalid URL-like text,
@@ -2986,6 +2998,382 @@ async function setYouTubeThumbnail(videoId: string, file: string | null): Promis
   } catch (e: any) { log(`Thumbnail not set on YouTube (${e?.message || e}).`); }
 }
 
+
+// ---------------------------------------------------------------------------
+// Musical videos — original Suno V5.5 song + real timed performance
+// ---------------------------------------------------------------------------
+interface MusicalSection { tag: string; lyrics: string; emotion: string }
+interface MusicalSong {
+  title: string;
+  description: string;
+  lyrics: string;
+  sections: MusicalSection[];
+  hashtags: string[];
+  tags: string[];
+}
+const MUSICAL_PROFILES: Record<string, { style: string; emotion: string; instruments: string }> = {
+  'sad / heartbreak': { style: 'cinematic emotional pop ballad, intimate lead vocal, piano, warm strings, restrained drums, spacious reverb', emotion: 'sad', instruments: 'piano and cinematic strings' },
+  'happy / feel-good': { style: 'bright uplifting pop, catchy melodic hook, warm live drums, guitars, handclaps, polished radio mix', emotion: 'happy', instruments: 'bright guitars, handclaps and live drums' },
+  'dance / party': { style: 'high-energy dance-pop, four-on-the-floor groove, glossy synths, punchy bass, festival-ready hook', emotion: 'excited', instruments: 'synths, punchy bass and dance drums' },
+  'love / r&b': { style: 'smooth contemporary R&B, soulful lead vocal, electric piano, warm bass, tasteful percussion, intimate close-mic production', emotion: 'calm', instruments: 'electric piano and warm bass' },
+  'pop anthem': { style: 'modern cinematic pop anthem, huge sing-along chorus, layered harmonies, drums, bass and wide synths', emotion: 'excited', instruments: 'wide synths and stadium drums' },
+  'afrobeats': { style: 'contemporary Afrobeats, syncopated percussion, melodic bass, clean guitars, infectious hook, premium modern mix', emotion: 'happy', instruments: 'syncopated percussion, melodic bass and clean guitars' },
+  'christian / gospel': { style: 'uplifting gospel worship, soulful lead, piano and organ, tasteful live drums, rich stacked choir responses, reverent and hopeful', emotion: 'calm', instruments: 'piano, organ, live drums and a stacked choir' },
+  'muslim / nasheed': { style: 'respectful devotional nasheed-inspired contemporary song, warm lead vocal, organic frame-drum style percussion, melodic textures, restrained and reverent group response', emotion: 'calm', instruments: 'organic percussion and warm melodic textures' },
+};
+function musicalProfile(): { style: string; emotion: string; instruments: string } {
+  const k = String(CFG.subGenre || '').trim().toLowerCase();
+  return MUSICAL_PROFILES[k] || { style: 'cinematic contemporary pop, emotional lead vocal, polished commercial production', emotion: 'calm', instruments: 'piano, bass, drums and modern synth textures' };
+}
+function cleanMusicLyrics(v: string): string {
+  return String(v || '').replace(/\r/g, '').replace(/^\s*\[[^\]]+\]\s*$/gm, '').replace(/["“”]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+function validMusicSections(v: any): MusicalSection[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x: any) => ({ tag: String(x?.tag || '').toLowerCase().replace(/[^a-z]/g, ''), lyrics: String(x?.lyrics || '').trim(), emotion: String(x?.emotion || '').toLowerCase().replace(/[^a-z_]/g, '') }))
+    .filter((x) => ['intro','verse','prechorus','chorus','bridge','outro'].includes(x.tag) && x.lyrics.length >= 10);
+}
+function sectionLyricText(sections: MusicalSection[]): string {
+  return sections.map((x) => `[${x.tag.toUpperCase()}]\n${x.lyrics}`).join('\n\n');
+}
+function musicHashtags(style: string): string[] {
+  const out = ['originalmusic', 'musicvideo', String(style || '').toLowerCase().replace(/[^a-z0-9]+/g, '')];
+  if (/christian|gospel/i.test(style)) out.push('gospelmusic', 'worshipmusic');
+  if (/muslim|nasheed/i.test(style)) out.push('nasheed', 'devotionalmusic');
+  if (/afrobeats/i.test(style)) out.push('afrobeats', 'afropop');
+  if (IS_SHORTS) out.push('shorts');
+  return Array.from(new Set(out.filter(Boolean))).slice(0, 10);
+}
+async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
+  const profile = musicalProfile();
+  const gender = CFG.gender === 'male' ? 'male' : 'female';
+  const already = pastTitles.slice(-20).join(' | ');
+  const user = `Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro. The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. Aim for at least ${IS_SHORTS ? 90 : 220} lyric words. Previous titles to avoid repeating: ${already || '(none)'}`;
+  let last = '';
+  for await (const a of LLM.attempts({
+    system: 'You are a professional songwriter and music-video creative director. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
+    user, saferUser: user, temperature: 0.9, maxTokens: 6500, json: true, task: 'musical_songwriting'
+  })) {
+    try {
+      const j = extractJsonObject(a.text) as any;
+      const sections = validMusicSections(j.sections);
+      let lyrics = cleanMusicLyrics(String(j.lyrics || sectionLyricText(sections)));
+      if (!lyrics && sections.length) lyrics = sectionLyricText(sections);
+      const hasChorus = sections.some((x) => x.tag === 'chorus');
+      const words = lyrics.split(/\s+/).filter(Boolean).length;
+      if (String(j.title || '').trim() && words >= (IS_SHORTS ? 70 : 150) && hasChorus) {
+        return {
+          title: String(j.title).trim().slice(0, 90),
+          description: String(j.description || `Original ${CFG.subGenre || 'musical'} song performed by a ${gender} lead singer with a cinematic stage and choir chorus.`).trim().slice(0, 1200),
+          lyrics, sections, hashtags: Array.isArray(j.hashtags) ? j.hashtags.map((x: any) => String(x).replace(/^#+/, '').trim()).filter(Boolean).slice(0, 10) : musicHashtags(CFG.subGenre),
+          tags: Array.isArray(j.tags) ? j.tags.map((x: any) => String(x).trim()).filter(Boolean).slice(0, 20) : ['original music', CFG.subGenre || 'music video', 'suno v5.5']
+        };
+      }
+      last = `invalid songwriter output from ${a.provider}/${a.model}`;
+    } catch (e: any) { last = e?.message || String(e); }
+  }
+  throw new PipelineError('musical_song_retry', `No free AI writer produced a valid original song (${last || 'all models failed'}). Nothing was posted; the next scheduled run will retry.`);
+}
+async function downloadRemote(url: string, ext = '.mp3'): Promise<string> {
+  const r = await fetch(url, { signal: AbortSignal.timeout(180000) });
+  if (!r.ok) throw new PipelineError('music_download_failed', `Suno clip download failed: HTTP ${r.status}`);
+  const out = path.join(WORK_DIR, `suno_${crypto.randomBytes(4).toString('hex')}${ext}`);
+  fs.writeFileSync(out, Buffer.from(await r.arrayBuffer()));
+  if (fs.statSync(out).size < 10000) throw new PipelineError('music_download_failed', 'Suno returned an empty audio clip.');
+  return out;
+}
+async function generateSunoMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
+  if (!CFG.airforceKey) throw new PipelineError('airforce_missing_key', 'AIRFORCE_API_KEY is not configured for the Musical content type. Add it as a GitHub Actions repository secret.');
+
+  const profile = musicalProfile();
+  // Never trust arbitrary input for the singer gender. The UI only supports these two values.
+  const gender = CFG.gender === 'male' ? 'male' : 'female';
+  const target = IS_SHORTS ? 58 : Math.min(180, CFG.maxRenderSeconds > 0 ? CFG.maxRenderSeconds : 150);
+  // Keep explicit section tags so Suno can preserve the verse/chorus structure and reinforce
+  // the choir arrangement on chorus sections.
+  const prompt = song.sections.length ? sectionLyricText(song.sections) : cleanMusicLyrics(song.lyrics);
+
+  const headers = {
+    Authorization: `Bearer ${CFG.airforceKey}`,
+    'Content-Type': 'application/json'
+  };
+  const body = {
+    model: 'suno-v5.5',
+    prompt,
+    title: song.title,
+    duration_seconds: target,
+    response_format: 'mp3',
+    custom: true,
+    instrumental: false,
+    style: `${profile.style}; ${profile.instruments}; ${gender} lead vocalist singing with ${profile.emotion} emotion; layered backing choir enters only on the chorus sections; expressive human phrasing; clear diction; polished commercial master; no spoken narration`
+  };
+
+  const saveAudio = async (r: Response, contentType = 'audio/mpeg') => {
+    const ct = String(contentType || '').toLowerCase();
+    const ext = ct.includes('wav') ? '.wav' : '.mp3';
+    const out = path.join(WORK_DIR, `suno_${crypto.randomBytes(4).toString('hex')}${ext}`);
+    fs.writeFileSync(out, Buffer.from(await r.arrayBuffer()));
+    if (fs.statSync(out).size < 10000) {
+      throw new PipelineError('suno_failed', 'Suno returned an empty audio clip.');
+    }
+    return { file: out, duration: await probeDuration(out) };
+  };
+
+  const clipUrlOf = (j: any): string | null => {
+    const direct = [
+      j?.audio_url, j?.clip_url, j?.url, j?.result_url,
+      j?.data?.audio_url, j?.data?.clip_url, j?.data?.url, j?.data?.result_url,
+      j?.result?.audio_url, j?.result?.clip_url, j?.result?.url, j?.result?.result_url
+    ];
+    for (const value of direct) if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+    const arrays = [j?.clips, j?.data?.clips, j?.results, j?.data?.results];
+    for (const arr of arrays) if (Array.isArray(arr)) {
+      for (const clip of arr) {
+        const value = clip?.audio_url || clip?.clip_url || clip?.url || clip?.result_url || clip?.audio?.url;
+        if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+      }
+    }
+    return null;
+  };
+
+  const taskIdOf = (j: any): string => String(
+    j?.task_id || j?.taskId || j?.data?.task_id || j?.data?.taskId || j?.result?.task_id || ''
+  ).trim();
+
+  const statusUrlOf = (j: any, taskId: string): string | null => {
+    const fromResponse = [
+      j?.status_url, j?.poll_url, j?.task_url,
+      j?.data?.status_url, j?.data?.poll_url, j?.data?.task_url,
+      j?.links?.status, j?.links?.poll, j?.links?.task,
+      j?.result?.status_url, j?.result?.poll_url, j?.result?.task_url
+    ];
+    for (const value of fromResponse) {
+      if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+    }
+    const template = String(CFG.airforceMusicStatusUrlTemplate || '').trim();
+    if (template && taskId) {
+      return template
+        .replace(/\{task_id\}/g, encodeURIComponent(taskId))
+        .replace(/\{taskId\}/g, encodeURIComponent(taskId));
+    }
+    return null;
+  };
+
+  const downloadClip = async (url: string) => {
+    const lower = url.toLowerCase();
+    return downloadRemote(String(url), lower.includes('.wav') ? '.wav' : '.mp3');
+  };
+
+  const pollTask = async (taskId: string, statusUrl: string, initial: any): Promise<{ file: string; duration: number; taskId: string }> => {
+    const maxAttempts = 48;
+    const intervalMs = 10000;
+    let snapshot = initial || {};
+    log(`🎵 Suno task ${taskId.slice(0, 48)} accepted; polling ${statusUrl.replace(/(https?:\/\/[^/]+).*/, '$1/...')} every ${intervalMs / 1000}s.`);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) await sleep(intervalMs);
+      let r: Response;
+      try {
+        r = await fetch(statusUrl, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${CFG.airforceKey}` },
+          signal: AbortSignal.timeout(45000)
+        });
+      } catch (e: any) {
+        if (attempt === maxAttempts - 1) throw new PipelineError('suno_poll_failed', `Suno task polling failed after ${maxAttempts} attempts: ${e?.message || e}`);
+        log(`⚠️ Suno task polling network error (attempt ${attempt + 1}/${maxAttempts}); retrying.`);
+        continue;
+      }
+
+      const ct = String(r.headers.get('content-type') || '').toLowerCase();
+      if (r.ok && ct.includes('audio/')) {
+        const saved = await saveAudio(r, ct);
+        return { ...saved, taskId };
+      }
+
+      snapshot = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = JSON.stringify(snapshot).slice(0, 320) || `HTTP ${r.status}`;
+        // 404 is especially important: it normally means the supplied status route does
+        // not exist for this Airforce tenant. Do not accidentally create duplicate Suno jobs.
+        if (r.status === 404) throw new PipelineError('suno_poll_endpoint_missing', `Suno task ${taskId} was created, but the configured polling endpoint returned HTTP 404. Check AIRFORCE_MUSIC_STATUS_URL_TEMPLATE or the status URL returned by Airforce. No duplicate song was submitted.`);
+        if (r.status === 401 || r.status === 403) throw new PipelineError('airforce_auth', `Suno task polling was rejected (HTTP ${r.status}). Check AIRFORCE_API_KEY permissions.`);
+        if (r.status === 429) {
+          await sleep(Math.min(30000, intervalMs * 2));
+          continue;
+        }
+        if (attempt === maxAttempts - 1) throw new PipelineError('suno_poll_failed', `Suno task polling failed: ${msg}`);
+        continue;
+      }
+
+      const status = String(snapshot?.status || snapshot?.state || snapshot?.data?.status || snapshot?.result?.status || '').toLowerCase();
+      const url = clipUrlOf(snapshot);
+      if (url && ['queued', 'processing', 'running', 'pending', ''].includes(status)) {
+        try {
+          const file = await downloadClip(url);
+          return { file, duration: await probeDuration(file), taskId };
+        } catch {
+          // Keep polling if the provider published a URL before the bytes were ready.
+        }
+      }
+      if (['completed', 'complete', 'succeeded', 'success', 'done', 'finished', 'ready'].includes(status) && url) {
+        const file = await downloadClip(url);
+        return { file, duration: await probeDuration(file), taskId };
+      }
+      if (['failed', 'error', 'errored', 'cancelled', 'canceled', 'expired'].includes(status)) {
+        throw new PipelineError('suno_failed', `Suno music task ${taskId} failed: ${String(snapshot?.error || snapshot?.message || status).slice(0, 500)}`);
+      }
+
+      if (attempt % 3 === 0) {
+        const progress = Number(snapshot?.progress ?? snapshot?.data?.progress);
+        log(`🎵 Suno task ${taskId.slice(0, 16)}… status=${status || 'unknown'}${Number.isFinite(progress) ? ` ${progress}%` : ''} (${attempt + 1}/${maxAttempts}).`);
+      }
+    }
+
+    throw new PipelineError('suno_poll_timeout', `Suno task ${taskId} did not complete within ${(maxAttempts * intervalMs) / 60000} minutes. Nothing was posted.`);
+  };
+
+  const r = await fetch(`${CFG.airforceBase}/v1/audio/music`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(300000)
+  });
+
+  const ct = String(r.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('audio/')) return { ...(await saveAudio(r, ct)) };
+
+  const rawBody = await r.text();
+  let j: any = {};
+  try { j = rawBody ? JSON.parse(rawBody) : {}; } catch { j = {}; }
+  const directUrl = clipUrlOf(j);
+  const taskId = taskIdOf(j);
+  const responseLocation = String(r.headers.get('location') || '').trim();
+  log(`🎵 Airforce Suno response: HTTP ${r.status}, content-type=${ct || 'unknown'}, task_id=${taskId ? taskId.slice(0, 24) + '…' : 'none'}, audio_url=${directUrl ? 'present' : 'none'}, location=${responseLocation ? 'present' : 'none'}.`);
+
+  if (!r.ok && r.status !== 202) {
+    const msg = JSON.stringify(j).slice(0, 320) || `HTTP ${r.status}`;
+    throw new PipelineError(
+      /401|403/i.test(msg) ? 'airforce_auth' : /429|quota|limit/i.test(msg) ? 'airforce_quota' : 'suno_failed',
+      `Airforce Suno V5.5 request failed (HTTP ${r.status}): ${msg}`
+    );
+  }
+
+  if (directUrl) {
+    const file = await downloadClip(directUrl);
+    return { file, duration: await probeDuration(file), taskId: taskId || undefined };
+  }
+
+  if (r.status === 202 || taskId) {
+    if (!taskId) throw new PipelineError('suno_pending', 'Airforce accepted the Suno job but did not return a task_id or audio URL. Nothing was posted.');
+    const statusUrl = statusUrlOf(j, taskId) || (responseLocation && /^https?:\/\//i.test(responseLocation) ? responseLocation : null);
+    if (!statusUrl) {
+      throw new PipelineError(
+        'suno_poll_endpoint_missing',
+        `Airforce accepted Suno task ${taskId}, but this response exposes no status URL and the account has no AIRFORCE_MUSIC_STATUS_URL_TEMPLATE configured. Current Api.Airforce audio docs do not publish a Suno music status route, so this run will not resubmit the song and risk duplicates.`
+      );
+    }
+    return pollTask(taskId, statusUrl, j);
+  }
+
+  throw new PipelineError('suno_failed', 'Airforce returned a Suno response without audio bytes, a usable clip URL, or a task ID.');
+}
+async function transcribeMusicAudio(file: string): Promise<Word[]> {
+  if (!CFG.airforceKey) return [];
+  const form = new FormData();
+  const bytes = fs.readFileSync(file);
+  const ext = path.extname(file).toLowerCase();
+  const mime = ext === '.wav' ? 'audio/wav' : 'audio/mpeg';
+  form.append('file', new Blob([bytes], { type: mime }), path.basename(file));
+  form.append('model', 'elevenlabs-scribe'); form.append('language_code', 'en'); form.append('diarize', 'false');
+  form.append('tag_audio_events', 'true'); form.append('timestamps_granularity', 'word');
+  const r = await fetch(`${CFG.airforceBase}/v1/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${CFG.airforceKey}` }, body: form, signal: AbortSignal.timeout(240000) });
+  if (!r.ok) { log(`⚠️ Musical transcription failed (HTTP ${r.status}); using estimated lyric timing.`, 'warn'); return []; }
+  const j: any = await r.json().catch(() => ({}));
+  return Array.isArray(j?.words) ? j.words.filter((w: any) => w?.type === 'word' && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end))).map((w: any) => ({ text: String(w.text), start: Number(w.start), end: Number(w.end) })) : [];
+}
+function timingForMusic(song: MusicalSong, transcript: Word[], duration: number): { words: Word[]; sections: { start: number; end: number; tag: string; emotion: string }[] } {
+  const base = transcript.length ? alignWords(transcript, cleanMusicLyrics(song.lyrics)) : [];
+  const words = base.length > 5 ? base : estimateWordTimes(cleanMusicLyrics(song.lyrics), duration);
+  const sections: { start: number; end: number; tag: string; emotion: string }[] = [];
+  const totalWords = Math.max(1, song.lyrics.split(/\s+/).filter(Boolean).length);
+  let cursor = 0;
+
+  for (const sec of song.sections) {
+    const count = Math.max(1, sec.lyrics.split(/\s+/).filter(Boolean).length);
+    const ratio = count / totalWords;
+    const roughEnd = Math.min(duration, cursor + Math.max(1.8, duration * ratio));
+    const firstLyricWord = sec.lyrics.split(/\s+/)[0]?.replace(/[^a-z0-9']/gi, '').toLowerCase() || '';
+    const first = words.find((w) => {
+      const wt = w.text.replace(/[^a-z0-9']/gi, '').toLowerCase();
+      return w.start >= cursor - 0.05 && w.start <= roughEnd + 0.05 && wt === firstLyricWord;
+    });
+    const start = clamp(Math.max(cursor, first ? first.start : cursor), 0, duration);
+    const minEnd = Math.min(duration, start + 0.8);
+    const end = clamp(Math.max(minEnd, roughEnd), minEnd, duration);
+    if (end <= start) break;
+    sections.push({ start, end, tag: sec.tag, emotion: sec.emotion || musicalProfile().emotion });
+    // Cursor is monotonic: a matched transcript word can only advance section timing.
+    cursor = Math.max(cursor, end);
+    if (cursor >= duration) break;
+  }
+
+  if (sections.length) sections[sections.length - 1].end = duration;
+  return { words, sections };
+}
+async function produceMusical(t0: number, pastTitles: string[]): Promise<number> {
+  await reportStatus('running', '1/6 Writing the original song', 10, `Writing a ${CFG.subGenre || 'musical'} song for a ${CFG.gender} lead singer…`);
+  const song = await writeMusicalSong(pastTitles);
+  await reportStatus('running', '2/6 Generating Suno V5.5 music', 24, `Generating “${song.title}” with the Airforce Suno V5.5 endpoint…`);
+  const generated = await generateSunoMusic(song);
+  if (generated.duration < 5) throw new PipelineError('suno_failed', `Suno returned an unexpectedly short track (${generated.duration.toFixed(1)}s).`);
+  const transcript = await transcribeMusicAudio(generated.file);
+  const timing = timingForMusic(song, transcript, generated.duration);
+  const cues = timing.sections.flatMap((sg) => [{ t: sg.start, tag: sg.emotion }, ...(sg.tag === 'chorus' ? [{ t: sg.start + 0.15, tag: 'excited' }] : [])]).filter((x) => EMOTION_TAGS.includes(x.tag));
+  const chorusIntervals = timing.sections.filter((s) => s.tag === 'chorus').map((s) => ({ start: s.start, end: s.end }));
+  await reportStatus('running', '3/6 Building the music-video performance', 45, `Timed ${timing.words.length} words; ${chorusIntervals.length} chorus sections will bring in the choir.`);
+  const narration: Narration = { audioPath: generated.file, duration: generated.duration, words: timing.words, wordsReliable: transcript.length > 5, engine: 'suno-v5.5', neural: true };
+  const title = song.title;
+  const badge = (CFG.subGenre || 'MUSICAL').toUpperCase().slice(0, 24);
+  const endCard = 'Follow for the next original song';
+  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })), times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals });
+  if (!stage.ok) throw new PipelineError('musical_render_failed', `Musical stage render failed: ${stage.reason || 'unknown error'}`);
+  const outDur = await probeDuration(OUTPUT_VIDEO);
+  if (outDur < 5) throw new PipelineError('musical_render_failed', `Rendered musical video is only ${outDur.toFixed(1)}s long.`);
+  const tags = Array.from(new Set([...(song.tags || []), ...(song.hashtags || []), 'suno-v5.5', 'music video']));
+  const hashtagLine = youtubeHashtagLine([...(song.hashtags || musicHashtags(CFG.subGenre)), ...(IS_SHORTS ? ['shorts'] : [])]);
+  const description = sanitizeYouTubeDescription([song.description, `🎤 Lead singer: ${CFG.gender}.`, `🎵 Style: ${CFG.subGenre || 'Musical'}.`, '🎬 Original cinematic music video with live-style stage performance, microphone, choir chorus, lip-sync and timed captions.', hashtagLine].join('\n\n'));
+  fs.writeFileSync(OUTPUT_META, JSON.stringify({ campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect, title, description, hashtags: song.hashtags, tags, model: 'suno-v5.5', lyrics: song.lyrics, sections: timing.sections, cues, voice: 'suno-v5.5', character: stage.character, durationSec: outDur, createdAt: new Date().toISOString() }, null, 2));
+  const libId = await saveToLibrary({ title, topic: CFG.topic || CFG.subGenre, kind: 'musical', durationSec: Math.round(outDur), width: W, height: H });
+  const picked = await pickBestFrame(OUTPUT_VIDEO, outDur, chorusIntervals.map((c) => ({ t: c.start + 1, w: 0.9 })));
+  await saveLibraryThumbnail(libId, picked?.file || null);
+  let published: { videoId: string; url: string; privacy: string } | null = null;
+  const socialPublished: Record<string, string> = {}, publishErrors: Record<string, string> = {};
+  if (PUBLISH && !CFG.dryRun) {
+    let done = 0; const totalTargets = Number(WANT.youtube) + Number(WANT.facebook) + Number(WANT.instagram) + Number(WANT.threads);
+    const attemptPublish = async (platform: string, fn: () => Promise<string>, message: string) => {
+      await reportStatus('running', '6/6 Publishing the music video', Math.min(98, 82 + Math.round((done / Math.max(1, totalTargets)) * 16)), message);
+      for (let attempt = 1; attempt <= 3; attempt++) { try { const u = await fn(); done++; return u; } catch (e: any) { if (attempt === 3) publishErrors[platform] = String(e?.message || e).slice(0, 500); else await sleep(4000 * attempt); } }
+      return '';
+    };
+    if (WANT.youtube) {
+      const u = await attemptPublish('YouTube', async () => { const p = await uploadToYouTube({ title, description, tags, synthetic: true }); published = p; await setYouTubeThumbnail(p.videoId, picked?.file || null); await linkLibraryVideo(libId, p.url); return p.url; }, `Uploading the ${IS_SHORTS ? 'Short' : 'video'} to YouTube…`); if (!u) log('YouTube did not publish; other selected platforms will still be attempted.');
+    }
+    if (WANT.facebook || WANT.instagram || WANT.threads) {
+      const videoUrl = await publicVideoUrl(libId), meta = { title, description, videoUrl };
+      if (WANT.facebook) { const u = await attemptPublish('Facebook', () => publishFacebookVideo(meta), 'Uploading the finished music video to Facebook…'); if (u) socialPublished.facebook = u; }
+      if (WANT.instagram) { const u = await attemptPublish('Instagram', () => publishInstagramVideo(meta), 'Publishing the finished music video as an Instagram Reel…'); if (u) socialPublished.instagram = u; }
+      if (WANT.threads) { const u = await attemptPublish('Threads', () => publishThreadsVideo(meta), 'Publishing the finished music video to Threads…'); if (u) socialPublished.threads = u; }
+    }
+    if (!published && !Object.keys(socialPublished).length) throw new PipelineError('publish_failed', Object.values(publishErrors)[0] || 'All selected publishing destinations rejected the music video.');
+  }
+  const episode = await appRequest('POST', `${campaignPath()}/episodes`, { partNumber: CFG.partNumber, title, script: song.lyrics, description, youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published || Object.keys(socialPublished).length > 0, socialUrls: socialPublished, socialErrors: publishErrors, privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect, durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl, model: 'suno-v5.5', voice: 'suno-v5.5', character: stage.character });
+  if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) console.warn(`⚠️ Could not record the musical episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
+  const secs = ((Date.now() - t0) / 1000).toFixed(0), links = [published?.url, ...Object.values(socialPublished)].filter(Boolean);
+  await reportStatus('completed', links.length ? 'Published' : 'Video rendered', 100, links.length ? `✅ Musical video published in ${secs}s: ${links.join(' · ')}` : `✅ Musical video rendered in ${secs}s (not published).`, { youtubeUrl: published?.url || '', socialUrls: socialPublished, socialErrors: publishErrors });
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -3023,7 +3411,7 @@ async function main() {
     }
   }
 
-  await reportStatus('running', '1/5 Writing the script', 8, `GitHub runner started Part ${CFG.partNumber} (${CFG.format === 'shorts' ? 'YouTube Short' : 'YouTube video'}, ${CFG.aspect}).`);
+  await reportStatus('running', CFG.category === 'musical' ? '1/6 Starting the musical video' : '1/5 Writing the script', 8, `GitHub runner started Part ${CFG.partNumber} (${CFG.format === 'shorts' ? 'YouTube Short' : 'YouTube video'}, ${CFG.aspect}).`);
 
   if (!CFG.dryRun) {
     await loadSocialCredentials();
@@ -3038,6 +3426,8 @@ async function main() {
 
   // 2D animation (stickman, short films) and podcasts have their own pipeline.
   if (ANIM_CATEGORIES.has(CFG.category)) return await produceAnimated(t0, pastTitles);
+
+  if (CFG.category === 'musical') return await produceMusical(t0, pastTitles);
 
   // 1. Script
   const script = await generateScript(pastStory, pastTitles, pastSources);

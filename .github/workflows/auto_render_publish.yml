@@ -23,7 +23,7 @@ on:
       category:
         description: Content category
         type: choice
-        options: [stories, cooking, tech, news]
+        options: [stories, cooking, tech, news, musical]
         default: stories
       format:
         description: Publish as a YouTube Short (vertical) or a regular video (landscape)
@@ -122,6 +122,10 @@ jobs:
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          # Required for the Musical content type. Store this in the repository as AIRFORCE_API_KEY.
+          AIRFORCE_API_KEY: ${{ secrets.AIRFORCE_API_KEY }}
+          # Optional: only needed when your Airforce tenant exposes a Suno music task status URL.
+          AIRFORCE_MUSIC_STATUS_URL_TEMPLATE: ${{ secrets.AIRFORCE_MUSIC_STATUS_URL_TEMPLATE }}
           # Optional: better / faster scene images.
           POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
