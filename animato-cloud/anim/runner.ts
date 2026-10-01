@@ -299,6 +299,31 @@ const ideaOf = (CFG: any) => {
   return g && !/stick|short film|2d/i.test(g) ? `a ${g.toLowerCase()} story` : '';
 };
 const PALETTE = ['#22d3ee', '#f472b6', '#facc15', '#a3e635', '#fb923c', '#c084fc'];
+const AUTO_NAMES = {
+  female: ['Amara', 'Zara', 'Ifeoma', 'Chiara', 'Aiko', 'Priya', 'Sofia', 'Nadia', 'Leila', 'Imani', 'Freya', 'Ayana', 'Mei', 'Elena', 'Thandi', 'Yara', 'Noor', 'Keira', 'Dalia', 'Halima', 'Ines', 'Talia', 'Nia', 'Adaeze', 'Farida', 'Camila', 'Zuri', 'Hana', 'Naomi', 'Bianca', 'Kiara', 'Sade', 'Isla', 'Marisol', 'Tolu', 'Kemi', 'Chioma', 'Lola', 'Esi', 'Ama', 'Rina', 'Jade', 'Ruby', 'Maya', 'Ada', 'Lina', 'Ivy', 'Nora'],
+  male: ['Kofi', 'Mateo', 'Idris', 'Arjun', 'Lucas', 'Tobi', 'Hassan', 'Noel', 'Ezra', 'Kian', 'Andre', 'Chidi', 'Rafael', 'Oliver', 'Kenji', 'Malik', 'Diego', 'Femi', 'Nikhil', 'Samir', 'Jonas', 'Tariq', 'Elias', 'Bruno', 'Amani', 'Hugo', 'Zane', 'Emeka', 'Rowan', 'Yusuf', 'Caleb', 'Adrian', 'Omar', 'Theo', 'Ravi', 'Leo', 'Musa', 'Kwame', 'Enzo', 'Ibrahim', 'Tunde', 'Seun', 'Dayo', 'Max', 'Sam', 'Jay', 'Ben', 'Nate']
+};
+const AUTO_PERSONALITIES = ['warm and funny', 'sharp skeptic', 'hype energy', 'calm expert', 'curious newcomer', 'witty storyteller', 'straight-talking', 'optimistic dreamer', 'dry humour', 'passionate debater'];
+/** A brand-new cast for one episode: names, genders, personalities and face seeds (deterministic per episode). */
+function autoCast(seed: string, n: number, avoid: string[] = []): { autoHost: true; name: string; gender: 'female' | 'male'; personality: string; seed: string }[] {
+  let h = 2166136261; for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const r = () => { h = Math.imul(h ^ (h >>> 13), 0x5bd1e995) >>> 0; h ^= h >>> 15; return (h % 100000) / 100000; };
+  const out: { autoHost: true; name: string; gender: 'female' | 'male'; personality: string; seed: string }[] = [];
+  const used = new Set(avoid.map((x) => x.toLowerCase()));
+  const usedP = new Set<string>();
+  for (let i = 0; i < n; i++) {
+    const gender: 'female' | 'male' = i === 0 ? (r() < 0.5 ? 'female' : 'male') : (out[i - 1].gender === 'female' ? (r() < 0.7 ? 'male' : 'female') : (r() < 0.7 ? 'female' : 'male'));
+    const list = AUTO_NAMES[gender];
+    let name = list[Math.floor(r() * list.length)];
+    for (let k = 0; k < 10 && used.has(name.toLowerCase()); k++) name = list[Math.floor(r() * list.length)];
+    used.add(name.toLowerCase());
+    let personality = AUTO_PERSONALITIES[Math.floor(r() * AUTO_PERSONALITIES.length)];
+    for (let k = 0; k < 6 && usedP.has(personality); k++) personality = AUTO_PERSONALITIES[Math.floor(r() * AUTO_PERSONALITIES.length)];
+    usedP.add(personality);
+    out.push({ autoHost: true, name, gender, personality, seed: `autohost:${seed}:${i}:${name}` });
+  }
+  return out;
+}
 const lengthOf = (kit: Kit) => kit.IS_SHORTS;
 
 // ===========================================================================
@@ -306,11 +331,20 @@ const lengthOf = (kit: Kit) => kit.IS_SHORTS;
 // ===========================================================================
 async function podcast(kit: Kit): Promise<AnimResult> {
   const CFG = kit.CFG;
-  const specs: any[] = (Array.isArray(CFG.castSpecs) && CFG.castSpecs.length ? CFG.castSpecs : [null, null]).slice(0, 3);
+  let specs: any[] = (Array.isArray(CFG.castSpecs) && CFG.castSpecs.length ? CFG.castSpecs : [null, null]).slice(0, 3);
+  // Auto cast: brand-new hosts (or guests, when the automation's presenter hosts) for every episode.
+  if (CFG.podcastCast === 'auto') {
+    const keep = CFG.podcastGuests && specs[0] ? [specs[0]] : [];
+    const auto = autoCast(`${CFG.campaignId}:${CFG.partNumber}`, Math.max(keep.length ? 1 : 2, Math.min(3 - keep.length, Number(CFG.podcastCastCount) || 2)), keep.map((k: any) => String(k?.name || '')));
+    specs = [...keep, ...auto];
+    kit.log(`Auto cast this episode: ${auto.map((a) => `${a.name} (${a.gender}, ${a.personality})`).join(', ')}`);
+  }
   const studio = normalizeStudio(CFG.studio || {});
   const hosts = specs.map((sp, i) => {
     const gender: 'female' | 'male' = sp?.gender === 'male' ? 'male' : sp?.gender === 'female' ? 'female' : i % 2 ? 'male' : 'female';
-    return { id: `h${i + 1}`, name: clean(sp?.name, 24) || ['Maya', 'Jordan', 'Sam'][i], gender, spec: sp, color: PALETTE[i] };
+    // An auto host has no designed look: the stage builds a unique face and outfit from its seed.
+    const spec = sp && !sp.autoHost ? sp : null;
+    return { id: `h${i + 1}`, name: clean(sp?.name, 24) || ['Maya', 'Jordan', 'Sam'][i], gender, spec, seed: sp?.seed ? String(sp.seed) : undefined, personality: clean(sp?.personality, 40), color: PALETTE[i] };
   });
   // In an automation's rotation, a podcast with no topics of its own talks about the automation's topics.
   const about = clean(CFG.podcastAbout, 300);
@@ -323,10 +357,10 @@ async function podcast(kit: Kit): Promise<AnimResult> {
   const guestMode = !!CFG.podcastGuests && hosts.length > 1;
   const guestNames = hosts.slice(1).map((h) => h.name).join(' and ');
   const cast = guestMode
-    ? `hosted by ${hosts[0].name} (${hosts[0].gender}), the channel's regular presenter. Today's GUEST${hosts.length > 2 ? 'S' : ''} on the show: ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (${h.gender})`).join('; ')}.
+    ? `hosted by ${hosts[0].name} (${hosts[0].gender}), the channel's regular presenter. Today's GUEST${hosts.length > 2 ? 'S' : ''} on the show: ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (${h.gender}${h.personality ? `, ${h.personality.toLowerCase()}` : ''})`).join('; ')}.
 Speakers: 1 = ${hosts[0].name} (the host), ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (guest)`).join(', ')}.
 THE HOST OPENS: welcomes the viewers back, then introduces the guest by name — e.g. "We have ${hosts[1].name} on the show today" — and says what they will talk about. The host asks the questions and steers; the guest${hosts.length > 2 ? 's bring' : ' brings'} expertise, strong opinions and predictions. The host thanks ${guestNames} by name at the end and asks viewers to follow`
-    : `with ${hosts.length} hosts: ${hosts.map((h, i) => `${i + 1} = ${h.name} (${h.gender}${i === 0 ? ', the lead host who opens and closes' : ', co-host with their own opinions'})`).join('; ')}`;
+    : `with ${hosts.length} hosts: ${hosts.map((h, i) => `${i + 1} = ${h.name} (${h.gender}${h.personality ? `, personality: ${h.personality.toLowerCase()}` : ''}${i === 0 ? ', the lead host who opens and closes' : ', co-host with their own opinions'})`).join('; ')}. Each host speaks in a way that matches their personality.`;
   const user = `Write one episode of "${studio.showName}", a video podcast ${cast}.
 TOPIC: ${topic}
 ${news.length ? `FRESH HEADLINES (last 3 days). Facts may ONLY come from these; everything else is clearly the hosts' opinion, questions or reactions:\n${news.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : 'No live headlines were found: talk about the topic in general terms — opinions, experiences, tips — and do not invent news, numbers, dates or quotes.'}

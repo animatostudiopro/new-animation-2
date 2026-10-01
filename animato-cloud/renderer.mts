@@ -112,7 +112,8 @@ const CFG = {
   autoPost: pick(JOB.auto_post_youtube, INPUTS.auto_post_youtube, ENV.AUTO_POST_YOUTUBE, 'false').toLowerCase() === 'true',
   // Publishing destinations selected by the automation. Credentials are fetched
   // from the app server with the runner key; they are never embedded in the job payload.
-  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter((x) => ['youtube', 'facebook', 'instagram', 'threads'].includes(x))),
+  // Only YouTube and Instagram are published to (Facebook and Threads were retired).
+  targets: new Set(String(pick(JOB.publish_targets, '')).split(',').map((x) => x.trim()).filter((x) => ['youtube', 'instagram'].includes(x))),
   previousScript: pick(JOB.previous_script, ENV.PREVIOUS_SCRIPT),
   privacy: pick(JOB.privacy, ENV.YOUTUBE_PRIVACY, 'public'),
   ytRefreshToken: pick(AUTH.youtube_refresh_token, ENV.YOUTUBE_REFRESH_TOKEN),
@@ -130,6 +131,19 @@ const CFG = {
   // Personal/test project fallback. Environment/auth config still takes precedence when provided.
   airforceKey: pick(AUTH.airforce_api_key, ENV.AIRFORCE_API_KEY, 'sk-air-WbHJLcTArpFku1I1pQZpenjgZJiaoPdR9fK2mbfD6NnbjRVM'),
   airforceBase: pick(ENV.AIRFORCE_BASE, 'https://api.airforce').replace(/\/+$/, ''),
+  // Musical: the concert stage (a fixed stage number, or 0 = a new stage every video) and the song language.
+  stageId: Math.max(0, parseInt(pick(JOB.stage_id, ENV.STAGE_ID, '0'), 10) || 0),
+  musicLanguage: pick(JOB.music_language, ENV.MUSIC_LANGUAGE, 'English'),
+  // Free backup music engine: ACE-Step 1.5 official cloud (free API key from https://acemusic.ai/api-key).
+  // Personal project: built-in ACE-Step keys (rotated); a repository secret still overrides them.
+  acestepKeys: keyList(AUTH.acestep_api_keys, AUTH.acestep_api_key, ENV.ACESTEP_API_KEYS, ENV.ACESTEP_API_KEY).concat(['8610e37f3cb54f3e96590563826526ff', '91ca7836737847fc99db7ffcccc716f0', '2efebedddf6a45b4a968282ce79aa90d']).filter((k, i, a) => k && a.indexOf(k) === i),
+  acestepBase: pick(ENV.ACESTEP_BASE, 'https://api.acemusic.ai').replace(/\/+$/, ''),
+  acestepModel: pick(ENV.ACESTEP_MODEL, ''),
+  // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
+  lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
+  lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
+  // Order the music engines are tried in. Default: Suno first, then free ACE-Step, then Lyria (if enabled).
+  musicProviders: listOf(pick(ENV.MUSIC_PROVIDERS, 'acestep,suno,lyria')).map((x) => x.toLowerCase()),
   characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
   // Podcasts: the hosts designed in the app, and the studio.
   castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); return Array.isArray(v) ? v.slice(0, 3) : []; } catch { return []; } })(),
@@ -138,6 +152,9 @@ const CFG = {
   animStyle: pick(JOB.anim_style, ENV.ANIM_STYLE),
   podcastAbout: pick(JOB.podcast_about, ENV.PODCAST_ABOUT),
   podcastGuests: pick(JOB.podcast_guests, ENV.PODCAST_GUESTS) === 'true',
+  /** Podcasts: 'auto' = brand-new hosts every episode (podcastCastCount of them, besides the presenter in guest mode). */
+  podcastCast: pick(JOB.podcast_cast, ENV.PODCAST_CAST, 'custom'),
+  podcastCastCount: Math.max(1, Math.min(3, parseInt(pick(JOB.podcast_cast_count, '2'), 10) || 2)),
   hostCategory: pick(JOB.host_category, ENV.HOST_CATEGORY),
   // Story arcs: every story is told in at most 3 parts and then finished for good.
   arcParts: Math.max(1, parseInt(pick(JOB.arc_parts, '3'), 10) || 3),
@@ -182,7 +199,7 @@ const CFG = {
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey, ...CFG.acestepKeys]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -2453,6 +2470,7 @@ async function renderWithStage(opts: {
   title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[]; musicalStage?: boolean; chorusIntervals?: { start: number; end: number }[];
   /** Override the canvas the stage renders at (used for ads that render landscape then get framed into a Short — see adLandscapeShort). Defaults to the job's actual frame. */
   size?: { w: number; h: number };
+  musical?: { stageId?: number; stageAutoSeed?: string; style?: string; sections?: { start: number; end: number; tag: string; emotion?: string }[] };
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
@@ -2469,6 +2487,9 @@ async function renderWithStage(opts: {
     chorusIntervals: opts.chorusIntervals || [],
     // The presenter: the CSS character spec designed in the app (the stage draws it).
     characterSpec: CFG.characterSpec,
+    // A different outfit (same person) in every video of this automation.
+    wardrobeSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`,
+    ...(opts.musical ? { musical: opts.musical, musicalStyle: opts.musical.style || '' } : {}),
     gender: CFG.gender,
     format: CFG.format,
     fontUrl: '/font/Poppins-Bold.ttf'
@@ -2795,7 +2816,7 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
     composeMusic: (mood: string, seconds: number, seed: string) => composeBuffers(mood as any, Math.max(10, seconds), seed),
     automateLevel, eqForVoice,
     runStage: (o: { stageFile: string; job: any; audioFinal: string; files: Record<string, string>; duration: number }) => runStage({
-      stageFile: o.stageFile, job: o.job, duration: o.duration, files: o.files, size: { w: RW, h: RH },
+      stageFile: o.stageFile, job: { ...o.job, wardrobeSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}` }, duration: o.duration, files: o.files, size: { w: RW, h: RH },
       audio: { inputs: ['-i', o.audioFinal], filter: '[1:a]aresample=48000,apad[aout]' }
     })
   };
@@ -3020,10 +3041,40 @@ const MUSICAL_PROFILES: Record<string, { style: string; emotion: string; instrum
   'afrobeats': { style: 'contemporary Afrobeats, syncopated percussion, melodic bass, clean guitars, infectious hook, premium modern mix', emotion: 'happy', instruments: 'syncopated percussion, melodic bass and clean guitars' },
   'christian / gospel': { style: 'uplifting gospel worship, soulful lead, piano and organ, tasteful live drums, rich stacked choir responses, reverent and hopeful', emotion: 'calm', instruments: 'piano, organ, live drums and a stacked choir' },
   'muslim / nasheed': { style: 'respectful devotional nasheed-inspired contemporary song, warm lead vocal, organic frame-drum style percussion, melodic textures, restrained and reverent group response', emotion: 'calm', instruments: 'organic percussion and warm melodic textures' },
+  'k-pop': { style: 'polished K-pop, explosive dance chorus, layered group vocals, punchy synth bass, crisp trap hats, bright pre-chorus build and a catchy post-chorus hook', emotion: 'excited', instruments: 'synth bass, trap hats and bright synths' },
+  'hip-hop / rap': { style: 'modern hip-hop, confident rhythmic vocal flow with a sung hook, hard 808s, crisp hi-hats, dark melodic loop', emotion: 'serious', instruments: '808 bass, hi-hats and a melodic loop' },
+  'rock': { style: 'anthemic rock, driving live drums, distorted guitars, powerful lead vocal and gang-vocal chorus', emotion: 'excited', instruments: 'electric guitars, bass and live rock drums' },
+  'reggae / dancehall': { style: 'feel-good reggae / dancehall, offbeat skank guitar, deep bass, one-drop groove, sunny lead vocal', emotion: 'happy', instruments: 'skank guitar, deep bass and one-drop drums' },
+  'amapiano': { style: 'amapiano, log-drum bass, shuffling shakers, airy piano chords, smooth soulful vocal and chant hooks', emotion: 'happy', instruments: 'log drums, shakers and piano chords' },
+  'country': { style: 'modern country pop, acoustic and electric guitars, warm storytelling vocal, big singalong chorus', emotion: 'happy', instruments: 'acoustic guitar, pedal steel and live drums' },
+  'jazz / soul': { style: 'smooth jazz-soul, warm vintage vocal, Rhodes piano, upright bass, brushed drums, horn stabs', emotion: 'calm', instruments: 'Rhodes, upright bass, brushed drums and horns' },
+  'lo-fi / chill': { style: 'mellow lo-fi chill pop, soft intimate vocal, dusty keys, laid-back beat, warm tape texture', emotion: 'calm', instruments: 'dusty keys, soft beat and warm bass' },
+  'edm / electronic': { style: 'festival EDM, euphoric build-up and drop, supersaw chords, pumping sidechain bass, soaring vocal', emotion: 'excited', instruments: 'supersaws, sidechained bass and four-on-the-floor kick' },
+  'highlife': { style: 'West African highlife, sweet interlocking guitars, horns, bright percussion, joyful call-and-response vocals', emotion: 'happy', instruments: 'highlife guitars, horns and percussion' },
 };
 function musicalProfile(): { style: string; emotion: string; instruments: string } {
   const k = String(CFG.subGenre || '').trim().toLowerCase();
-  return MUSICAL_PROFILES[k] || { style: 'cinematic contemporary pop, emotional lead vocal, polished commercial production', emotion: 'calm', instruments: 'piano, bass, drums and modern synth textures' };
+  if (MUSICAL_PROFILES[k]) return MUSICAL_PROFILES[k];
+  // A custom genre typed in the app: use it as the direction itself.
+  const custom = String(CFG.subGenre || '').trim();
+  if (custom) return { style: `${custom}, authentic to the genre, polished modern production, strong memorable chorus`, emotion: /sad|heart|blue|slow|ballad/i.test(custom) ? 'sad' : /dance|party|club|hype|energ/i.test(custom) ? 'excited' : 'happy', instruments: `the instruments typical of ${custom}` };
+  return { style: 'cinematic contemporary pop, emotional lead vocal, polished commercial production', emotion: 'calm', instruments: 'piano, bass, drums and modern synth textures' };
+}
+/** ISO 639-1 code for the song language (music engines and transcription use it). */
+const LANG_CODES: Record<string, string> = {
+  english: 'en', french: 'fr', spanish: 'es', portuguese: 'pt', german: 'de', italian: 'it', dutch: 'nl', japanese: 'ja', korean: 'ko', chinese: 'zh', mandarin: 'zh', cantonese: 'zh',
+  arabic: 'ar', hindi: 'hi', urdu: 'ur', bengali: 'bn', turkish: 'tr', russian: 'ru', polish: 'pl', swahili: 'sw', yoruba: 'yo', igbo: 'ig', hausa: 'ha', zulu: 'zu', xhosa: 'xh',
+  amharic: 'am', indonesian: 'id', malay: 'ms', tagalog: 'tl', filipino: 'tl', vietnamese: 'vi', thai: 'th', greek: 'el', hebrew: 'he', persian: 'fa', farsi: 'fa', ukrainian: 'uk', 'nigerian pidgin': 'en', pidgin: 'en'
+};
+function musicLanguage(): { name: string; code: string } {
+  const name = String(CFG.musicLanguage || 'English').trim() || 'English';
+  return { name, code: LANG_CODES[name.toLowerCase()] || 'en' };
+}
+/** Lyric length that works for languages written without spaces (Japanese, Chinese, Thai…). */
+function lyricWordCount(text: string): number {
+  const spaced = text.split(/\s+/).filter(Boolean).length;
+  const cjk = (text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0e00-\u0e7f]/g) || []).length;
+  return Math.max(spaced, Math.round(cjk / 2));
 }
 function cleanMusicLyrics(v: string): string {
   return String(v || '').replace(/\r/g, '').replace(/^\s*\[[^\]]+\]\s*$/gm, '').replace(/["“”]/g, '').replace(/\n{3,}/g, '\n\n').trim();
@@ -3048,7 +3099,8 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
   const already = pastTitles.slice(-20).join(' | ');
-  const user = `Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro. The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. Aim for at least ${IS_SHORTS ? 90 : 220} lyric words. Previous titles to avoid repeating: ${already || '(none)'}`;
+  const lang = musicLanguage();
+  const user = `Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro. The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. Aim for at least ${IS_SHORTS ? 90 : 220} lyric words. Previous titles to avoid repeating: ${already || '(none)'}`;
   let last = '';
   for await (const a of LLM.attempts({
     system: 'You are a professional songwriter and music-video creative director. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
@@ -3060,13 +3112,13 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
       let lyrics = cleanMusicLyrics(String(j.lyrics || sectionLyricText(sections)));
       if (!lyrics && sections.length) lyrics = sectionLyricText(sections);
       const hasChorus = sections.some((x) => x.tag === 'chorus');
-      const words = lyrics.split(/\s+/).filter(Boolean).length;
+      const words = lyricWordCount(lyrics);
       if (String(j.title || '').trim() && words >= (IS_SHORTS ? 70 : 150) && hasChorus) {
         return {
           title: String(j.title).trim().slice(0, 90),
           description: String(j.description || `Original ${CFG.subGenre || 'musical'} song performed by a ${gender} lead singer with a cinematic stage and choir chorus.`).trim().slice(0, 1200),
           lyrics, sections, hashtags: Array.isArray(j.hashtags) ? j.hashtags.map((x: any) => String(x).replace(/^#+/, '').trim()).filter(Boolean).slice(0, 10) : musicHashtags(CFG.subGenre),
-          tags: Array.isArray(j.tags) ? j.tags.map((x: any) => String(x).trim()).filter(Boolean).slice(0, 20) : ['original music', CFG.subGenre || 'music video', 'suno v5.5']
+          tags: Array.isArray(j.tags) ? j.tags.map((x: any) => String(x).trim()).filter(Boolean).slice(0, 20) : ['original music', CFG.subGenre || 'music video', 'ai music']
         };
       }
       last = `invalid songwriter output from ${a.provider}/${a.model}`;
@@ -3105,7 +3157,7 @@ async function generateSunoMusic(song: MusicalSong): Promise<{ file: string; dur
     response_format: 'mp3',
     custom: true,
     instrumental: false,
-    style: `${profile.style}; ${profile.instruments}; ${gender} lead vocalist singing with ${profile.emotion} emotion; layered backing choir enters only on the chorus sections; expressive human phrasing; clear diction; polished commercial master; no spoken narration`
+    style: `${profile.style}; ${profile.instruments}; ${gender} lead vocalist singing in ${musicLanguage().name} with ${profile.emotion} emotion; layered backing choir enters only on the chorus sections; expressive human phrasing; clear diction; polished commercial master; no spoken narration`
   };
 
   const saveAudio = async (r: Response, contentType = 'audio/mpeg') => {
@@ -3278,6 +3330,131 @@ async function generateSunoMusic(song: MusicalSong): Promise<{ file: string; dur
 
   throw new PipelineError('suno_failed', 'Airforce returned a Suno response without audio bytes, a usable clip URL, or a task ID.');
 }
+/** ACE-Step 1.5 (open-source, MIT) via its official cloud API — free API key. Native async mode: release_task → query_result → download. */
+async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
+  if (!CFG.acestepKeys.length) throw new PipelineError('acestep_missing_key', 'ACESTEP_API_KEY is not set (free key: https://acemusic.ai/api-key).');
+  // Rotate the keys: start from a different key each run, fail over on auth / quota errors.
+  const order = CFG.acestepKeys.map((_, i) => CFG.acestepKeys[(i + CFG.partNumber) % CFG.acestepKeys.length]);
+  let lastErr: any = null;
+  for (const key of order) {
+    try { return await aceStepWithKey(song, key); }
+    catch (e: any) { lastErr = e; if (!/acestep_auth|acestep_quota/.test(String(e?.code || ''))) throw e; log(`ACE-Step key …${key.slice(-4)} refused (${e?.message}); trying the next key.`); }
+  }
+  throw lastErr || new PipelineError('acestep_failed', 'All ACE-Step keys were refused.');
+}
+async function aceStepWithKey(song: MusicalSong, apiKey: string): Promise<{ file: string; duration: number; taskId?: string }> {
+  const profile = musicalProfile();
+  const gender = CFG.gender === 'male' ? 'male' : 'female';
+  const target = IS_SHORTS ? 58 : Math.min(180, CFG.maxRenderSeconds > 0 ? CFG.maxRenderSeconds : 150);
+  const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8' };
+  const lyrics = song.sections.length ? song.sections.map((x) => `[${x.tag === 'prechorus' ? 'Pre-Chorus' : x.tag[0].toUpperCase() + x.tag.slice(1)}]\n${x.lyrics}`).join('\n\n') : cleanMusicLyrics(song.lyrics);
+  const body: any = {
+    prompt: `${profile.style}, ${profile.instruments}, ${gender} lead vocal singing in ${musicLanguage().name}, ${profile.emotion} emotion, backing choir on the chorus`,
+    lyrics, audio_duration: target, audio_format: 'mp3', batch_size: 1, vocal_language: musicLanguage().code, thinking: true,
+    ...(CFG.acestepModel ? { model: CFG.acestepModel } : {}),
+  };
+  const rel = await fetch(`${CFG.acestepBase}/release_task`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+  const rj: any = await rel.json().catch(() => ({}));
+  const taskId = String(rj?.data?.task_id || rj?.task_id || '').trim();
+  if (!rel.ok || !taskId) throw new PipelineError(rel.status === 401 || rel.status === 403 ? 'acestep_auth' : rel.status === 429 || /quota|limit|credit/i.test(JSON.stringify(rj)) ? 'acestep_quota' : 'acestep_failed', `ACE-Step request failed (HTTP ${rel.status}): ${JSON.stringify(rj?.error || rj).slice(0, 300)}`);
+  log(`🎵 ACE-Step task ${taskId.slice(0, 24)} accepted; waiting for the song…`);
+  for (let attempt = 0; attempt < 120; attempt++) {
+    await sleep(5000);
+    let q: Response;
+    try { q = await fetch(`${CFG.acestepBase}/query_result`, { method: 'POST', headers, body: JSON.stringify({ task_id_list: [taskId] }), signal: AbortSignal.timeout(30000) }); }
+    catch { continue; }
+    const qj: any = await q.json().catch(() => ({}));
+    if (!q.ok) { if (q.status === 429 || q.status >= 500) continue; throw new PipelineError('acestep_failed', `ACE-Step status check failed (HTTP ${q.status}).`); }
+    const item = Array.isArray(qj?.data) ? qj.data[0] : Array.isArray(qj) ? qj[0] : qj?.data;
+    const status = Number(item?.status ?? 0);
+    if (status === 2) throw new PipelineError('acestep_failed', `ACE-Step could not generate the song: ${String(item?.error || item?.result || 'failed').slice(0, 300)}`);
+    if (status !== 1) { if (attempt % 6 === 0) log(`🎵 ACE-Step still generating (${(attempt + 1) * 5}s)…`); continue; }
+    let res: any = item?.result;
+    if (typeof res === 'string') { try { res = JSON.parse(res); } catch { res = []; } }
+    const first = Array.isArray(res) ? res[0] : res;
+    const fileRef = String(first?.file || first?.audio_url || first?.url || '');
+    if (!fileRef) throw new PipelineError('acestep_failed', 'ACE-Step finished but returned no audio file.');
+    const url = /^https?:\/\//i.test(fileRef) ? fileRef : `${CFG.acestepBase}${fileRef.startsWith('/') ? '' : '/'}${fileRef}`;
+    const dl = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(180000) });
+    if (!dl.ok) throw new PipelineError('music_download_failed', `ACE-Step audio download failed: HTTP ${dl.status}`);
+    const out = path.join(WORK_DIR, `acestep_${crypto.randomBytes(4).toString('hex')}.mp3`);
+    fs.writeFileSync(out, Buffer.from(await dl.arrayBuffer()));
+    if (fs.statSync(out).size < 10000) throw new PipelineError('music_download_failed', 'ACE-Step returned an empty audio clip.');
+    return { file: out, duration: await probeDuration(out), taskId };
+  }
+  throw new PipelineError('acestep_timeout', `ACE-Step task ${taskId} did not finish within 10 minutes.`);
+}
+
+/** Google Lyria via the Gemini API (Interactions). PAID — only used when LYRIA_ENABLED=true and a billing-enabled Gemini key is set. */
+async function generateLyriaMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
+  if (!CFG.lyriaEnabled) throw new PipelineError('lyria_disabled', 'Lyria is off (set LYRIA_ENABLED=true; it needs a billing-enabled Gemini key).');
+  if (!CFG.geminiKeys.length) throw new PipelineError('lyria_missing_key', 'No Gemini API key is configured for Lyria.');
+  const profile = musicalProfile();
+  const gender = CFG.gender === 'male' ? 'male' : 'female';
+  const len = IS_SHORTS ? 'about 55 seconds long' : 'about 2 to 3 minutes long';
+  const input = `Create a ${profile.style} song in ${musicLanguage().name}, ${len}, with a ${gender} lead vocalist singing with ${profile.emotion} emotion over ${profile.instruments}, and a backing choir on every chorus. Use exactly these lyrics:\n\n${sectionLyricText(song.sections.length ? song.sections : [{ tag: 'verse', lyrics: cleanMusicLyrics(song.lyrics), emotion: profile.emotion }])}`;
+  let lastErr = '';
+  for (const key of CFG.geminiKeys) {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: CFG.lyriaModel, input }), signal: AbortSignal.timeout(300000),
+    }).catch((e) => { lastErr = String(e?.message || e); return null; });
+    if (!r) continue;
+    const j: any = await r.json().catch(() => ({}));
+    if (!r.ok) { lastErr = `HTTP ${r.status}: ${JSON.stringify(j?.error || j).slice(0, 240)}`; continue; }
+    const steps = Array.isArray(j?.steps) ? j.steps : Array.isArray(j?.outputs) ? j.outputs : [];
+    let b64 = '';
+    for (const st of steps) for (const c of (Array.isArray(st?.content) ? st.content : [st])) if (c?.type === 'audio' && c?.data) { b64 = String(c.data); break; }
+    if (!b64) { lastErr = 'Lyria returned no audio'; continue; }
+    const out = path.join(WORK_DIR, `lyria_${crypto.randomBytes(4).toString('hex')}.mp3`);
+    fs.writeFileSync(out, Buffer.from(b64, 'base64'));
+    if (fs.statSync(out).size < 10000) { lastErr = 'Lyria returned an empty clip'; continue; }
+    return { file: out, duration: await probeDuration(out) };
+  }
+  throw new PipelineError('lyria_failed', `Lyria music generation failed: ${lastErr || 'unknown error'}`);
+}
+
+const MUSIC_ENGINE_LABEL: Record<string, string> = { suno: 'Suno V5.5 (Api.Airforce)', acestep: 'ACE-Step 1.5', lyria: 'Google Lyria' };
+/** Tries each music engine in order (MUSIC_PROVIDERS). A dead/outaged engine never stops the run while another one works. */
+async function generateMusicTrack(song: MusicalSong): Promise<{ file: string; duration: number; engine: string }> {
+  const order = (CFG.musicProviders.length ? CFG.musicProviders : ['acestep', 'suno', 'lyria']).filter((p) => p in MUSIC_ENGINE_LABEL);
+  const available = order.filter((p) => (p === 'suno' ? !!CFG.airforceKey : p === 'acestep' ? CFG.acestepKeys.length > 0 : CFG.lyriaEnabled && CFG.geminiKeys.length > 0));
+  if (!available.length) throw new PipelineError('music_no_engine', 'No music engine is configured. Add ACESTEP_API_KEY (free: https://acemusic.ai/api-key) or AIRFORCE_API_KEY as a GitHub Actions secret.');
+  const errors: string[] = [];
+  for (const p of available) {
+    try {
+      await reportStatus('running', `2/6 Generating music (${MUSIC_ENGINE_LABEL[p]})`, 24, `Generating “${song.title}” with ${MUSIC_ENGINE_LABEL[p]}…`);
+      const g = p === 'suno' ? await generateSunoMusic(song) : p === 'acestep' ? await generateAceStepMusic(song) : await generateLyriaMusic(song);
+      if (g.duration < 5) throw new PipelineError('music_too_short', `${MUSIC_ENGINE_LABEL[p]} returned only ${g.duration.toFixed(1)}s of audio.`);
+      log(`🎵 Music generated with ${MUSIC_ENGINE_LABEL[p]}: ${g.duration.toFixed(1)}s.`);
+      return { file: g.file, duration: g.duration, engine: p };
+    } catch (e: any) {
+      const msg = String(e?.message || e).slice(0, 300);
+      errors.push(`${MUSIC_ENGINE_LABEL[p]}: ${msg}`);
+      log(`⚠️ ${MUSIC_ENGINE_LABEL[p]} failed (${msg}). ${p === available[available.length - 1] ? 'No more engines to try.' : 'Trying the next music engine…'}`);
+    }
+  }
+  throw new PipelineError('music_all_failed', `Every music engine failed — ${errors.join(' | ')}. Nothing was posted; the next run will retry.`);
+}
+
+/** Free word-level timing via Groq Whisper (used when the Airforce transcription is unavailable). */
+async function transcribeWithGroq(file: string): Promise<Word[]> {
+  for (const key of CFG.groqKeys) {
+    try {
+      const form = new FormData();
+      form.append('file', new Blob([fs.readFileSync(file)], { type: path.extname(file).toLowerCase() === '.wav' ? 'audio/wav' : 'audio/mpeg' }), path.basename(file));
+      form.append('model', 'whisper-large-v3-turbo'); form.append('response_format', 'verbose_json');
+      form.append('timestamp_granularities[]', 'word'); form.append('language', musicLanguage().code);
+      const r = await fetch(`${CFG.groqBase.replace(/\/+$/, '')}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(180000) });
+      if (!r.ok) continue;
+      const j: any = await r.json().catch(() => ({}));
+      const words = Array.isArray(j?.words) ? j.words.filter((w: any) => Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end))).map((w: any) => ({ text: String(w.word ?? w.text ?? '').trim(), start: Number(w.start), end: Number(w.end) })).filter((w: Word) => w.text) : [];
+      if (words.length) return words;
+    } catch {}
+  }
+  return [];
+}
+
 async function transcribeMusicAudio(file: string): Promise<Word[]> {
   if (!CFG.airforceKey) return [];
   const form = new FormData();
@@ -3285,12 +3462,22 @@ async function transcribeMusicAudio(file: string): Promise<Word[]> {
   const ext = path.extname(file).toLowerCase();
   const mime = ext === '.wav' ? 'audio/wav' : 'audio/mpeg';
   form.append('file', new Blob([bytes], { type: mime }), path.basename(file));
-  form.append('model', 'elevenlabs-scribe'); form.append('language_code', 'en'); form.append('diarize', 'false');
+  form.append('model', 'elevenlabs-scribe'); form.append('language_code', musicLanguage().code); form.append('diarize', 'false');
   form.append('tag_audio_events', 'true'); form.append('timestamps_granularity', 'word');
-  const r = await fetch(`${CFG.airforceBase}/v1/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${CFG.airforceKey}` }, body: form, signal: AbortSignal.timeout(240000) });
-  if (!r.ok) { log(`⚠️ Musical transcription failed (HTTP ${r.status}); using estimated lyric timing.`, 'warn'); return []; }
+  const r = await fetch(`${CFG.airforceBase}/v1/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${CFG.airforceKey}` }, body: form, signal: AbortSignal.timeout(240000) }).catch(() => null);
+  if (!r) return [];
+  if (!r.ok) { log(`⚠️ Airforce transcription failed (HTTP ${r.status}); trying Groq Whisper.`); return []; }
   const j: any = await r.json().catch(() => ({}));
   return Array.isArray(j?.words) ? j.words.filter((w: any) => w?.type === 'word' && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end))).map((w: any) => ({ text: String(w.text), start: Number(w.start), end: Number(w.end) })) : [];
+}
+async function transcribeSong(file: string): Promise<Word[]> {
+  let words: Word[] = [];
+  try { words = await transcribeMusicAudio(file); } catch (e: any) { log(`⚠️ Airforce transcription error (${e?.message || e}).`); }
+  if (words.length > 5) return words;
+  words = await transcribeWithGroq(file);
+  if (words.length > 5) { log(`Lyric timing from Groq Whisper (${words.length} words).`); return words; }
+  log('⚠️ No transcription available; using estimated lyric timing.');
+  return [];
 }
 function timingForMusic(song: MusicalSong, transcript: Word[], duration: number): { words: Word[]; sections: { start: number; end: number; tag: string; emotion: string }[] } {
   const base = transcript.length ? alignWords(transcript, cleanMusicLyrics(song.lyrics)) : [];
@@ -3324,26 +3511,25 @@ function timingForMusic(song: MusicalSong, transcript: Word[], duration: number)
 async function produceMusical(t0: number, pastTitles: string[]): Promise<number> {
   await reportStatus('running', '1/6 Writing the original song', 10, `Writing a ${CFG.subGenre || 'musical'} song for a ${CFG.gender} lead singer…`);
   const song = await writeMusicalSong(pastTitles);
-  await reportStatus('running', '2/6 Generating Suno V5.5 music', 24, `Generating “${song.title}” with the Airforce Suno V5.5 endpoint…`);
-  const generated = await generateSunoMusic(song);
-  if (generated.duration < 5) throw new PipelineError('suno_failed', `Suno returned an unexpectedly short track (${generated.duration.toFixed(1)}s).`);
-  const transcript = await transcribeMusicAudio(generated.file);
+  const generated = await generateMusicTrack(song);
+  const engineName = generated.engine === 'acestep' ? 'ace-step-1.5' : generated.engine === 'lyria' ? 'google-lyria' : 'suno-v5.5';
+  const transcript = await transcribeSong(generated.file);
   const timing = timingForMusic(song, transcript, generated.duration);
   const cues = timing.sections.flatMap((sg) => [{ t: sg.start, tag: sg.emotion }, ...(sg.tag === 'chorus' ? [{ t: sg.start + 0.15, tag: 'excited' }] : [])]).filter((x) => EMOTION_TAGS.includes(x.tag));
   const chorusIntervals = timing.sections.filter((s) => s.tag === 'chorus').map((s) => ({ start: s.start, end: s.end }));
   await reportStatus('running', '3/6 Building the music-video performance', 45, `Timed ${timing.words.length} words; ${chorusIntervals.length} chorus sections will bring in the choir.`);
-  const narration: Narration = { audioPath: generated.file, duration: generated.duration, words: timing.words, wordsReliable: transcript.length > 5, engine: 'suno-v5.5', neural: true };
+  const narration: Narration = { audioPath: generated.file, duration: generated.duration, words: timing.words, wordsReliable: transcript.length > 5, engine: engineName, neural: true };
   const title = song.title;
   const badge = (CFG.subGenre || 'MUSICAL').toUpperCase().slice(0, 24);
   const endCard = 'Follow for the next original song';
-  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })), times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals });
+  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })), times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals, musical: { stageId: CFG.stageId || 0, stageAutoSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`, style: CFG.subGenre || '', sections: timing.sections } });
   if (!stage.ok) throw new PipelineError('musical_render_failed', `Musical stage render failed: ${stage.reason || 'unknown error'}`);
   const outDur = await probeDuration(OUTPUT_VIDEO);
   if (outDur < 5) throw new PipelineError('musical_render_failed', `Rendered musical video is only ${outDur.toFixed(1)}s long.`);
-  const tags = Array.from(new Set([...(song.tags || []), ...(song.hashtags || []), 'suno-v5.5', 'music video']));
+  const tags = Array.from(new Set([...(song.tags || []), ...(song.hashtags || []), engineName, 'music video']));
   const hashtagLine = youtubeHashtagLine([...(song.hashtags || musicHashtags(CFG.subGenre)), ...(IS_SHORTS ? ['shorts'] : [])]);
   const description = sanitizeYouTubeDescription([song.description, `🎤 Lead singer: ${CFG.gender}.`, `🎵 Style: ${CFG.subGenre || 'Musical'}.`, '🎬 Original cinematic music video with live-style stage performance, microphone, choir chorus, lip-sync and timed captions.', hashtagLine].join('\n\n'));
-  fs.writeFileSync(OUTPUT_META, JSON.stringify({ campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect, title, description, hashtags: song.hashtags, tags, model: 'suno-v5.5', lyrics: song.lyrics, sections: timing.sections, cues, voice: 'suno-v5.5', character: stage.character, durationSec: outDur, createdAt: new Date().toISOString() }, null, 2));
+  fs.writeFileSync(OUTPUT_META, JSON.stringify({ campaignId: CFG.campaignId, partNumber: CFG.partNumber, format: CFG.format, aspect: CFG.aspect, title, description, hashtags: song.hashtags, tags, model: engineName, lyrics: song.lyrics, sections: timing.sections, cues, voice: engineName, character: stage.character, durationSec: outDur, createdAt: new Date().toISOString() }, null, 2));
   const libId = await saveToLibrary({ title, topic: CFG.topic || CFG.subGenre, kind: 'musical', durationSec: Math.round(outDur), width: W, height: H });
   const picked = await pickBestFrame(OUTPUT_VIDEO, outDur, chorusIntervals.map((c) => ({ t: c.start + 1, w: 0.9 })));
   await saveLibraryThumbnail(libId, picked?.file || null);
@@ -3353,7 +3539,7 @@ async function produceMusical(t0: number, pastTitles: string[]): Promise<number>
     let done = 0; const totalTargets = Number(WANT.youtube) + Number(WANT.facebook) + Number(WANT.instagram) + Number(WANT.threads);
     const attemptPublish = async (platform: string, fn: () => Promise<string>, message: string) => {
       await reportStatus('running', '6/6 Publishing the music video', Math.min(98, 82 + Math.round((done / Math.max(1, totalTargets)) * 16)), message);
-      for (let attempt = 1; attempt <= 3; attempt++) { try { const u = await fn(); done++; return u; } catch (e: any) { if (attempt === 3) publishErrors[platform] = String(e?.message || e).slice(0, 500); else await sleep(4000 * attempt); } }
+      for (let attempt = 1; attempt <= 3; attempt++) { try { const u = await fn(); done++; return u; } catch (e: any) { if (attempt === 3) { publishErrors[platform] = String(e?.message || e).slice(0, 500); log(`❌ ${platform} publish failed after 3 attempts: ${publishErrors[platform]}`); } else await sleep(4000 * attempt); } }
       return '';
     };
     if (WANT.youtube) {
@@ -3367,7 +3553,7 @@ async function produceMusical(t0: number, pastTitles: string[]): Promise<number>
     }
     if (!published && !Object.keys(socialPublished).length) throw new PipelineError('publish_failed', Object.values(publishErrors)[0] || 'All selected publishing destinations rejected the music video.');
   }
-  const episode = await appRequest('POST', `${campaignPath()}/episodes`, { partNumber: CFG.partNumber, title, script: song.lyrics, description, youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published || Object.keys(socialPublished).length > 0, socialUrls: socialPublished, socialErrors: publishErrors, privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect, durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl, model: 'suno-v5.5', voice: 'suno-v5.5', character: stage.character });
+  const episode = await appRequest('POST', `${campaignPath()}/episodes`, { partNumber: CFG.partNumber, title, script: song.lyrics, description, youtubeUrl: published?.url || '', videoId: published?.videoId || '', published: !!published || Object.keys(socialPublished).length > 0, socialUrls: socialPublished, socialErrors: publishErrors, privacyStatus: published?.privacy || '', format: CFG.format, aspectRatio: CFG.aspect, durationSec: Math.round(outDur), runId: CFG.runId, runUrl: CFG.runUrl, model: engineName, voice: engineName, character: stage.character });
   if (CFG.campaignId && CFG.appUrl && (!episode || episode.status >= 300)) console.warn(`⚠️ Could not record the musical episode in the app (${episode ? `HTTP ${episode.status}` : 'app unreachable'}).`);
   const secs = ((Date.now() - t0) / 1000).toFixed(0), links = [published?.url, ...Object.values(socialPublished)].filter(Boolean);
   await reportStatus('completed', links.length ? 'Published' : 'Video rendered', 100, links.length ? `✅ Musical video published in ${secs}s: ${links.join(' · ')}` : `✅ Musical video rendered in ${secs}s (not published).`, { youtubeUrl: published?.url || '', socialUrls: socialPublished, socialErrors: publishErrors });

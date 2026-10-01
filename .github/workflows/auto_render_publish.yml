@@ -122,10 +122,16 @@ jobs:
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Required for the Musical content type. Store this in the repository as AIRFORCE_API_KEY.
+          # Musical: Suno V5.5 through Api.Airforce (first music engine tried).
           AIRFORCE_API_KEY: ${{ secrets.AIRFORCE_API_KEY }}
           # Optional: only needed when your Airforce tenant exposes a Suno music task status URL.
           AIRFORCE_MUSIC_STATUS_URL_TEMPLATE: ${{ secrets.AIRFORCE_MUSIC_STATUS_URL_TEMPLATE }}
+          # Free backup music engine for Musical automations (used automatically when Suno fails).
+          # Get a free key at https://acemusic.ai/api-key and store it as ACESTEP_API_KEY.
+          ACESTEP_API_KEY: ${{ secrets.ACESTEP_API_KEY }}
+          # Optional: order of music engines (default suno,acestep,lyria) and the paid Google Lyria fallback.
+          MUSIC_PROVIDERS: ${{ vars.MUSIC_PROVIDERS }}
+          LYRIA_ENABLED: ${{ vars.LYRIA_ENABLED }}
           # Optional: better / faster scene images.
           POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
