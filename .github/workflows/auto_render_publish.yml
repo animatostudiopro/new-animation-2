@@ -85,6 +85,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Cache the vocal separator (Musical automations)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/torch
+          key: animato-demucs-v1-${{ runner.os }}
+
       - name: Install FFmpeg, fonts and voice engine
         run: |
           sudo apt-get update -qq
@@ -128,6 +136,8 @@ jobs:
           ACESTEP_API_KEY: ${{ secrets.ACESTEP_API_KEY }}
           # Optional: max minutes to wait for ACE-Step per run (default 12).
           ACESTEP_MAX_MINUTES: ${{ vars.ACESTEP_MAX_MINUTES }}
+          # Optional: STEM_SEPARATION=off skips the vocal/drum separation for Musical videos.
+          STEM_SEPARATION: ${{ vars.STEM_SEPARATION }}
           # Optional: self-hosted ACE-Step server (ACESTEP_MODE=native uses /release_task).
           ACESTEP_BASE: ${{ vars.ACESTEP_BASE }}
           ACESTEP_MODE: ${{ vars.ACESTEP_MODE }}

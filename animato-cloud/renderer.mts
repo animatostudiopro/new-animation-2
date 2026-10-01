@@ -2468,7 +2468,8 @@ async function renderWithStage(opts: {
   title: string; badge: string; endCard: string; music: string | null; duration: number; credits?: (string | null)[]; musicalStage?: boolean; chorusIntervals?: { start: number; end: number }[];
   /** Override the canvas the stage renders at (used for ads that render landscape then get framed into a Short — see adLandscapeShort). Defaults to the job's actual frame. */
   size?: { w: number; h: number };
-  musical?: { stageId?: number; stageAutoSeed?: string; style?: string; sections?: { start: number; end: number; tag: string; emotion?: string }[] };
+  musical?: { stageId?: number; stageAutoSeed?: string; style?: string; sections?: { start: number; end: number; tag: string; emotion?: string }[]; vocalSpans?: { start: number; end: number }[]; drumLevel?: number; keysLevel?: number };
+  stems?: Stems;
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
@@ -2488,6 +2489,8 @@ async function renderWithStage(opts: {
     // A different outfit (same person) in every video of this automation.
     wardrobeSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`,
     ...(opts.musical ? { musical: opts.musical, musicalStyle: opts.musical.style || '' } : {}),
+    // Isolated stems (when separation worked): vocals drive the lip sync, drums the drummer, other the pianist.
+    ...(opts.stems ? { lipAudio: '/audio/vocals.wav', ...(opts.stems.drums ? { drumsAudio: '/audio/drums.wav' } : {}), ...(opts.stems.other ? { keysAudio: '/audio/other.wav' } : {}) } : {}),
     gender: CFG.gender,
     format: CFG.format,
     fontUrl: '/font/Poppins-Bold.ttf'
@@ -2497,7 +2500,7 @@ async function renderWithStage(opts: {
   const r = await runStage({
     stageFile: 'stage.js', job, duration: opts.duration,
     audio: audioArgs(opts.narration.audioPath, opts.music, 1),
-    files: { [`/audio/narration${audioExt2}`]: opts.narration.audioPath },
+    files: { [`/audio/narration${audioExt2}`]: opts.narration.audioPath, ...(opts.stems ? { '/audio/vocals.wav': opts.stems.vocals, ...(opts.stems.drums ? { '/audio/drums.wav': opts.stems.drums } : {}), ...(opts.stems.other ? { '/audio/other.wav': opts.stems.other } : {}) } : {}) },
     size: opts.size
   });
   return { ok: r.ok, character: r.character || 'none', reason: r.reason };
@@ -3167,12 +3170,17 @@ async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; 
   }
   throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (tried every key for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
 }
+/** Set on a regeneration when the first song came out in the wrong voice. */
+let aceGenderBoost = false;
 function aceStepRequest(song: MusicalSong) {
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
   const target = IS_SHORTS ? 58 : Math.min(180, CFG.maxRenderSeconds > 0 ? CFG.maxRenderSeconds : 150);
   const lyrics = song.sections.length ? song.sections.map((x) => `[${x.tag === 'prechorus' ? 'Pre-Chorus' : x.tag[0].toUpperCase() + x.tag.slice(1)}]\n${x.lyrics}`).join('\n\n') : cleanMusicLyrics(song.lyrics);
-  const prompt = `${profile.style}, ${profile.instruments}, ${gender} lead vocal singing in ${musicLanguage().name}, ${profile.emotion} emotion, backing choir on the chorus`;
+  const voice = gender === 'female'
+    ? 'female vocals, solo female singer, woman lead voice, feminine vocal tone'
+    : 'male vocals, solo male singer, man lead voice, masculine vocal tone';
+  const prompt = `${voice}${aceGenderBoost ? (gender === 'female' ? ', high female voice, no male vocals' : ', deep male voice, no female vocals') : ''}, ${profile.style}, ${profile.instruments}, sung in ${musicLanguage().name}, ${profile.emotion} emotion, ${gender} backing harmonies on the chorus`;
   return { prompt, lyrics, target, lang: musicLanguage().code };
 }
 const aceErrCode = (status: number, body: string) => status === 401 || status === 403 ? 'acestep_auth' : status === 429 || /quota|limit|credit|insufficient/i.test(body) ? 'acestep_quota' : status >= 500 || status === 408 ? 'acestep_busy' : 'acestep_failed';
@@ -3188,7 +3196,7 @@ async function aceStepNative(song: MusicalSong, apiKey: string, fast: boolean): 
   // "thinking" (the 5Hz planning LM) gives better songs but is slower; the retry rounds switch it off.
   const body: any = {
     prompt: r.prompt, lyrics: r.lyrics, audio_duration: r.target, audio_format: 'mp3', batch_size: 1, vocal_language: r.lang,
-    thinking: !fast, ai_token: apiKey, ...(CFG.acestepModel ? { model: CFG.acestepModel } : {}),
+    thinking: !fast, use_cot_caption: false, ai_token: apiKey, ...(CFG.acestepModel ? { model: CFG.acestepModel } : {}),
   };
   let taskId = '';
   for (let attempt = 0; attempt < 3 && !taskId; attempt++) {
@@ -3262,7 +3270,8 @@ async function aceStepChat(song: MusicalSong, apiKey: string, stream: boolean, f
     model: await aceModel(apiKey),
     messages: [{ role: 'user', content: `<prompt>${r.prompt}</prompt>\n<lyrics>${r.lyrics}</lyrics>` }],
     audio_config: { duration: r.target, vocal_language: r.lang, instrumental: false, format: 'mp3' },
-    stream, thinking: !fast, use_format: false, sample_mode: false, batch_size: 1,
+    stream, thinking: !fast, use_format: false, sample_mode: false, use_cot_caption: false, batch_size: 1,
+    ...(aceGenderBoost ? { seed: Math.floor(Math.random() * 1e9) } : {}),
   };
   const res = await fetch(`${CFG.acestepBase}/v1/chat/completions`, {
     method: 'POST',
@@ -3387,6 +3396,114 @@ async function transcribeMusicAudio(file: string): Promise<Word[]> {
   const j: any = await r.json().catch(() => ({}));
   return Array.isArray(j?.words) ? j.words.filter((w: any) => w?.type === 'word' && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end))).map((w: any) => ({ text: String(w.text), start: Number(w.start), end: Number(w.end) })) : [];
 }
+
+// ---------------------------------------------------------------------------
+// Stem separation (Demucs, open-source, runs on the GitHub runner's CPU).
+// Vocals → lip sync + "is she singing right now" + voice check; drums → drummer; other → pianist.
+// Optional: any failure falls back to the full mix.
+// ---------------------------------------------------------------------------
+interface Stems { vocals: string; drums?: string; other?: string; bass?: string }
+let demucsReady: boolean | null = null;
+async function separateStems(file: string, duration: number): Promise<Stems | null> {
+  if ((ENV.STEM_SEPARATION || '').toLowerCase() === 'off') return null;
+  const python = ENV.PYTHON || 'python3';
+  const t0 = Date.now();
+  try {
+    if (demucsReady === null) {
+      const chk = await run(python, ['-c', 'import demucs, torch, soundfile'], { timeoutMs: 90000 });
+      if (chk.code !== 0) {
+        await reportStatus('running', '2/6 Preparing the vocal separator', 30, 'Installing the open-source vocal/drum separator (first run only, ~1–2 min)…');
+        const pipArgs = ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--no-warn-script-location'];
+        const a = await run(python, [...pipArgs, 'torch==2.3.1', 'torchaudio==2.3.1', '--index-url', 'https://download.pytorch.org/whl/cpu'], { timeoutMs: 8 * 60000 });
+        if (a.code !== 0) throw new Error(`torch install failed: ${a.stderr.slice(-300)}`);
+        const b = await run(python, [...pipArgs, 'demucs==4.0.1', 'soundfile', 'numpy<2'], { timeoutMs: 6 * 60000 });
+        if (b.code !== 0) throw new Error(`demucs install failed: ${b.stderr.slice(-300)}`);
+      }
+      demucsReady = true;
+    }
+    if (!demucsReady) return null;
+    await reportStatus('running', '2/6 Separating vocals, drums and keys', 34, 'Splitting the song into vocals / drums / instruments for exact lip sync and band timing…');
+    const out = path.join(WORK_DIR, 'stems');
+    const r = await run(python, ['-m', 'demucs', '-n', 'htdemucs', '-d', 'cpu', '-j', '2', '-o', out, file], { timeoutMs: Math.round((4 + (duration / 60) * 4) * 60000) });
+    const dir = path.join(out, 'htdemucs', path.basename(file, path.extname(file)));
+    const pathOf = (n: string) => { const f = path.join(dir, `${n}.wav`); return fs.existsSync(f) && fs.statSync(f).size > 10000 ? f : undefined; };
+    const vocals = pathOf('vocals');
+    if (r.code !== 0 || !vocals) throw new Error(`demucs failed (code ${r.code}): ${r.stderr.slice(-300)}`);
+    log(`🎚 Stems ready in ${((Date.now() - t0) / 1000).toFixed(0)}s (vocals${pathOf('drums') ? ', drums' : ''}${pathOf('other') ? ', other' : ''}).`);
+    return { vocals, drums: pathOf('drums'), other: pathOf('other'), bass: pathOf('bass') };
+  } catch (e: any) {
+    demucsReady = false;
+    log(`⚠️ Stem separation unavailable (${String(e?.message || e).slice(0, 300)}); using the full mix.`);
+    return null;
+  }
+}
+/** Mono 8 kHz samples of an audio file (for level / pitch analysis). */
+async function pcmOf(file: string, rate = 8000): Promise<Float32Array> {
+  const r = await run('ffmpeg', ['-v', 'error', '-i', file, '-ac', '1', '-ar', String(rate), '-f', 's16le', '-'], { timeoutMs: 120000 });
+  const b = r.stdout, n = Math.floor(b.length / 2), a = new Float32Array(n);
+  for (let i = 0; i < n; i++) a[i] = b.readInt16LE(i * 2) / 32768;
+  return a;
+}
+const rmsFrames = (a: Float32Array, rate: number, hop = 0.02) => {
+  const step = Math.round(rate * hop), out: number[] = [];
+  for (let i = 0; i + step <= a.length; i += step) { let s = 0; for (let j = i; j < i + step; j++) s += a[j] * a[j]; out.push(Math.sqrt(s / step)); }
+  return out;
+};
+/** When is the singer actually singing? Spans of vocal activity from the isolated vocal track. */
+async function vocalSpansOf(vocals: string): Promise<{ start: number; end: number }[]> {
+  const a = await pcmOf(vocals), hop = 0.02, fr = rmsFrames(a, 8000, hop);
+  if (!fr.length) return [];
+  const sorted = [...fr].sort((x, y) => x - y), p95 = sorted[Math.floor(sorted.length * 0.95)] || 0;
+  if (p95 < 0.004) return [];
+  const on = Math.max(0.006, p95 * 0.16), off = on * 0.6;
+  const spans: { start: number; end: number }[] = [];
+  let cur: { start: number; end: number } | null = null;
+  fr.forEach((v, i) => {
+    const t = i * hop;
+    if (!cur && v > on) cur = { start: t, end: t + hop };
+    else if (cur && v > off) cur.end = t + hop;
+    else if (cur && t - cur.end > 0.16) { spans.push(cur); cur = null; }
+  });
+  if (cur) spans.push(cur);
+  // Merge tiny breaths, drop clicks.
+  const merged: { start: number; end: number }[] = [];
+  for (const sp of spans) { const last = merged[merged.length - 1]; if (last && sp.start - last.end < 0.22) last.end = sp.end; else merged.push({ ...sp }); }
+  return merged.filter((sp) => sp.end - sp.start >= 0.14).map((sp) => ({ start: +sp.start.toFixed(2), end: +sp.end.toFixed(2) }));
+}
+/** Level of one stem relative to the whole song (0..1+). */
+async function stemLevel(stem: string, mix: string): Promise<number> {
+  const rm = (a: Float32Array) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / Math.max(1, a.length)); };
+  const [x, y] = await Promise.all([pcmOf(stem), pcmOf(mix)]);
+  return rm(x) / Math.max(1e-6, rm(y));
+}
+/** Median sung pitch (Hz) of the isolated vocals — YIN on the loud, voiced frames. */
+async function medianPitch(vocals: string, spans: { start: number; end: number }[]): Promise<number> {
+  const rate = 16000, a = await pcmOf(vocals, rate), N = 1024, hop = 640, minLag = Math.floor(rate / 900), maxLag = Math.floor(rate / 70);
+  const inSpan = (t: number) => spans.some((sp) => t >= sp.start && t <= sp.end);
+  const fr = rmsFrames(a, rate, hop / rate), sorted = [...fr].sort((p, q) => p - q), loud = sorted[Math.floor(sorted.length * 0.6)] || 0;
+  const f0s: number[] = [];
+  const d = new Float32Array(maxLag + 1);
+  for (let i = 0, k = 0; i + N + maxLag < a.length; i += hop, k++) {
+    if (!inSpan(i / rate) || (fr[k] || 0) < loud) continue;
+    for (let tau = 1; tau <= maxLag; tau++) { let sum = 0; for (let j = 0; j < N; j++) { const v = a[i + j] - a[i + j + tau]; sum += v * v; } d[tau] = sum; }
+    let run = 0, best = -1;
+    for (let tau = 1; tau <= maxLag; tau++) {
+      run += d[tau];
+      const cm = run > 0 ? (d[tau] * tau) / run : 1;
+      if (tau >= minLag && cm < 0.15) { while (tau + 1 <= maxLag && d[tau + 1] < d[tau]) tau++; best = tau; break; }
+    }
+    if (best > 0) f0s.push(rate / best);
+  }
+  if (f0s.length < 20) return 0;
+  f0s.sort((p, q) => p - q);
+  return f0s[Math.floor(f0s.length / 2)];
+}
+/** Does the voice clearly contradict the chosen singer? (conservative: only obvious mismatches) */
+function voiceMismatch(f0: number): boolean {
+  if (!f0) return false;
+  return CFG.gender === 'female' ? f0 < 175 : f0 > 360;
+}
+
 async function transcribeSong(file: string): Promise<Word[]> {
   let words: Word[] = [];
   try { words = await transcribeMusicAudio(file); } catch (e: any) { log(`⚠️ Airforce transcription error (${e?.message || e}).`); }
@@ -3428,9 +3545,33 @@ function timingForMusic(song: MusicalSong, transcript: Word[], duration: number)
 async function produceMusical(t0: number, pastTitles: string[]): Promise<number> {
   await reportStatus('running', '1/6 Writing the original song', 10, `Writing a ${CFG.subGenre || 'musical'} song for a ${CFG.gender} lead singer…`);
   const song = await writeMusicalSong(pastTitles);
-  const generated = await generateMusicTrack(song);
+  let generated = await generateMusicTrack(song);
   const engineName = generated.engine === 'lyria' ? 'google-lyria' : 'ace-step-1.5';
-  const transcript = await transcribeSong(generated.file);
+  let stems = await separateStems(generated.file, generated.duration);
+  let vocalSpans = stems ? await vocalSpansOf(stems.vocals).catch(() => []) : [];
+  // Voice check: the song must be sung by the singer the user chose (female / male).
+  if (stems && vocalSpans.length) {
+    const f0 = await medianPitch(stems.vocals, vocalSpans).catch(() => 0);
+    log(`🎤 Lead voice pitch ≈ ${f0 ? f0.toFixed(0) + ' Hz' : 'unknown'} (wanted ${CFG.gender}).`);
+    if (voiceMismatch(f0) && generated.engine === 'acestep') {
+      log(`⚠️ The song came out in a ${CFG.gender === 'female' ? 'male' : 'female'}-sounding voice — regenerating once with a stronger ${CFG.gender} voice prompt.`);
+      await reportStatus('running', '2/6 Regenerating (wrong singer voice)', 30, `The first take did not sound ${CFG.gender}; making a new take with a ${CFG.gender} singer…`);
+      aceGenderBoost = true;
+      try {
+        const again = await generateMusicTrack(song);
+        const st2 = await separateStems(again.file, again.duration);
+        const sp2 = st2 ? await vocalSpansOf(st2.vocals).catch(() => []) : [];
+        const f2 = st2 && sp2.length ? await medianPitch(st2.vocals, sp2).catch(() => 0) : 0;
+        log(`🎤 Second take pitch ≈ ${f2 ? f2.toFixed(0) + ' Hz' : 'unknown'}.`);
+        if (!voiceMismatch(f2) || Math.abs((f2 || 0) - (CFG.gender === 'female' ? 300 : 150)) < Math.abs(f0 - (CFG.gender === 'female' ? 300 : 150))) { generated = again; stems = st2; vocalSpans = sp2; }
+      } catch (e: any) { log(`⚠️ Second take failed (${e?.message || e}); keeping the first.`); }
+    }
+  }
+  const drumLevel = stems?.drums ? await stemLevel(stems.drums, generated.file).catch(() => -1) : -1;
+  const keysLevel = stems?.other ? await stemLevel(stems.other, generated.file).catch(() => -1) : -1;
+  if (stems) log(`🎚 ${vocalSpans.length} sung phrases; drums level ${drumLevel.toFixed(2)}, keys/other level ${keysLevel.toFixed(2)}.`);
+  // Transcribe the isolated vocals when we have them (far cleaner than the full mix).
+  const transcript = await transcribeSong(stems?.vocals || generated.file);
   const timing = timingForMusic(song, transcript, generated.duration);
   const cues = timing.sections.flatMap((sg) => [{ t: sg.start, tag: sg.emotion }, ...(sg.tag === 'chorus' ? [{ t: sg.start + 0.15, tag: 'excited' }] : [])]).filter((x) => EMOTION_TAGS.includes(x.tag));
   const chorusIntervals = timing.sections.filter((s) => s.tag === 'chorus').map((s) => ({ start: s.start, end: s.end }));
@@ -3439,7 +3580,7 @@ async function produceMusical(t0: number, pastTitles: string[]): Promise<number>
   const title = song.title;
   const badge = (CFG.subGenre || 'MUSICAL').toUpperCase().slice(0, 24);
   const endCard = 'Follow for the next original song';
-  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })), times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals, musical: { stageId: CFG.stageId || 0, stageAutoSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`, style: CFG.subGenre || '', sections: timing.sections } });
+  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })), times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals, musical: { stageId: CFG.stageId || 0, stageAutoSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`, style: CFG.subGenre || '', sections: timing.sections, vocalSpans, drumLevel, keysLevel }, stems: stems || undefined });
   if (!stage.ok) throw new PipelineError('musical_render_failed', `Musical stage render failed: ${stage.reason || 'unknown error'}`);
   const outDur = await probeDuration(OUTPUT_VIDEO);
   if (outDur < 5) throw new PipelineError('musical_render_failed', `Rendered musical video is only ${outDur.toFixed(1)}s long.`);
