@@ -1641,6 +1641,8 @@ async function aiImage(prompt: string, seed: number, file: string): Promise<'ai'
 // ---------------------------------------------------------------------------
 interface WebImage {
   url: string;
+  /** Page to send as Referer when downloading (Wikimedia rate-limits image requests without one). */
+  referer?: string;
   /** Short on-screen credit, e.g. "Photo: Jane Doe · CC BY 4.0". */
   credit: string;
   kind: 'screenshot' | 'wiki' | 'library' | 'product' | 'advertiser';
@@ -1719,7 +1721,7 @@ async function advertiserImages(url: string): Promise<WebImage[]> {
 
 /** Wikimedia Commons files with their license, author and file page (only reusable ones are kept). */
 async function commonsFiles(params: string, forAds = false): Promise<WebImage[]> {
-  const d = await fetchJson(`${CFG.commonsApiBase}?action=query&format=json&origin=*&${params}&prop=imageinfo&iiprop=url|size|mime|extmetadata&iiurlwidth=1600`);
+  const d = await fetchJson(`${CFG.commonsApiBase}?action=query&format=json&origin=*&${params}&prop=imageinfo&iiprop=url|size|mime|extmetadata&iiurlwidth=1280`);
   const pages = (Object.values(d?.query?.pages || {}) as any[]).sort((a, b) => (a.index || 0) - (b.index || 0));
   const out: WebImage[] = [];
   for (const p of pages) {
@@ -1735,7 +1737,7 @@ async function commonsFiles(params: string, forAds = false): Promise<WebImage[]>
     const page = ii.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(String(p.title || ''))}`;
     const licUrl = plain(md.LicenseUrl?.value || '');
     const desc = plain(md.ImageDescription?.value || '').slice(0, 300);
-    out.push({ url, credit: shortCredit(author, lic), kind: 'library', meta: `${title} ${desc} ${plain(md.Categories?.value || '').replace(/\|/g, ' ')}`,
+    out.push({ url, referer: page, credit: shortCredit(author, lic), kind: 'library', meta: `${title} ${desc} ${plain(md.Categories?.value || '').replace(/\|/g, ' ')}`,
       attribution: `"${title}" by ${author || 'unknown author'} — ${lic}${licUrl ? ` (${licUrl})` : ''} — ${page}` });
   }
   return out;
@@ -2058,10 +2060,20 @@ async function framedScreenshot(png: string, pageUrl: string, out: string): Prom
 /** Download a real image, reject tiny / duplicate ones, normalise to JPEG. */
 const usedImageHashes = new Set<string>();
 const usedImageUrls = new Set<string>();
+const WIKI_UA = 'AnimatoAutoPoster/5.1 (https://github.com/animato-auto-poster; image credits shown in every video) Node.js';
 async function takeImage(img: WebImage, raw: string, out: string): Promise<boolean> {
   if (usedImageUrls.has(img.url)) return false;
   usedImageUrls.add(img.url);
-  if (!(await download(img.url, raw, 30000, { 'User-Agent': BROWSER_UA, Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' }))) return false;
+  // Wikimedia (since late 2025): images must be fetched with a descriptive bot User-Agent, a Referer and a
+  // standard thumbnail width (1280) — a browser-looking UA without a referer gets HTTP 429 (every picture failed).
+  const wm = /(^|\.)wikimedia\.org\//i.test(img.url.replace(/^https?:\/\//, ''));
+  const headers: Record<string, string> = wm
+    ? { 'User-Agent': WIKI_UA, Referer: img.referer || 'https://commons.wikimedia.org/', Accept: 'image/webp,image/jpeg,image/*;q=0.8' }
+    : { 'User-Agent': BROWSER_UA, Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' };
+  let ok = await download(img.url, raw, 30000, headers);
+  // Rate-limited thumbnail → try the next standard size down once.
+  if (!ok && wm && /\/1280px-/.test(img.url)) { await sleep(1500); ok = await download(img.url.replace('/1280px-', '/960px-'), raw, 30000, headers); }
+  if (!ok) return false;
   const [w, h] = await imageSize(raw);
   if (w < MIN_REAL_W || h < 300 || w / h > 4 || h / w > 4) return false;
   const hash = crypto.createHash('md5').update(fs.readFileSync(raw)).digest('hex');
@@ -2328,6 +2340,35 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     };
     const queue = script.scenes.map((_, i) => i);
     await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await fetchOne(queue.shift()!); }));
+    // Second chance for scenes still without a picture: the whole topic, looser matching (no vision veto),
+    // then an AI-made editorial illustration (credited as such). A blank or placeholder picture is never shown.
+    const missing = script.scenes.map((_, i) => i).filter((i) => !files[i]);
+    if (missing.length && !forAds) {
+      log(`Images: ${missing.length}/${n} scene(s) had no matching photo — trying the whole topic, then an illustration.`);
+      const topic = subject.split(/\s+/).slice(0, 6).join(' ');
+      let looseList: WebImage[] | null = null;
+      let aiMade = 0;
+      for (const i of missing) {
+        if (Date.now() > deadline + 120_000) break;
+        const s = script.scenes[i];
+        const raw = path.join(WORK_DIR, `scene_${i}.raw`), out = path.join(WORK_DIR, `scene_${i}.jpg`);
+        if (!looseList) looseList = [...await wikiImages(topic, false), ...await libraryImages(topic, false), ...await libraryImages(topic.split(/\s+/).slice(0, 3).join(' '), false)];
+        let got: WebImage | null = null;
+        for (const img of looseList) {
+          if (usedImageUrls.has(img.url)) continue;
+          if (img.meta && !metadataMatches(topic.split(/\s+/).slice(0, 3).join(' '), img.meta, false)) continue;
+          if (await takeImage(img, raw, out)) { got = img; break; }
+        }
+        if (got) { files[i] = out; credits[i] = got.credit; if (got.attribution && !attributions.includes(got.attribution)) attributions.push(got.attribution); continue; }
+        if (aiMade < 4 && cat !== 'cooking') {
+          const what = (s.imagePrompt || s.narration || topic).slice(0, 260);
+          const prompt = `Editorial ${cat === 'news' ? 'news' : 'documentary'} illustration: ${what}. Context: ${topic}. Realistic, cinematic lighting, wide establishing view, no text, no captions, no logos, no watermark, no identifiable real people`;
+          const ai = await aiImage(prompt, 4000 + i * 17, raw);
+          if (ai && await toJpeg(raw, out, ai === 'ai' ? 0.04 : 0)) { files[i] = out; credits[i] = 'AI-generated illustration'; aiMade++; aiCount++; }
+        }
+      }
+      log(`Images: second chance filled ${missing.filter((i) => files[i]).length}/${missing.length} (${aiMade} illustration(s)).`);
+    }
     // Leftover product photos still beat a repeated image for ads.
     for (let i = 0; i < n && productFiles.length; i++) if (!files[i]) { files[i] = productFiles[productCursor++ % productFiles.length]; credits[i] = 'Product image'; }
     script.imageAttributions = attributions;
@@ -3513,9 +3554,30 @@ async function transcribeSong(file: string): Promise<Word[]> {
   log('⚠️ No transcription available; using estimated lyric timing.');
   return [];
 }
-function timingForMusic(song: MusicalSong, transcript: Word[], duration: number): { words: Word[]; sections: { start: number; end: number; tag: string; emotion: string }[] } {
+/** Lay the lyric words over the moments she actually sings (vocal track), longer words taking longer. */
+function wordsOverSpans(text: string, spans: { start: number; end: number }[]): Word[] {
+  const toks = text.split(/\s+/).filter(Boolean);
+  const total = spans.reduce((n, sp) => n + (sp.end - sp.start), 0);
+  if (!toks.length || total <= 0) return [];
+  const weight = (w: string) => 0.6 + Math.min(12, w.replace(/[^\p{L}\p{N}]/gu, '').length) * 0.18;
+  const sumW = toks.reduce((n, w) => n + weight(w), 0);
+  const out: Word[] = [];
+  let si = 0, used = 0;
+  for (const w of toks) {
+    let need = (weight(w) / sumW) * total;
+    while (si < spans.length && spans[si].end - spans[si].start - used < 0.04) { si++; used = 0; }
+    if (si >= spans.length) break;
+    const sp = spans[si], start = sp.start + used;
+    const dur = Math.min(need, sp.end - start);
+    out.push({ text: w, start: +start.toFixed(3), end: +(start + Math.max(0.08, dur)).toFixed(3) });
+    used += dur;
+  }
+  return out;
+}
+function timingForMusic(song: MusicalSong, transcript: Word[], duration: number, vocalSpans: { start: number; end: number }[] = []): { words: Word[]; sections: { start: number; end: number; tag: string; emotion: string }[] } {
   const base = transcript.length ? alignWords(transcript, cleanMusicLyrics(song.lyrics)) : [];
-  const words = base.length > 5 ? base : estimateWordTimes(cleanMusicLyrics(song.lyrics), duration);
+  // No usable transcript: the lyrics go where she is really singing (never spread over the instrumental parts).
+  const words = base.length > 5 ? base : vocalSpans.length ? wordsOverSpans(cleanMusicLyrics(song.lyrics), vocalSpans) : estimateWordTimes(cleanMusicLyrics(song.lyrics), duration);
   const sections: { start: number; end: number; tag: string; emotion: string }[] = [];
   const totalWords = Math.max(1, song.lyrics.split(/\s+/).filter(Boolean).length);
   let cursor = 0;
@@ -3572,11 +3634,12 @@ async function produceMusical(t0: number, pastTitles: string[]): Promise<number>
   if (stems) log(`🎚 ${vocalSpans.length} sung phrases; drums level ${drumLevel.toFixed(2)}, keys/other level ${keysLevel.toFixed(2)}.`);
   // Transcribe the isolated vocals when we have them (far cleaner than the full mix).
   const transcript = await transcribeSong(stems?.vocals || generated.file);
-  const timing = timingForMusic(song, transcript, generated.duration);
+  const timing = timingForMusic(song, transcript, generated.duration, vocalSpans);
+  if (!transcript.length && vocalSpans.length) log(`Lyric timing: no transcript — ${timing.words.length} words laid over ${vocalSpans.length} sung phrases.`);
   const cues = timing.sections.flatMap((sg) => [{ t: sg.start, tag: sg.emotion }, ...(sg.tag === 'chorus' ? [{ t: sg.start + 0.15, tag: 'excited' }] : [])]).filter((x) => EMOTION_TAGS.includes(x.tag));
   const chorusIntervals = timing.sections.filter((s) => s.tag === 'chorus').map((s) => ({ start: s.start, end: s.end }));
   await reportStatus('running', '3/6 Building the music-video performance', 45, `Timed ${timing.words.length} words; ${chorusIntervals.length} chorus sections will bring in the choir.`);
-  const narration: Narration = { audioPath: generated.file, duration: generated.duration, words: timing.words, wordsReliable: transcript.length > 5, engine: engineName, neural: true };
+  const narration: Narration = { audioPath: generated.file, duration: generated.duration, words: timing.words, wordsReliable: transcript.length > 5 || vocalSpans.length > 0, engine: engineName, neural: true };
   const title = song.title;
   const badge = (CFG.subGenre || 'MUSICAL').toUpperCase().slice(0, 24);
   const endCard = 'Follow for the next original song';
