@@ -139,6 +139,8 @@ const CFG = {
   acestepKeys: keyList(AUTH.acestep_api_keys, AUTH.acestep_api_key, ENV.ACESTEP_API_KEYS, ENV.ACESTEP_API_KEY).concat(['8610e37f3cb54f3e96590563826526ff', '91ca7836737847fc99db7ffcccc716f0', '2efebedddf6a45b4a968282ce79aa90d']).filter((k, i, a) => k && a.indexOf(k) === i),
   acestepBase: pick(ENV.ACESTEP_BASE, 'https://api.acemusic.ai').replace(/\/+$/, ''),
   acestepModel: pick(ENV.ACESTEP_MODEL, ''),
+  // Musical song length (seconds). Default 30: intro → catchy chorus → outro, and fast to generate.
+  musicSeconds: Math.max(20, Math.min(180, parseInt(pick(ENV.MUSIC_SECONDS, '30'), 10) || 30)),
   // 'chat' = the hosted api.acemusic.ai (OpenAI-style /v1/chat/completions); 'native' = a self-hosted ACE-Step server (/release_task).
   acestepMode: pick(ENV.ACESTEP_MODE, 'chat').toLowerCase(),
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
@@ -3158,7 +3160,7 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   const gender = CFG.gender === 'male' ? 'male' : 'female';
   const already = pastTitles.slice(-20).join(' | ');
   const lang = musicLanguage();
-  const user = `Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro. The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. Aim for at least ${IS_SHORTS ? 90 : 220} lyric words. Previous titles to avoid repeating: ${already || '(none)'}`;
+  const user = `Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: intro (1–2 short lines that grab attention instantly, e.g. a call-out or vocal hook), chorus (4 short, very catchy lines built around one repeated hook phrase that people will remember after one listen — this is most of the song), outro (1–2 lines that land the hook one last time). No verses, no bridge.` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 40 ? `Use ${Math.round(CFG.musicSeconds * 1.5)}–${Math.round(CFG.musicSeconds * 2)} lyric words in total.` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
   let last = '';
   for await (const a of LLM.attempts({
     system: 'You are a professional songwriter and music-video creative director. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
@@ -3171,7 +3173,9 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
       if (!lyrics && sections.length) lyrics = sectionLyricText(sections);
       const hasChorus = sections.some((x) => x.tag === 'chorus');
       const words = lyricWordCount(lyrics);
-      if (String(j.title || '').trim() && words >= (IS_SHORTS ? 70 : 150) && hasChorus) {
+      if (String(j.title || '').trim() && words >= (CFG.musicSeconds <= 40 ? Math.round(CFG.musicSeconds * 1.1) : IS_SHORTS ? 70 : 150) && hasChorus) {
+        // Too many words for the length → keep intro + chorus (+ outro) so it fits and stays in sync.
+        if (CFG.musicSeconds <= 40 && words > CFG.musicSeconds * 2.4) { const keep = sections.filter((x) => ['intro', 'chorus', 'outro'].includes(x.tag)); if (keep.some((x) => x.tag === 'chorus')) { sections.splice(0, sections.length, ...keep); lyrics = cleanMusicLyrics(sectionLyricText(sections)); } }
         return {
           title: String(j.title).trim().slice(0, 90),
           description: String(j.description || `Original ${CFG.subGenre || 'musical'} song performed by a ${gender} lead singer with a cinematic stage and choir chorus.`).trim().slice(0, 1200),
@@ -3208,41 +3212,64 @@ async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; 
   const errors: string[] = [];
   aceStarted = Date.now();
   aceDeadline = aceStarted + CFG.acestepBudgetMin * 60 * 1000;
-  // The hosted service answers 504 (Cloudflare) when it is busy: keep cycling the keys, with short,
-  // growing pauses, for the whole time budget. "Thinking" (the slow planning model) is always off on the
-  // hosted API — it pushes generation past Cloudflare's ~100 s limit, which is what the 504s were.
-  let round = 0;
+  // The hosted service answers 504 (Cloudflare cuts any request at ~100 s) when it is overloaded.
+  // Each try: the next key, streaming (sync only every third try — it fails the same way when the server
+  // is slow). After two timeouts the song is shortened (a shorter take renders faster): 100% → 75% → 55%.
+  // "Thinking" is always off on the hosted API.
+  // A 30 s song is already short: only longer songs (MUSIC_SECONDS) get shortened.
+  const scales = CFG.musicSeconds <= 35 ? [1] : [1, 1, 0.75, 0.75, 0.55];
+  let attempt = 0, timeouts = 0;
   while (aceLeft() > 90000) {
-    if (round > 0) {
-      const wait = Math.min(60, 15 * round);
-      log(`🎵 ACE-Step busy on every key (round ${round}); waiting ${wait}s and trying again…`);
-      await aceStatus(`ACE-Step busy — retrying in ${wait}s (round ${round + 1})`);
-      await sleep(Math.min(wait * 1000, Math.max(0, aceLeft() - 90000)));
+    const key = order[attempt % order.length], tag = `key …${key.slice(-4)}`;
+    const mode: 'stream' | 'sync' | 'native' = modes[0] === 'native' && attempt % 3 === 0 ? 'native' : attempt % 3 === 2 ? 'sync' : 'stream';
+    const scale = scales[Math.min(timeouts, scales.length - 1)];
+    if (scale !== aceLengthScale) {
+      aceLengthScale = scale;
+      if (scale < 1) { trimSongTo(song, aceFullTarget() * scale); log(`🎵 ACE-Step keeps timing out — asking for a shorter take (${Math.round(aceFullTarget() * scale)}s).`); }
     }
-    for (const key of order) {
-      const tag = `key …${key.slice(-4)}`;
-      for (const mode of modes) {
-        if (aceLeft() < 90000) break;
-        await aceStatus(`${mode === 'stream' ? 'streaming' : mode} request · ${tag} · round ${round + 1}`);
-        try {
-          return mode === 'native' ? await aceStepNative(song, key, round > 0) : await aceStepChat(song, key, mode === 'stream', true);
-        } catch (e: any) {
-          errors.push(`${tag} ${mode}: ${String(e?.message || e).replace(/\{"type":"https:\/\/developers\.cloudflare[^}]*\}?/g, '(Cloudflare gateway timeout)').slice(0, 160)}`);
-          log(`⚠️ ACE-Step ${mode} mode on ${tag} failed (${String(e?.message || e).slice(0, 200)}).`);
-          if (e?.code === 'acestep_lyrics' || e?.code === 'acestep_auth') { if (e?.code === 'acestep_lyrics') throw e; break; }
-        }
-      }
+    await aceStatus(`${mode} request · ${tag} · try ${attempt + 1}${scale < 1 ? ` · ${Math.round(aceFullTarget() * scale)}s take` : ''}`);
+    try {
+      return mode === 'native' ? await aceStepNative(song, key, true) : await aceStepChat(song, key, mode === 'stream', true);
+    } catch (e: any) {
+      const msg = String(e?.message || e).replace(/\{"type":"https:\/\/developers\.cloudflare[^}]*\}?/g, '(Cloudflare gateway timeout)').replace(/acemusic\.ai \| 504: Gateway time-out.*$/i, '(Cloudflare gateway timeout)');
+      errors.push(`${tag} ${mode}: ${msg.slice(0, 140)}`);
+      log(`⚠️ ACE-Step ${mode} on ${tag} failed: ${msg.slice(0, 200)}`);
+      if (e?.code === 'acestep_lyrics') throw e;
+      if (/504|timeout|time-out|no song after/i.test(msg)) timeouts++;
+      else await sleep(Math.min(20000, Math.max(0, aceLeft() - 90000)));   // quota / network: short pause
     }
-    round++;
+    attempt++;
   }
   throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (its servers kept timing out — tried every key for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
 }
 /** Set on a regeneration when the first song came out in the wrong voice. */
 let aceGenderBoost = false;
+/** When the hosted service is too slow for a full song, a shorter song (it renders faster) is asked for. */
+let aceLengthScale = 1;
+const aceFullTarget = () => CFG.musicSeconds;
+/** Shorten the song in place to fit `seconds`: whole sections in order (always keeping the first chorus). */
+function trimSongTo(song: MusicalSong, seconds: number) {
+  if (!song.sections.length) return;
+  const wps = 2.1, budget = Math.max(30, seconds * wps * 0.92);
+  const out: MusicalSection[] = [];
+  let words = 0, hasChorus = false;
+  for (const sec of song.sections) {
+    const n = sec.lyrics.split(/\s+/).filter(Boolean).length;
+    if (out.length && words + n > budget && hasChorus) break;
+    if (out.length && words + n > budget * 1.25) break;
+    out.push(sec); words += n;
+    if (sec.tag === 'chorus') hasChorus = true;
+  }
+  if (out.length < song.sections.length) {
+    song.sections = out;
+    song.lyrics = out.map((x) => x.lyrics).join('\n\n');
+    log(`🎵 Song shortened to ${out.length} section(s) (~${words} words) for a ${Math.round(seconds)}s take.`);
+  }
+}
 function aceStepRequest(song: MusicalSong) {
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
-  const target = IS_SHORTS ? 58 : Math.min(180, CFG.maxRenderSeconds > 0 ? CFG.maxRenderSeconds : 150);
+  const target = Math.max(30, Math.round(aceFullTarget() * aceLengthScale));
   const lyrics = song.sections.length ? song.sections.map((x) => `[${x.tag === 'prechorus' ? 'Pre-Chorus' : x.tag[0].toUpperCase() + x.tag.slice(1)}]\n${x.lyrics}`).join('\n\n') : cleanMusicLyrics(song.lyrics);
   const voice = gender === 'female'
     ? 'female vocals, solo female singer, woman lead voice, feminine vocal tone'
@@ -3385,7 +3412,7 @@ async function generateLyriaMusic(song: MusicalSong): Promise<{ file: string; du
   if (!CFG.geminiKeys.length) throw new PipelineError('lyria_missing_key', 'No Gemini API key is configured for Lyria.');
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
-  const len = IS_SHORTS ? 'about 55 seconds long' : 'about 2 to 3 minutes long';
+  const len = `about ${CFG.musicSeconds} seconds long`;
   const input = `Create a ${profile.style} song in ${musicLanguage().name}, ${len}, with a ${gender} lead vocalist singing with ${profile.emotion} emotion over ${profile.instruments}, and a backing choir on every chorus. Use exactly these lyrics:\n\n${sectionLyricText(song.sections.length ? song.sections : [{ tag: 'verse', lyrics: cleanMusicLyrics(song.lyrics), emotion: profile.emotion }])}`;
   let lastErr = '';
   for (const key of CFG.geminiKeys) {
