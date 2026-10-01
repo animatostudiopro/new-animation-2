@@ -136,6 +136,8 @@ jobs:
           ACESTEP_API_KEY: ${{ secrets.ACESTEP_API_KEY }}
           # Optional: max minutes to wait for ACE-Step per run (default 18).
           ACESTEP_MAX_MINUTES: ${{ vars.ACESTEP_MAX_MINUTES }}
+          # Optional: musical song length in seconds (default 30 = intro, catchy chorus, outro).
+          MUSIC_SECONDS: ${{ vars.MUSIC_SECONDS }}
           # Must match timeout-minutes above (the renderer budgets its time from it).
           JOB_TIMEOUT_MINUTES: '60'
           # Optional: STEM_SEPARATION=off skips the vocal/drum separation for Musical videos.
