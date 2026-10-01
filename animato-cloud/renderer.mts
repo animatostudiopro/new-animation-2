@@ -217,6 +217,9 @@ let SOCIAL: Record<string, any> = {};
 const [W, H] = DIMENSIONS[CFG.aspect];
 const FRAME_W = W, FRAME_H = H;
 const FPS = 30;
+/** Minutes left before GitHub stops the job (JOB_TIMEOUT_MINUTES, default 60, minus setup time already used). */
+const PROCESS_T0 = Date.now();
+const jobMinutesLeft = () => (parseInt(process.env.JOB_TIMEOUT_MINUTES || '60', 10) || 60) - 3 - (Date.now() - PROCESS_T0) / 60000;
 const IS_SHORTS = CFG.format === 'shorts';
 
 class PipelineError extends Error {
@@ -2514,7 +2517,10 @@ async function renderWithStage(opts: {
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
-  const RW = opts.size?.w || W, RH = opts.size?.h || H;
+  // Musicals (a full concert, every frame) render at 75% size and are upscaled — about twice as fast.
+  const fast = !!opts.musicalStage && !opts.size && W * H > 1280 * 720;
+  const drawSize = fast ? { w: Math.round(W * 0.75 / 2) * 2, h: Math.round(H * 0.75 / 2) * 2 } : opts.size;
+  const RW = drawSize?.w || W, RH = drawSize?.h || H;
   const job = {
     width: RW, height: RH, fps: FPS, duration: opts.duration, category: CFG.category,
     title: opts.title, badge: opts.badge, endCard: opts.endCard, accent,
@@ -2542,7 +2548,7 @@ async function renderWithStage(opts: {
     stageFile: 'stage.js', job, duration: opts.duration,
     audio: audioArgs(opts.narration.audioPath, opts.music, 1),
     files: { [`/audio/narration${audioExt2}`]: opts.narration.audioPath, ...(opts.stems ? { '/audio/vocals.wav': opts.stems.vocals, ...(opts.stems.drums ? { '/audio/drums.wav': opts.stems.drums } : {}), ...(opts.stems.other ? { '/audio/other.wav': opts.stems.other } : {}) } : {}) },
-    size: opts.size
+    size: drawSize, scaleTo: fast ? { w: W, h: H } : undefined
   });
   return { ok: r.ok, character: r.character || 'none', reason: r.reason };
 }
@@ -2551,7 +2557,7 @@ async function renderWithStage(opts: {
  * Runs a stage bundle (stage.js: the presenter; anim.js: podcasts, films,
  * stickman) in headless Chrome and encodes its frames with the given audio.
  */
-async function runStage(opts: { stageFile: string; job: any; duration: number; audio: { inputs: string[]; filter: string } | null; files: Record<string, string>; size?: { w: number; h: number }; imageOut?: string }): Promise<{ ok: boolean; character?: string; reason?: string }> {
+async function runStage(opts: { stageFile: string; job: any; duration: number; audio: { inputs: string[]; filter: string } | null; files: Record<string, string>; size?: { w: number; h: number }; imageOut?: string; scaleTo?: { w: number; h: number } }): Promise<{ ok: boolean; character?: string; reason?: string }> {
   const W = opts.size?.w || FRAME_W, H = opts.size?.h || FRAME_H;
   const chrome = findChrome();
   if (!chrome) return { ok: false, character: 'none', reason: 'Chrome not found on the runner' };
@@ -2567,6 +2573,8 @@ async function runStage(opts: { stageFile: string; job: any; duration: number; a
     : ['-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${W}x${H}`, '-r', String(FPS), '-i', 'pipe:0',
     ...aud.inputs, '-filter_complex', aud.filter, '-map', '0:v', '-map', '[aout]',
+    // Rendered smaller for speed (musicals) → upscaled to the final frame here.
+    ...(opts.scaleTo ? ['-vf', `scale=${opts.scaleTo.w}:${opts.scaleTo.h}:flags=lanczos`] : []),
     '-t', opts.duration.toFixed(3), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-profile:v', 'high',
     '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', OUTPUT_VIDEO];
   const ff = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
@@ -2646,10 +2654,18 @@ async function runStage(opts: { stageFile: string; job: any; duration: number; a
   browser.on('close', (code: number | null) => finished?.({ ok: false, reason: `Chrome exited (${code}): ${chromeErr.split('\n').filter((l) => /error|fatal/i.test(l)).slice(-3).join(' | ')}` }));
   log(`Rendering ${totalFrames} frames at ${W}x${H} in headless Chrome (${path.basename(chrome)})…`);
 
-  const timeoutMs = Math.max(8, Math.ceil(opts.duration / 60) * 9) * 60 * 1000;
-  const timer = setTimeout(() => finished?.({ ok: false, reason: `stage timed out after ${Math.round(timeoutMs / 60000)} min (${framesWritten}/${totalFrames} frames)` }), timeoutMs);
+  // Watchdog: only a STALLED render fails (no new frame for 2 min). A slow but moving render keeps
+  // going until the job's own time budget is nearly used up (then it stops with a clear message).
+  const startedAt = Date.now();
+  let lastCount = 0, lastMoveAt = Date.now();
+  const timer = setInterval(() => {
+    if (framesWritten !== lastCount) { lastCount = framesWritten; lastMoveAt = Date.now(); }
+    const mins = ((Date.now() - startedAt) / 60000).toFixed(1);
+    if (Date.now() - lastMoveAt > 120_000) finished?.({ ok: false, reason: `stage stalled (no frame for 2 min) after ${mins} min (${framesWritten}/${totalFrames} frames)` });
+    else if (jobMinutesLeft() < 4) finished?.({ ok: false, reason: `out of job time after ${mins} min of rendering (${framesWritten}/${totalFrames} frames)` });
+  }, 10_000);
   const outcome = await result;
-  clearTimeout(timer);
+  clearInterval(timer);
   try { browser.kill('SIGKILL'); } catch {}
   server.close();
   try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
