@@ -3155,15 +3155,90 @@ function musicHashtags(style: string): string[] {
   if (IS_SHORTS) out.push('shorts');
   return Array.from(new Set(out.filter(Boolean))).slice(0, 10);
 }
+/**
+ * What the song is ABOUT. A 30-second song only works if it says one clear, relatable thing, so every
+ * video gets a concrete situation (picked fresh per video, matched to the genre's mood) instead of
+ * vague "good vibes". The writer must build every line around it.
+ */
+const SONG_CONCEPTS: Record<string, string[]> = {
+  party: [
+    'Friday night after a long week: the singer finally switches off the phone and owns the dance floor',
+    'the DJ drops the singer’s favourite song and the whole crowd sings it back',
+    'a wedding reception where even the aunties outdance the young people',
+    'a birthday where the singer celebrates surviving a hard year, not just getting older',
+    'the first party after exams — free at last',
+    'the light came back after a blackout and the whole street turns into a party',
+    'payday weekend: no budget talk tonight, only dancing',
+  ],
+  love: [
+    'falling for someone who makes even a traffic jam feel short',
+    'loving someone through hard times — "I no get much, but my heart na your own"',
+    'the shy moment of finally saying "I like you" after months of pretending',
+    'a long-distance love counting down the days to the airport hug',
+    'choosing the person who stayed when money was finished',
+    'a love that feels like home-cooked food after a long trip',
+  ],
+  hustle: [
+    'from sleeping on the floor to buying mama her first fridge',
+    'the first payday after months of “no vacancy”',
+    'proving the doubters wrong without saying a word — the work speaks',
+    'grinding at night while the city sleeps, because tomorrow must be better',
+    'turning a small market stall into a real business',
+    'the day the hard work finally paid off and the family celebrated',
+  ],
+  heartbreak: [
+    'deleting their number but still knowing it by heart',
+    'smiling at the party while the heart is broken inside',
+    'realising the love was one-sided and choosing to walk away with dignity',
+    'the empty side of the bed and the song that still reminds you of them',
+    'forgiving, but never going back',
+  ],
+  faith: [
+    'thanking God for a door that opened when every other one was shut',
+    'a mother’s prayers that carried the singer through',
+    'peace in the storm — still standing after everything',
+    'gratitude for small things: breath, family, another morning',
+  ],
+  uplift: [
+    'telling a friend who wants to give up: your season is coming',
+    'the confidence of finally loving yourself as you are',
+    'starting over after failure, stronger than before',
+    'home: the street, the food, the people that made the singer',
+    'friendship that never switched up, from secondary school till now',
+  ],
+};
+function songConcept(): { theme: string; concept: string } {
+  const g = `${CFG.subGenre || ''} ${CFG.topic || ''}`.toLowerCase();
+  const themes = /sad|heartbreak|ballad|blues/.test(g) ? ['heartbreak', 'love', 'uplift']
+    : /gospel|worship|praise|nasheed|devotional|faith/.test(g) ? ['faith', 'uplift']
+    : /love|r&b|rnb|soul|romantic/.test(g) ? ['love', 'love', 'heartbreak']
+    : /hip|rap|drill|trap/.test(g) ? ['hustle', 'hustle', 'party']
+    : /afro|amapiano|dance|party|edm|electro|dancehall|reggae|highlife|k-?pop|pop/.test(g) ? ['party', 'love', 'hustle', 'party', 'uplift']
+    : ['love', 'party', 'hustle', 'uplift', 'heartbreak'];
+  const n = parseInt(crypto.createHash('md5').update(`${CFG.campaignId || CFG.campaignName}:${CFG.partNumber}:concept`).digest('hex').slice(0, 8), 16);
+  const theme = themes[n % themes.length], list = SONG_CONCEPTS[theme];
+  return { theme, concept: list[Math.floor(n / themes.length) % list.length] };
+}
+/** Filler check: a song that keeps repeating empty words has no message. */
+function fillerHeavy(lyrics: string): boolean {
+  const words = lyrics.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').split(/\s+/).filter(Boolean);
+  if (words.length < 12) return true;
+  const filler = words.filter((w) => /^(oh+|ah+|eh+|yeah+|yea|la+|na+|hey+|ooh+|woah+|whoa+|mm+|baby)$/.test(w)).length;
+  const unique = new Set(words).size / words.length;
+  return filler / words.length > 0.22 || unique < 0.38;
+}
 async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
   const already = pastTitles.slice(-20).join(' | ');
   const lang = musicLanguage();
-  const user = `Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: intro (1–2 short lines that grab attention instantly, e.g. a call-out or vocal hook), chorus (4 short, very catchy lines built around one repeated hook phrase that people will remember after one listen — this is most of the song), outro (1–2 lines that land the hook one last time). No verses, no bridge.` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 40 ? `Use ${Math.round(CFG.musicSeconds * 1.5)}–${Math.round(CFG.musicSeconds * 2)} lyric words in total.` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
-  let last = '';
+  const idea = songConcept();
+  log(`🎵 Song idea (${idea.theme}): ${idea.concept}`);
+  const meaning = `WHAT THE SONG IS ABOUT (mandatory): ${idea.concept}. Tell THIS story from the singer’s point of view. Every single line must belong to it — concrete people, places, objects and actions (a named street, mama’s kitchen, the bus stop, the DJ booth, a phone screen…), one clear emotion, and a message a listener can repeat in one sentence. No vague filler about “good vibes”, “just the good”, “feeling good tonight” with nothing behind it; at most one short ad-lib (e.g. “eh!”) per section. `;
+  const user = `${meaning}Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: INTRO (2 short lines that set the scene of the story — who, where, what just happened — so the listener is hooked and knows what the song is about), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and again in line 3 or 4; lines 2 and 4 add the feeling/detail and rhyme; this is most of the song), OUTRO (2 lines that land the story — a payoff, a twist or a punchline that answers the intro — ending on the hook). No verses, no bridge. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 40 ? `Use ${Math.round(CFG.musicSeconds * 1.5)}–${Math.round(CFG.musicSeconds * 2)} lyric words in total.` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
+  let last = '', fillerRejects = 0;
   for await (const a of LLM.attempts({
-    system: 'You are a professional songwriter and music-video creative director. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
+    system: 'You are a hit songwriter (think chart-topping Afrobeats/pop writers) and music-video creative director. A great short song tells one specific, relatable story with a hook people sing after one listen. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
     user, saferUser: user, temperature: 0.9, maxTokens: 6500, json: true, task: 'musical_songwriting'
   })) {
     try {
@@ -3173,6 +3248,8 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
       if (!lyrics && sections.length) lyrics = sectionLyricText(sections);
       const hasChorus = sections.some((x) => x.tag === 'chorus');
       const words = lyricWordCount(lyrics);
+      if (fillerRejects < 2 && fillerHeavy(lyrics)) { fillerRejects++; last = 'lyrics were mostly filler'; log('⚠️ Song draft rejected: lyrics were mostly filler words — rewriting.'); continue; }
+      if (j.message) log(`🎵 Song message: ${String(j.message).slice(0, 160)}${j.hook ? ` · hook: “${String(j.hook).slice(0, 60)}”` : ''}`);
       if (String(j.title || '').trim() && words >= (CFG.musicSeconds <= 40 ? Math.round(CFG.musicSeconds * 1.1) : IS_SHORTS ? 70 : 150) && hasChorus) {
         // Too many words for the length → keep intro + chorus (+ outro) so it fits and stays in sync.
         if (CFG.musicSeconds <= 40 && words > CFG.musicSeconds * 2.4) { const keep = sections.filter((x) => ['intro', 'chorus', 'outro'].includes(x.tag)); if (keep.some((x) => x.tag === 'chorus')) { sections.splice(0, sections.length, ...keep); lyrics = cleanMusicLyrics(sectionLyricText(sections)); } }
@@ -3758,7 +3835,7 @@ async function main() {
     if (!camp) log('⚠️ The app is not reachable from GitHub right now — continuing without live status updates.');
     const hist = await appRequest('GET', `${campaignPath()}/history`);
     const episodes: any[] = Array.isArray(hist?.data?.storyHistory) ? hist!.data.storyHistory : [];
-    // Titles of recent videos (scripts are kept 10 days) + the last 30 video titles the app keeps for good.
+    // Titles of recent videos (scripts are kept 5 days) + the last 30 video titles the app keeps for good.
     const kept: string[] = Array.isArray(hist?.data?.coveredTitles) ? hist!.data.coveredTitles.map((x: any) => String(x || '')) : [];
     pastTitles = Array.from(new Set([...kept, ...episodes.map((e) => String(e.title || ''))].filter(Boolean)));
     pastSources = [
