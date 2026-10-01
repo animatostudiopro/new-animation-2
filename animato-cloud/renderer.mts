@@ -139,6 +139,8 @@ const CFG = {
   acestepKeys: keyList(AUTH.acestep_api_keys, AUTH.acestep_api_key, ENV.ACESTEP_API_KEYS, ENV.ACESTEP_API_KEY).concat(['8610e37f3cb54f3e96590563826526ff', '91ca7836737847fc99db7ffcccc716f0', '2efebedddf6a45b4a968282ce79aa90d']).filter((k, i, a) => k && a.indexOf(k) === i),
   acestepBase: pick(ENV.ACESTEP_BASE, 'https://api.acemusic.ai').replace(/\/+$/, ''),
   acestepModel: pick(ENV.ACESTEP_MODEL, ''),
+  // 'chat' = the hosted api.acemusic.ai (OpenAI-style /v1/chat/completions); 'native' = a self-hosted ACE-Step server (/release_task).
+  acestepMode: pick(ENV.ACESTEP_MODE, 'chat').toLowerCase(),
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
   lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
   lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
@@ -3130,34 +3132,32 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
  *  Every key is tried, and if the service is busy on all of them it waits and goes round again. */
 let aceDeadline = 0;
 const aceLeft = () => Math.max(0, aceDeadline - Date.now());
-const isBusyErr = (e: any) => /acestep_busy|acestep_auth|acestep_quota|abort|timeout|timed out|fetch failed|ECONN|ETIMEDOUT|socket|network|50[0-9]|52[0-9]/i.test(`${e?.code || ''} ${e?.name || ''} ${e?.message || e}`);
 async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
   if (!CFG.acestepKeys.length) throw new PipelineError('acestep_missing_key', 'ACESTEP_API_KEY is not set (free key: https://acemusic.ai/api-key).');
   // Start from a different key each run so the free quota is shared across all of them.
   const order = CFG.acestepKeys.map((_, i) => CFG.acestepKeys[(i + CFG.partNumber) % CFG.acestepKeys.length]);
+  // The hosted api.acemusic.ai only has the OpenAI-style endpoint. Streaming first (keeps the
+  // connection alive so the gateway can't time it out), then a plain request; /release_task only for self-hosted servers.
+  const modes: ('stream' | 'sync' | 'native')[] = CFG.acestepMode === 'native' ? ['native', 'stream', 'sync'] : ['stream', 'sync'];
   const errors: string[] = [];
   aceDeadline = Date.now() + CFG.acestepBudgetMin * 60 * 1000;
   for (let round = 0; round < 3 && aceLeft() > 90000; round++) {
     if (round > 0) { const wait = round * 60; log(`🎵 ACE-Step is busy on every key; waiting ${wait}s, then trying again (round ${round + 1}/3)…`); await sleep(wait * 1000); }
     for (const key of order) {
       const tag = `key …${key.slice(-4)}`;
-      if (aceLeft() < 90000) break;
-      try { return await aceStepNative(song, key, round > 0); }
-      catch (e: any) {
-        errors.push(`${tag} async: ${String(e?.message || e).slice(0, 140)}`);
-        if (!isBusyErr(e)) throw e; // a real error (bad lyrics, failed render) — don't hammer the service
-        log(`⚠️ ACE-Step async mode on ${tag} failed (${e?.message || e}); trying the streaming mode…`);
-      }
-      if (aceLeft() < 90000) break;
-      try { return await aceStepStream(song, key); }
-      catch (e: any) {
-        errors.push(`${tag} stream: ${String(e?.message || e).slice(0, 140)}`);
-        if (!isBusyErr(e)) throw e;
-        log(`⚠️ ACE-Step streaming mode on ${tag} failed (${e?.message || e}); trying the next key…`);
+      for (const mode of modes) {
+        if (aceLeft() < 90000) break;
+        try {
+          return mode === 'native' ? await aceStepNative(song, key, round > 0) : await aceStepChat(song, key, mode === 'stream', round > 0);
+        } catch (e: any) {
+          errors.push(`${tag} ${mode}: ${String(e?.message || e).slice(0, 160)}`);
+          log(`⚠️ ACE-Step ${mode} mode on ${tag} failed (${e?.message || e}).`);
+          if (e?.code === 'acestep_lyrics') throw e; // the song itself was rejected — retrying won't help
+        }
       }
     }
   }
-  throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (tried every key in both modes for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
+  throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (tried every key for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
 }
 function aceStepRequest(song: MusicalSong) {
   const profile = musicalProfile();
@@ -3232,31 +3232,63 @@ async function aceStepNative(song: MusicalSong, apiKey: string, fast: boolean): 
   }
   throw new PipelineError('acestep_busy', `ACE-Step task ${taskId} did not finish in time (${Math.round((Date.now() - started) / 60000)} min).`);
 }
-/** OpenAI-style endpoint with streaming: the audio arrives as base64 in the stream (or in one JSON reply). */
-async function aceStepStream(song: MusicalSong, apiKey: string): Promise<{ file: string; duration: number }> {
+let aceModelId = '';
+/** Picks the hosted model id from /v1/models once (falls back to acemusic/acestep-v15-turbo). */
+async function aceModel(apiKey: string): Promise<string> {
+  if (CFG.acestepModel) return CFG.acestepModel.includes('/') ? CFG.acestepModel : `acemusic/${CFG.acestepModel}`;
+  if (aceModelId) return aceModelId;
+  try {
+    const r = await fetch(`${CFG.acestepBase}/v1/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(20000) });
+    const j: any = await r.json().catch(() => ({}));
+    const ids: string[] = (Array.isArray(j?.data) ? j.data : []).map((m: any) => String(m?.id || '')).filter(Boolean);
+    aceModelId = ids.find((x) => /turbo/i.test(x)) || ids[0] || '';
+    if (aceModelId) log(`🎵 ACE-Step models: ${ids.join(', ')} → using ${aceModelId}`);
+  } catch {}
+  return aceModelId || 'acemusic/acestep-v15-turbo';
+}
+/** Hosted ACE-Step (api.acemusic.ai): POST /v1/chat/completions. Audio comes back as a base64 data URL
+ *  at choices[0].message.audio[0].audio_url.url (or in the stream's delta.audio). */
+async function aceStepChat(song: MusicalSong, apiKey: string, stream: boolean, fast: boolean): Promise<{ file: string; duration: number }> {
   const r = aceStepRequest(song);
   const body: any = {
-    model: CFG.acestepModel ? (CFG.acestepModel.includes('/') ? CFG.acestepModel : `acemusic/${CFG.acestepModel}`) : 'acemusic/acestep-v15-turbo',
+    model: await aceModel(apiKey),
     messages: [{ role: 'user', content: `<prompt>${r.prompt}</prompt>\n<lyrics>${r.lyrics}</lyrics>` }],
     audio_config: { duration: r.target, vocal_language: r.lang, instrumental: false, format: 'mp3' },
-    stream: true, batch_size: 1,
+    stream, thinking: !fast, use_format: false, sample_mode: false, batch_size: 1,
   };
   const res = await fetch(`${CFG.acestepBase}/v1/chat/completions`, {
-    method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8', Accept: 'text/event-stream, application/json' },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(60000, Math.min(14 * 60 * 1000, aceLeft()))),
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8', Accept: stream ? 'text/event-stream' : 'application/json', 'User-Agent': 'curl/8.7.1' },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(60000, Math.min(11 * 60 * 1000, aceLeft()))),
   });
-  if (!res.ok) { const t = await res.text().catch(() => ''); throw new PipelineError(aceErrCode(res.status, t), `ACE-Step streaming request failed (HTTP ${res.status}): ${t.slice(0, 200)}`); }
-  log('🎵 ACE-Step streaming mode connected; waiting for the song…');
+  if (!res.ok) {
+    const t = (await res.text().catch(() => '')).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    throw new PipelineError(aceErrCode(res.status, t), `ACE-Step ${stream ? 'streaming' : ''} request failed (HTTP ${res.status}): ${t.slice(0, 180)}`);
+  }
+  log(`🎵 ACE-Step ${stream ? 'streaming' : 'request'} accepted (${body.model}${fast ? ', fast mode' : ''}); waiting for the song…`);
   const raw = await res.text();
-  // Find the audio wherever it is: SSE delta.audio, message.audio, or any data:audio URL in the text.
-  const m = raw.match(/data:audio\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)/i);
-  if (m) return saveAceAudio(Buffer.from(m[1], 'base64'), 'stream');
-  const urlM = raw.match(/"url"\s*:\s*"(https?:\/\/[^"]+)"/i);
+  // The audio can be in delta.audio (stream), message.audio (plain), or split across stream chunks.
+  let joined = raw;
+  if (stream) {
+    const parts: string[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) continue;
+      const d = line.slice(5).trim();
+      if (!d || d === '[DONE]') continue;
+      try { const j = JSON.parse(d); for (const a of (j?.choices?.[0]?.delta?.audio || j?.choices?.[0]?.message?.audio || [])) parts.push(String(a?.audio_url?.url || a?.url || '')); } catch {}
+    }
+    if (parts.length) joined = parts.join('');
+  }
+  const m = joined.match(/data:audio\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=\s]+)/i);
+  if (m) return saveAceAudio(Buffer.from(m[1].replace(/\s+/g, ''), 'base64'), stream ? 'stream' : 'request');
+  const urlM = joined.match(/"url"\s*:\s*"(https?:[^"]+)"/i);
   if (urlM) {
     const dl = await fetch(urlM[1].replace(/\\\//g, '/'), { signal: AbortSignal.timeout(240000) });
-    if (dl.ok) return saveAceAudio(Buffer.from(await dl.arrayBuffer()), 'stream');
+    if (dl.ok) return saveAceAudio(Buffer.from(await dl.arrayBuffer()), stream ? 'stream' : 'request');
   }
-  throw new PipelineError('acestep_busy', `ACE-Step streaming finished without audio: ${raw.replace(/\s+/g, ' ').slice(0, 200)}`);
+  let errText = raw.replace(/\s+/g, ' ').slice(0, 200);
+  try { const j = JSON.parse(raw); errText = String(j?.error?.message || j?.error || j?.choices?.[0]?.message?.content || errText).slice(0, 200); } catch {}
+  throw new PipelineError('acestep_busy', `ACE-Step finished without audio: ${errText}`);
 }
 
 /** Google Lyria via the Gemini API (Interactions). PAID — only used when LYRIA_ENABLED=true and a billing-enabled Gemini key is set. */
