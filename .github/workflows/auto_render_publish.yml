@@ -69,7 +69,7 @@ jobs:
   render_and_publish:
     name: Render & publish
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 50
 
     steps:
       - name: Checkout
@@ -126,7 +126,7 @@ jobs:
           AIRFORCE_API_KEY: ${{ secrets.AIRFORCE_API_KEY }}
           # Musical: ACE-Step 1.5 is the music engine (keys are built in; a secret overrides them).
           ACESTEP_API_KEY: ${{ secrets.ACESTEP_API_KEY }}
-          # Optional: max minutes to wait for ACE-Step per run (default 30).
+          # Optional: max minutes to wait for ACE-Step per run (default 12).
           ACESTEP_MAX_MINUTES: ${{ vars.ACESTEP_MAX_MINUTES }}
           # Optional: self-hosted ACE-Step server (ACESTEP_MODE=native uses /release_task).
           ACESTEP_BASE: ${{ vars.ACESTEP_BASE }}

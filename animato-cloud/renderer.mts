@@ -193,7 +193,7 @@ const CFG = {
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
   maxRenderSeconds: parseInt(pick(ENV.MAX_VIDEO_SECONDS, '0'), 10) || 0,
   // Longest time a run spends waiting for ACE-Step before giving up (the next run retries).
-  acestepBudgetMin: parseInt(pick(ENV.ACESTEP_MAX_MINUTES, '30'), 10) || 30
+  acestepBudgetMin: parseInt(pick(ENV.ACESTEP_MAX_MINUTES, '12'), 10) || 12
 };
 
 if (IN_ACTIONS) {
@@ -3130,7 +3130,13 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
  *   2. If that keeps timing out: POST /v1/chat/completions with streaming (keeps the connection
  *      alive while the song renders, so the gateway can't cut it off) → base64 audio.
  *  Every key is tried, and if the service is busy on all of them it waits and goes round again. */
-let aceDeadline = 0;
+let aceDeadline = 0, aceStarted = 0;
+const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`;
+/** Shows what ACE-Step is doing on the automation card, so a slow song never looks frozen. */
+async function aceStatus(what: string) {
+  const el = Date.now() - aceStarted;
+  try { await reportStatus('running', `2/6 Generating music (ACE-Step 1.5) · ${mmss(el)} of max ${CFG.acestepBudgetMin}:00`, Math.min(40, 24 + Math.round((el / (CFG.acestepBudgetMin * 60000)) * 16)), `🎵 ${what} (${mmss(el)} elapsed)`); } catch {}
+}
 const aceLeft = () => Math.max(0, aceDeadline - Date.now());
 async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
   if (!CFG.acestepKeys.length) throw new PipelineError('acestep_missing_key', 'ACESTEP_API_KEY is not set (free key: https://acemusic.ai/api-key).');
@@ -3140,13 +3146,15 @@ async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; 
   // connection alive so the gateway can't time it out), then a plain request; /release_task only for self-hosted servers.
   const modes: ('stream' | 'sync' | 'native')[] = CFG.acestepMode === 'native' ? ['native', 'stream', 'sync'] : ['stream', 'sync'];
   const errors: string[] = [];
-  aceDeadline = Date.now() + CFG.acestepBudgetMin * 60 * 1000;
-  for (let round = 0; round < 3 && aceLeft() > 90000; round++) {
-    if (round > 0) { const wait = round * 60; log(`🎵 ACE-Step is busy on every key; waiting ${wait}s, then trying again (round ${round + 1}/3)…`); await sleep(wait * 1000); }
+  aceStarted = Date.now();
+  aceDeadline = aceStarted + CFG.acestepBudgetMin * 60 * 1000;
+  for (let round = 0; round < 2 && aceLeft() > 90000; round++) {
+    if (round > 0) { log('🎵 ACE-Step is busy on every key; waiting 30s, then one more round in fast mode…'); await aceStatus('ACE-Step busy on every key — retrying in 30s (fast mode)'); await sleep(30000); }
     for (const key of order) {
       const tag = `key …${key.slice(-4)}`;
       for (const mode of modes) {
         if (aceLeft() < 90000) break;
+        await aceStatus(`${mode === 'stream' ? 'streaming' : mode} request · key …${key.slice(-4)} · round ${round + 1}/2`);
         try {
           return mode === 'native' ? await aceStepNative(song, key, round > 0) : await aceStepChat(song, key, mode === 'stream', round > 0);
         } catch (e: any) {
@@ -3259,14 +3267,18 @@ async function aceStepChat(song: MusicalSong, apiKey: string, stream: boolean, f
   const res = await fetch(`${CFG.acestepBase}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8', Accept: stream ? 'text/event-stream' : 'application/json', 'User-Agent': 'curl/8.7.1' },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(60000, Math.min(11 * 60 * 1000, aceLeft()))),
-  });
+    body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(45000, Math.min((stream ? 6 : 4) * 60 * 1000, aceLeft()))),
+  }).catch((e: any) => { throw new PipelineError('acestep_busy', /abort|timeout/i.test(String(e?.name || e?.message)) ? `no song after ${stream ? 6 : 4} min (ACE-Step queue busy)` : `connection failed: ${e?.message || e}`); });
   if (!res.ok) {
     const t = (await res.text().catch(() => '')).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     throw new PipelineError(aceErrCode(res.status, t), `ACE-Step ${stream ? 'streaming' : ''} request failed (HTTP ${res.status}): ${t.slice(0, 180)}`);
   }
   log(`🎵 ACE-Step ${stream ? 'streaming' : 'request'} accepted (${body.model}${fast ? ', fast mode' : ''}); waiting for the song…`);
-  const raw = await res.text();
+  const beat = setInterval(() => { aceStatus(`ACE-Step is making the song (${stream ? 'streaming' : 'request'} · key …${apiKey.slice(-4)})`); }, 30000);
+  let raw = '';
+  try { raw = await res.text(); }
+  catch (e: any) { throw new PipelineError('acestep_busy', /abort|timeout/i.test(String(e?.name || e?.message)) ? `no song after ${stream ? 6 : 4} min (ACE-Step queue busy)` : `stream broke: ${e?.message || e}`); }
+  finally { clearInterval(beat); }
   // The audio can be in delta.audio (stream), message.audio (plain), or split across stream chunks.
   let joined = raw;
   if (stream) {
@@ -3400,9 +3412,9 @@ function timingForMusic(song: MusicalSong, transcript: Word[], duration: number)
       const wt = w.text.replace(/[^a-z0-9']/gi, '').toLowerCase();
       return w.start >= cursor - 0.05 && w.start <= roughEnd + 0.05 && wt === firstLyricWord;
     });
-    const start = clamp(Math.max(cursor, first ? first.start : cursor), 0, duration);
+    const start = clampNum(Math.max(cursor, first ? first.start : cursor), 0, duration);
     const minEnd = Math.min(duration, start + 0.8);
-    const end = clamp(Math.max(minEnd, roughEnd), minEnd, duration);
+    const end = clampNum(Math.max(minEnd, roughEnd), minEnd, duration);
     if (end <= start) break;
     sections.push({ start, end, tag: sec.tag, emotion: sec.emotion || musicalProfile().emotion });
     // Cursor is monotonic: a matched transcript word can only advance section timing.
