@@ -134,7 +134,7 @@ const CFG = {
   // Musical: the concert stage (a fixed stage number, or 0 = a new stage every video) and the song language.
   stageId: Math.max(0, parseInt(pick(JOB.stage_id, ENV.STAGE_ID, '0'), 10) || 0),
   musicLanguage: pick(JOB.music_language, ENV.MUSIC_LANGUAGE, 'English'),
-  // Free backup music engine: ACE-Step 1.5 official cloud (free API key from https://acemusic.ai/api-key).
+  // Music engine: ACE-Step 1.5 official cloud (free API key from https://acemusic.ai/api-key).
   // Personal project: built-in ACE-Step keys (rotated); a repository secret still overrides them.
   acestepKeys: keyList(AUTH.acestep_api_keys, AUTH.acestep_api_key, ENV.ACESTEP_API_KEYS, ENV.ACESTEP_API_KEY).concat(['8610e37f3cb54f3e96590563826526ff', '91ca7836737847fc99db7ffcccc716f0', '2efebedddf6a45b4a968282ce79aa90d']).filter((k, i, a) => k && a.indexOf(k) === i),
   acestepBase: pick(ENV.ACESTEP_BASE, 'https://api.acemusic.ai').replace(/\/+$/, ''),
@@ -142,8 +142,6 @@ const CFG = {
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
   lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
   lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
-  // Order the music engines are tried in. Default: Suno first, then free ACE-Step, then Lyria (if enabled).
-  musicProviders: listOf(pick(ENV.MUSIC_PROVIDERS, 'acestep,suno,lyria')).map((x) => x.toLowerCase()),
   characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
   // Podcasts: the hosts designed in the app, and the studio.
   castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); return Array.isArray(v) ? v.slice(0, 3) : []; } catch { return []; } })(),
@@ -192,10 +190,8 @@ const CFG = {
   newsBase: pick(ENV.NEWS_RSS_BASE, 'https://news.google.com/rss/search'),
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
   maxRenderSeconds: parseInt(pick(ENV.MAX_VIDEO_SECONDS, '0'), 10) || 0,
-  // Api.Airforce currently documents no public Suno music status route. When an
-  // account/tenant exposes one, provide a full URL template such as
-  // https://.../tasks/{task_id}; the 202 response may also provide its own status URL.
-  airforceMusicStatusUrlTemplate: pick(ENV.AIRFORCE_MUSIC_STATUS_URL_TEMPLATE, '')
+  // Longest time a run spends waiting for ACE-Step before giving up (the next run retries).
+  acestepBudgetMin: parseInt(pick(ENV.ACESTEP_MAX_MINUTES, '30'), 10) || 30
 };
 
 if (IN_ACTIONS) {
@@ -3021,7 +3017,7 @@ async function setYouTubeThumbnail(videoId: string, file: string | null): Promis
 
 
 // ---------------------------------------------------------------------------
-// Musical videos — original Suno V5.5 song + real timed performance
+// Musical videos — original ACE-Step song + real timed performance
 // ---------------------------------------------------------------------------
 interface MusicalSection { tag: string; lyrics: string; emotion: string }
 interface MusicalSong {
@@ -3126,263 +3122,141 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   }
   throw new PipelineError('musical_song_retry', `No free AI writer produced a valid original song (${last || 'all models failed'}). Nothing was posted; the next scheduled run will retry.`);
 }
-async function downloadRemote(url: string, ext = '.mp3'): Promise<string> {
-  const r = await fetch(url, { signal: AbortSignal.timeout(180000) });
-  if (!r.ok) throw new PipelineError('music_download_failed', `Suno clip download failed: HTTP ${r.status}`);
-  const out = path.join(WORK_DIR, `suno_${crypto.randomBytes(4).toString('hex')}${ext}`);
-  fs.writeFileSync(out, Buffer.from(await r.arrayBuffer()));
-  if (fs.statSync(out).size < 10000) throw new PipelineError('music_download_failed', 'Suno returned an empty audio clip.');
-  return out;
-}
-async function generateSunoMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
-  if (!CFG.airforceKey) throw new PipelineError('airforce_missing_key', 'AIRFORCE_API_KEY is not configured for the Musical content type. Add it as a GitHub Actions repository secret.');
-
-  const profile = musicalProfile();
-  // Never trust arbitrary input for the singer gender. The UI only supports these two values.
-  const gender = CFG.gender === 'male' ? 'male' : 'female';
-  const target = IS_SHORTS ? 58 : Math.min(180, CFG.maxRenderSeconds > 0 ? CFG.maxRenderSeconds : 150);
-  // Keep explicit section tags so Suno can preserve the verse/chorus structure and reinforce
-  // the choir arrangement on chorus sections.
-  const prompt = song.sections.length ? sectionLyricText(song.sections) : cleanMusicLyrics(song.lyrics);
-
-  const headers = {
-    Authorization: `Bearer ${CFG.airforceKey}`,
-    'Content-Type': 'application/json'
-  };
-  const body = {
-    model: 'suno-v5.5',
-    prompt,
-    title: song.title,
-    duration_seconds: target,
-    response_format: 'mp3',
-    custom: true,
-    instrumental: false,
-    style: `${profile.style}; ${profile.instruments}; ${gender} lead vocalist singing in ${musicLanguage().name} with ${profile.emotion} emotion; layered backing choir enters only on the chorus sections; expressive human phrasing; clear diction; polished commercial master; no spoken narration`
-  };
-
-  const saveAudio = async (r: Response, contentType = 'audio/mpeg') => {
-    const ct = String(contentType || '').toLowerCase();
-    const ext = ct.includes('wav') ? '.wav' : '.mp3';
-    const out = path.join(WORK_DIR, `suno_${crypto.randomBytes(4).toString('hex')}${ext}`);
-    fs.writeFileSync(out, Buffer.from(await r.arrayBuffer()));
-    if (fs.statSync(out).size < 10000) {
-      throw new PipelineError('suno_failed', 'Suno returned an empty audio clip.');
-    }
-    return { file: out, duration: await probeDuration(out) };
-  };
-
-  const clipUrlOf = (j: any): string | null => {
-    const direct = [
-      j?.audio_url, j?.clip_url, j?.url, j?.result_url,
-      j?.data?.audio_url, j?.data?.clip_url, j?.data?.url, j?.data?.result_url,
-      j?.result?.audio_url, j?.result?.clip_url, j?.result?.url, j?.result?.result_url
-    ];
-    for (const value of direct) if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
-    const arrays = [j?.clips, j?.data?.clips, j?.results, j?.data?.results];
-    for (const arr of arrays) if (Array.isArray(arr)) {
-      for (const clip of arr) {
-        const value = clip?.audio_url || clip?.clip_url || clip?.url || clip?.result_url || clip?.audio?.url;
-        if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
-      }
-    }
-    return null;
-  };
-
-  const taskIdOf = (j: any): string => String(
-    j?.task_id || j?.taskId || j?.data?.task_id || j?.data?.taskId || j?.result?.task_id || ''
-  ).trim();
-
-  const statusUrlOf = (j: any, taskId: string): string | null => {
-    const fromResponse = [
-      j?.status_url, j?.poll_url, j?.task_url,
-      j?.data?.status_url, j?.data?.poll_url, j?.data?.task_url,
-      j?.links?.status, j?.links?.poll, j?.links?.task,
-      j?.result?.status_url, j?.result?.poll_url, j?.result?.task_url
-    ];
-    for (const value of fromResponse) {
-      if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
-    }
-    const template = String(CFG.airforceMusicStatusUrlTemplate || '').trim();
-    if (template && taskId) {
-      return template
-        .replace(/\{task_id\}/g, encodeURIComponent(taskId))
-        .replace(/\{taskId\}/g, encodeURIComponent(taskId));
-    }
-    return null;
-  };
-
-  const downloadClip = async (url: string) => {
-    const lower = url.toLowerCase();
-    return downloadRemote(String(url), lower.includes('.wav') ? '.wav' : '.mp3');
-  };
-
-  const pollTask = async (taskId: string, statusUrl: string, initial: any): Promise<{ file: string; duration: number; taskId: string }> => {
-    const maxAttempts = 48;
-    const intervalMs = 10000;
-    let snapshot = initial || {};
-    log(`🎵 Suno task ${taskId.slice(0, 48)} accepted; polling ${statusUrl.replace(/(https?:\/\/[^/]+).*/, '$1/...')} every ${intervalMs / 1000}s.`);
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) await sleep(intervalMs);
-      let r: Response;
-      try {
-        r = await fetch(statusUrl, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${CFG.airforceKey}` },
-          signal: AbortSignal.timeout(45000)
-        });
-      } catch (e: any) {
-        if (attempt === maxAttempts - 1) throw new PipelineError('suno_poll_failed', `Suno task polling failed after ${maxAttempts} attempts: ${e?.message || e}`);
-        log(`⚠️ Suno task polling network error (attempt ${attempt + 1}/${maxAttempts}); retrying.`);
-        continue;
-      }
-
-      const ct = String(r.headers.get('content-type') || '').toLowerCase();
-      if (r.ok && ct.includes('audio/')) {
-        const saved = await saveAudio(r, ct);
-        return { ...saved, taskId };
-      }
-
-      snapshot = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        const msg = JSON.stringify(snapshot).slice(0, 320) || `HTTP ${r.status}`;
-        // 404 is especially important: it normally means the supplied status route does
-        // not exist for this Airforce tenant. Do not accidentally create duplicate Suno jobs.
-        if (r.status === 404) throw new PipelineError('suno_poll_endpoint_missing', `Suno task ${taskId} was created, but the configured polling endpoint returned HTTP 404. Check AIRFORCE_MUSIC_STATUS_URL_TEMPLATE or the status URL returned by Airforce. No duplicate song was submitted.`);
-        if (r.status === 401 || r.status === 403) throw new PipelineError('airforce_auth', `Suno task polling was rejected (HTTP ${r.status}). Check AIRFORCE_API_KEY permissions.`);
-        if (r.status === 429) {
-          await sleep(Math.min(30000, intervalMs * 2));
-          continue;
-        }
-        if (attempt === maxAttempts - 1) throw new PipelineError('suno_poll_failed', `Suno task polling failed: ${msg}`);
-        continue;
-      }
-
-      const status = String(snapshot?.status || snapshot?.state || snapshot?.data?.status || snapshot?.result?.status || '').toLowerCase();
-      const url = clipUrlOf(snapshot);
-      if (url && ['queued', 'processing', 'running', 'pending', ''].includes(status)) {
-        try {
-          const file = await downloadClip(url);
-          return { file, duration: await probeDuration(file), taskId };
-        } catch {
-          // Keep polling if the provider published a URL before the bytes were ready.
-        }
-      }
-      if (['completed', 'complete', 'succeeded', 'success', 'done', 'finished', 'ready'].includes(status) && url) {
-        const file = await downloadClip(url);
-        return { file, duration: await probeDuration(file), taskId };
-      }
-      if (['failed', 'error', 'errored', 'cancelled', 'canceled', 'expired'].includes(status)) {
-        throw new PipelineError('suno_failed', `Suno music task ${taskId} failed: ${String(snapshot?.error || snapshot?.message || status).slice(0, 500)}`);
-      }
-
-      if (attempt % 3 === 0) {
-        const progress = Number(snapshot?.progress ?? snapshot?.data?.progress);
-        log(`🎵 Suno task ${taskId.slice(0, 16)}… status=${status || 'unknown'}${Number.isFinite(progress) ? ` ${progress}%` : ''} (${attempt + 1}/${maxAttempts}).`);
-      }
-    }
-
-    throw new PipelineError('suno_poll_timeout', `Suno task ${taskId} did not complete within ${(maxAttempts * intervalMs) / 60000} minutes. Nothing was posted.`);
-  };
-
-  const r = await fetch(`${CFG.airforceBase}/v1/audio/music`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(300000)
-  });
-
-  const ct = String(r.headers.get('content-type') || '').toLowerCase();
-  if (ct.includes('audio/')) return { ...(await saveAudio(r, ct)) };
-
-  const rawBody = await r.text();
-  let j: any = {};
-  try { j = rawBody ? JSON.parse(rawBody) : {}; } catch { j = {}; }
-  const directUrl = clipUrlOf(j);
-  const taskId = taskIdOf(j);
-  const responseLocation = String(r.headers.get('location') || '').trim();
-  log(`🎵 Airforce Suno response: HTTP ${r.status}, content-type=${ct || 'unknown'}, task_id=${taskId ? taskId.slice(0, 24) + '…' : 'none'}, audio_url=${directUrl ? 'present' : 'none'}, location=${responseLocation ? 'present' : 'none'}.`);
-
-  if (!r.ok && r.status !== 202) {
-    const msg = JSON.stringify(j).slice(0, 320) || `HTTP ${r.status}`;
-    throw new PipelineError(
-      /401|403/i.test(msg) ? 'airforce_auth' : /429|quota|limit/i.test(msg) ? 'airforce_quota' : 'suno_failed',
-      `Airforce Suno V5.5 request failed (HTTP ${r.status}): ${msg}`
-    );
-  }
-
-  if (directUrl) {
-    const file = await downloadClip(directUrl);
-    return { file, duration: await probeDuration(file), taskId: taskId || undefined };
-  }
-
-  if (r.status === 202 || taskId) {
-    if (!taskId) throw new PipelineError('suno_pending', 'Airforce accepted the Suno job but did not return a task_id or audio URL. Nothing was posted.');
-    const statusUrl = statusUrlOf(j, taskId) || (responseLocation && /^https?:\/\//i.test(responseLocation) ? responseLocation : null);
-    if (!statusUrl) {
-      throw new PipelineError(
-        'suno_poll_endpoint_missing',
-        `Airforce accepted Suno task ${taskId}, but this response exposes no status URL and the account has no AIRFORCE_MUSIC_STATUS_URL_TEMPLATE configured. Current Api.Airforce audio docs do not publish a Suno music status route, so this run will not resubmit the song and risk duplicates.`
-      );
-    }
-    return pollTask(taskId, statusUrl, j);
-  }
-
-  throw new PipelineError('suno_failed', 'Airforce returned a Suno response without audio bytes, a usable clip URL, or a task ID.');
-}
-/** ACE-Step 1.5 (open-source, MIT) via its official cloud API — free API key. Native async mode: release_task → query_result → download. */
+/** ACE-Step 1.5 (open-source, MIT) via its official cloud API (api.acemusic.ai) — the ONLY music engine.
+ *  The hosted service is busy at times, so every step waits long enough and retries:
+ *   1. Native async mode: POST /release_task → poll /query_result → download the file.
+ *   2. If that keeps timing out: POST /v1/chat/completions with streaming (keeps the connection
+ *      alive while the song renders, so the gateway can't cut it off) → base64 audio.
+ *  Every key is tried, and if the service is busy on all of them it waits and goes round again. */
+let aceDeadline = 0;
+const aceLeft = () => Math.max(0, aceDeadline - Date.now());
+const isBusyErr = (e: any) => /acestep_busy|acestep_auth|acestep_quota|abort|timeout|timed out|fetch failed|ECONN|ETIMEDOUT|socket|network|50[0-9]|52[0-9]/i.test(`${e?.code || ''} ${e?.name || ''} ${e?.message || e}`);
 async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
   if (!CFG.acestepKeys.length) throw new PipelineError('acestep_missing_key', 'ACESTEP_API_KEY is not set (free key: https://acemusic.ai/api-key).');
-  // Rotate the keys: start from a different key each run, fail over on auth / quota errors.
+  // Start from a different key each run so the free quota is shared across all of them.
   const order = CFG.acestepKeys.map((_, i) => CFG.acestepKeys[(i + CFG.partNumber) % CFG.acestepKeys.length]);
-  let lastErr: any = null;
-  for (const key of order) {
-    try { return await aceStepWithKey(song, key); }
-    catch (e: any) { lastErr = e; if (!/acestep_auth|acestep_quota/.test(String(e?.code || ''))) throw e; log(`ACE-Step key …${key.slice(-4)} refused (${e?.message}); trying the next key.`); }
+  const errors: string[] = [];
+  aceDeadline = Date.now() + CFG.acestepBudgetMin * 60 * 1000;
+  for (let round = 0; round < 3 && aceLeft() > 90000; round++) {
+    if (round > 0) { const wait = round * 60; log(`🎵 ACE-Step is busy on every key; waiting ${wait}s, then trying again (round ${round + 1}/3)…`); await sleep(wait * 1000); }
+    for (const key of order) {
+      const tag = `key …${key.slice(-4)}`;
+      if (aceLeft() < 90000) break;
+      try { return await aceStepNative(song, key, round > 0); }
+      catch (e: any) {
+        errors.push(`${tag} async: ${String(e?.message || e).slice(0, 140)}`);
+        if (!isBusyErr(e)) throw e; // a real error (bad lyrics, failed render) — don't hammer the service
+        log(`⚠️ ACE-Step async mode on ${tag} failed (${e?.message || e}); trying the streaming mode…`);
+      }
+      if (aceLeft() < 90000) break;
+      try { return await aceStepStream(song, key); }
+      catch (e: any) {
+        errors.push(`${tag} stream: ${String(e?.message || e).slice(0, 140)}`);
+        if (!isBusyErr(e)) throw e;
+        log(`⚠️ ACE-Step streaming mode on ${tag} failed (${e?.message || e}); trying the next key…`);
+      }
+    }
   }
-  throw lastErr || new PipelineError('acestep_failed', 'All ACE-Step keys were refused.');
+  throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (tried every key in both modes for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
 }
-async function aceStepWithKey(song: MusicalSong, apiKey: string): Promise<{ file: string; duration: number; taskId?: string }> {
+function aceStepRequest(song: MusicalSong) {
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
   const target = IS_SHORTS ? 58 : Math.min(180, CFG.maxRenderSeconds > 0 ? CFG.maxRenderSeconds : 150);
-  const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8' };
   const lyrics = song.sections.length ? song.sections.map((x) => `[${x.tag === 'prechorus' ? 'Pre-Chorus' : x.tag[0].toUpperCase() + x.tag.slice(1)}]\n${x.lyrics}`).join('\n\n') : cleanMusicLyrics(song.lyrics);
+  const prompt = `${profile.style}, ${profile.instruments}, ${gender} lead vocal singing in ${musicLanguage().name}, ${profile.emotion} emotion, backing choir on the chorus`;
+  return { prompt, lyrics, target, lang: musicLanguage().code };
+}
+const aceErrCode = (status: number, body: string) => status === 401 || status === 403 ? 'acestep_auth' : status === 429 || /quota|limit|credit|insufficient/i.test(body) ? 'acestep_quota' : status >= 500 || status === 408 ? 'acestep_busy' : 'acestep_failed';
+async function saveAceAudio(buf: Buffer, label: string) {
+  const out = path.join(WORK_DIR, `acestep_${crypto.randomBytes(4).toString('hex')}.mp3`);
+  fs.writeFileSync(out, buf);
+  if (fs.statSync(out).size < 10000) throw new PipelineError('acestep_busy', `ACE-Step (${label}) returned an empty audio clip.`);
+  return { file: out, duration: await probeDuration(out) };
+}
+async function aceStepNative(song: MusicalSong, apiKey: string, fast: boolean): Promise<{ file: string; duration: number; taskId?: string }> {
+  const r = aceStepRequest(song);
+  const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8' };
+  // "thinking" (the 5Hz planning LM) gives better songs but is slower; the retry rounds switch it off.
   const body: any = {
-    prompt: `${profile.style}, ${profile.instruments}, ${gender} lead vocal singing in ${musicLanguage().name}, ${profile.emotion} emotion, backing choir on the chorus`,
-    lyrics, audio_duration: target, audio_format: 'mp3', batch_size: 1, vocal_language: musicLanguage().code, thinking: true,
-    ...(CFG.acestepModel ? { model: CFG.acestepModel } : {}),
+    prompt: r.prompt, lyrics: r.lyrics, audio_duration: r.target, audio_format: 'mp3', batch_size: 1, vocal_language: r.lang,
+    thinking: !fast, ai_token: apiKey, ...(CFG.acestepModel ? { model: CFG.acestepModel } : {}),
   };
-  const rel = await fetch(`${CFG.acestepBase}/release_task`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
-  const rj: any = await rel.json().catch(() => ({}));
-  const taskId = String(rj?.data?.task_id || rj?.task_id || '').trim();
-  if (!rel.ok || !taskId) throw new PipelineError(rel.status === 401 || rel.status === 403 ? 'acestep_auth' : rel.status === 429 || /quota|limit|credit/i.test(JSON.stringify(rj)) ? 'acestep_quota' : 'acestep_failed', `ACE-Step request failed (HTTP ${rel.status}): ${JSON.stringify(rj?.error || rj).slice(0, 300)}`);
-  log(`🎵 ACE-Step task ${taskId.slice(0, 24)} accepted; waiting for the song…`);
-  for (let attempt = 0; attempt < 120; attempt++) {
-    await sleep(5000);
+  let taskId = '';
+  for (let attempt = 0; attempt < 3 && !taskId; attempt++) {
+    if (attempt) await sleep(8000 * attempt);
+    try {
+      const rel = await fetch(`${CFG.acestepBase}/release_task`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
+      const txt = await rel.text();
+      let rj: any = {}; try { rj = JSON.parse(txt); } catch {}
+      taskId = String(rj?.data?.task_id || rj?.task_id || '').trim();
+      if (!rel.ok || !taskId) {
+        const code = aceErrCode(rel.status, txt);
+        const err = new PipelineError(code, `ACE-Step request failed (HTTP ${rel.status}): ${String(rj?.error || rj?.message || txt).slice(0, 200)}`);
+        if (code !== 'acestep_busy' || attempt === 2) throw err;
+        log(`⚠️ ${err.message} — retrying…`); taskId = '';
+      }
+    } catch (e: any) {
+      if (e instanceof PipelineError) throw e;
+      if (attempt === 2) throw new PipelineError('acestep_busy', `ACE-Step did not accept the song request (${e?.message || e}).`);
+      log(`⚠️ ACE-Step request attempt ${attempt + 1} failed (${e?.message || e}); retrying…`);
+    }
+  }
+  log(`🎵 ACE-Step task ${taskId.slice(0, 24)} accepted${fast ? ' (fast mode)' : ''}; waiting for the song…`);
+  const started = Date.now();
+  for (let attempt = 0; Date.now() - started < Math.min(15 * 60 * 1000, aceLeft()); attempt++) {
+    await sleep(attempt < 6 ? 5000 : 8000);
     let q: Response;
-    try { q = await fetch(`${CFG.acestepBase}/query_result`, { method: 'POST', headers, body: JSON.stringify({ task_id_list: [taskId] }), signal: AbortSignal.timeout(30000) }); }
+    try { q = await fetch(`${CFG.acestepBase}/query_result`, { method: 'POST', headers, body: JSON.stringify({ task_id_list: [taskId] }), signal: AbortSignal.timeout(45000) }); }
     catch { continue; }
     const qj: any = await q.json().catch(() => ({}));
-    if (!q.ok) { if (q.status === 429 || q.status >= 500) continue; throw new PipelineError('acestep_failed', `ACE-Step status check failed (HTTP ${q.status}).`); }
+    if (!q.ok) { if (q.status === 429 || q.status >= 500) continue; throw new PipelineError(aceErrCode(q.status, JSON.stringify(qj)), `ACE-Step status check failed (HTTP ${q.status}).`); }
     const item = Array.isArray(qj?.data) ? qj.data[0] : Array.isArray(qj) ? qj[0] : qj?.data;
     const status = Number(item?.status ?? 0);
-    if (status === 2) throw new PipelineError('acestep_failed', `ACE-Step could not generate the song: ${String(item?.error || item?.result || 'failed').slice(0, 300)}`);
-    if (status !== 1) { if (attempt % 6 === 0) log(`🎵 ACE-Step still generating (${(attempt + 1) * 5}s)…`); continue; }
+    if (status === 2) throw new PipelineError('acestep_busy', `ACE-Step could not generate the song: ${String(item?.error || item?.result || 'failed').slice(0, 200)}`);
+    if (status !== 1) { if (attempt % 8 === 0) log(`🎵 ACE-Step still generating (${Math.round((Date.now() - started) / 1000)}s)…`); continue; }
     let res: any = item?.result;
     if (typeof res === 'string') { try { res = JSON.parse(res); } catch { res = []; } }
     const first = Array.isArray(res) ? res[0] : res;
     const fileRef = String(first?.file || first?.audio_url || first?.url || '');
-    if (!fileRef) throw new PipelineError('acestep_failed', 'ACE-Step finished but returned no audio file.');
+    if (!fileRef) throw new PipelineError('acestep_busy', 'ACE-Step finished but returned no audio file.');
+    if (/^data:audio/i.test(fileRef)) return { ...(await saveAceAudio(Buffer.from(fileRef.split(',')[1] || '', 'base64'), 'async')), taskId };
     const url = /^https?:\/\//i.test(fileRef) ? fileRef : `${CFG.acestepBase}${fileRef.startsWith('/') ? '' : '/'}${fileRef}`;
-    const dl = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(180000) });
-    if (!dl.ok) throw new PipelineError('music_download_failed', `ACE-Step audio download failed: HTTP ${dl.status}`);
-    const out = path.join(WORK_DIR, `acestep_${crypto.randomBytes(4).toString('hex')}.mp3`);
-    fs.writeFileSync(out, Buffer.from(await dl.arrayBuffer()));
-    if (fs.statSync(out).size < 10000) throw new PipelineError('music_download_failed', 'ACE-Step returned an empty audio clip.');
-    return { file: out, duration: await probeDuration(out), taskId };
+    for (let d = 0; d < 3; d++) {
+      try {
+        const dl = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(240000) });
+        if (!dl.ok) throw new Error(`HTTP ${dl.status}`);
+        return { ...(await saveAceAudio(Buffer.from(await dl.arrayBuffer()), 'async')), taskId };
+      } catch (e: any) { if (d === 2) throw new PipelineError('acestep_busy', `ACE-Step audio download failed: ${e?.message || e}`); await sleep(5000); }
+    }
   }
-  throw new PipelineError('acestep_timeout', `ACE-Step task ${taskId} did not finish within 10 minutes.`);
+  throw new PipelineError('acestep_busy', `ACE-Step task ${taskId} did not finish in time (${Math.round((Date.now() - started) / 60000)} min).`);
+}
+/** OpenAI-style endpoint with streaming: the audio arrives as base64 in the stream (or in one JSON reply). */
+async function aceStepStream(song: MusicalSong, apiKey: string): Promise<{ file: string; duration: number }> {
+  const r = aceStepRequest(song);
+  const body: any = {
+    model: CFG.acestepModel ? (CFG.acestepModel.includes('/') ? CFG.acestepModel : `acemusic/${CFG.acestepModel}`) : 'acemusic/acestep-v15-turbo',
+    messages: [{ role: 'user', content: `<prompt>${r.prompt}</prompt>\n<lyrics>${r.lyrics}</lyrics>` }],
+    audio_config: { duration: r.target, vocal_language: r.lang, instrumental: false, format: 'mp3' },
+    stream: true, batch_size: 1,
+  };
+  const res = await fetch(`${CFG.acestepBase}/v1/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8', Accept: 'text/event-stream, application/json' },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(60000, Math.min(14 * 60 * 1000, aceLeft()))),
+  });
+  if (!res.ok) { const t = await res.text().catch(() => ''); throw new PipelineError(aceErrCode(res.status, t), `ACE-Step streaming request failed (HTTP ${res.status}): ${t.slice(0, 200)}`); }
+  log('🎵 ACE-Step streaming mode connected; waiting for the song…');
+  const raw = await res.text();
+  // Find the audio wherever it is: SSE delta.audio, message.audio, or any data:audio URL in the text.
+  const m = raw.match(/data:audio\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)/i);
+  if (m) return saveAceAudio(Buffer.from(m[1], 'base64'), 'stream');
+  const urlM = raw.match(/"url"\s*:\s*"(https?:\/\/[^"]+)"/i);
+  if (urlM) {
+    const dl = await fetch(urlM[1].replace(/\\\//g, '/'), { signal: AbortSignal.timeout(240000) });
+    if (dl.ok) return saveAceAudio(Buffer.from(await dl.arrayBuffer()), 'stream');
+  }
+  throw new PipelineError('acestep_busy', `ACE-Step streaming finished without audio: ${raw.replace(/\s+/g, ' ').slice(0, 200)}`);
 }
 
 /** Google Lyria via the Gemini API (Interactions). PAID — only used when LYRIA_ENABLED=true and a billing-enabled Gemini key is set. */
@@ -3414,27 +3288,26 @@ async function generateLyriaMusic(song: MusicalSong): Promise<{ file: string; du
   throw new PipelineError('lyria_failed', `Lyria music generation failed: ${lastErr || 'unknown error'}`);
 }
 
-const MUSIC_ENGINE_LABEL: Record<string, string> = { suno: 'Suno V5.5 (Api.Airforce)', acestep: 'ACE-Step 1.5', lyria: 'Google Lyria' };
-/** Tries each music engine in order (MUSIC_PROVIDERS). A dead/outaged engine never stops the run while another one works. */
+const MUSIC_ENGINE_LABEL: Record<string, string> = { acestep: 'ACE-Step 1.5', lyria: 'Google Lyria' };
+/** ACE-Step is the music engine. (Google Lyria is only tried if LYRIA_ENABLED=true with a paid Gemini key.) */
 async function generateMusicTrack(song: MusicalSong): Promise<{ file: string; duration: number; engine: string }> {
-  const order = (CFG.musicProviders.length ? CFG.musicProviders : ['acestep', 'suno', 'lyria']).filter((p) => p in MUSIC_ENGINE_LABEL);
-  const available = order.filter((p) => (p === 'suno' ? !!CFG.airforceKey : p === 'acestep' ? CFG.acestepKeys.length > 0 : CFG.lyriaEnabled && CFG.geminiKeys.length > 0));
-  if (!available.length) throw new PipelineError('music_no_engine', 'No music engine is configured. Add ACESTEP_API_KEY (free: https://acemusic.ai/api-key) or AIRFORCE_API_KEY as a GitHub Actions secret.');
+  const available = ['acestep', 'lyria'].filter((p) => (p === 'acestep' ? CFG.acestepKeys.length > 0 : CFG.lyriaEnabled && CFG.geminiKeys.length > 0));
+  if (!available.length) throw new PipelineError('music_no_engine', 'No ACE-Step key is configured. Add ACESTEP_API_KEY (free: https://acemusic.ai/api-key) as a GitHub Actions secret.');
   const errors: string[] = [];
   for (const p of available) {
     try {
       await reportStatus('running', `2/6 Generating music (${MUSIC_ENGINE_LABEL[p]})`, 24, `Generating “${song.title}” with ${MUSIC_ENGINE_LABEL[p]}…`);
-      const g = p === 'suno' ? await generateSunoMusic(song) : p === 'acestep' ? await generateAceStepMusic(song) : await generateLyriaMusic(song);
+      const g = p === 'acestep' ? await generateAceStepMusic(song) : await generateLyriaMusic(song);
       if (g.duration < 5) throw new PipelineError('music_too_short', `${MUSIC_ENGINE_LABEL[p]} returned only ${g.duration.toFixed(1)}s of audio.`);
       log(`🎵 Music generated with ${MUSIC_ENGINE_LABEL[p]}: ${g.duration.toFixed(1)}s.`);
       return { file: g.file, duration: g.duration, engine: p };
     } catch (e: any) {
       const msg = String(e?.message || e).slice(0, 300);
       errors.push(`${MUSIC_ENGINE_LABEL[p]}: ${msg}`);
-      log(`⚠️ ${MUSIC_ENGINE_LABEL[p]} failed (${msg}). ${p === available[available.length - 1] ? 'No more engines to try.' : 'Trying the next music engine…'}`);
+      log(`⚠️ ${MUSIC_ENGINE_LABEL[p]} failed (${msg}).`);
     }
   }
-  throw new PipelineError('music_all_failed', `Every music engine failed — ${errors.join(' | ')}. Nothing was posted; the next run will retry.`);
+  throw new PipelineError('music_all_failed', `Music generation failed — ${errors.join(' | ')}. Nothing was posted; the next run will retry.`);
 }
 
 /** Free word-level timing via Groq Whisper (used when the Airforce transcription is unavailable). */
@@ -3512,7 +3385,7 @@ async function produceMusical(t0: number, pastTitles: string[]): Promise<number>
   await reportStatus('running', '1/6 Writing the original song', 10, `Writing a ${CFG.subGenre || 'musical'} song for a ${CFG.gender} lead singer…`);
   const song = await writeMusicalSong(pastTitles);
   const generated = await generateMusicTrack(song);
-  const engineName = generated.engine === 'acestep' ? 'ace-step-1.5' : generated.engine === 'lyria' ? 'google-lyria' : 'suno-v5.5';
+  const engineName = generated.engine === 'lyria' ? 'google-lyria' : 'ace-step-1.5';
   const transcript = await transcribeSong(generated.file);
   const timing = timingForMusic(song, transcript, generated.duration);
   const cues = timing.sections.flatMap((sg) => [{ t: sg.start, tag: sg.emotion }, ...(sg.tag === 'chorus' ? [{ t: sg.start + 0.15, tag: 'excited' }] : [])]).filter((x) => EMOTION_TAGS.includes(x.tag));

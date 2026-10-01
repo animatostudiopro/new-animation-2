@@ -69,7 +69,7 @@ jobs:
   render_and_publish:
     name: Render & publish
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
       - name: Checkout
@@ -122,15 +122,13 @@ jobs:
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Musical: Suno V5.5 through Api.Airforce (first music engine tried).
+          # Optional: word-timed song transcription (Groq Whisper is used when this is absent).
           AIRFORCE_API_KEY: ${{ secrets.AIRFORCE_API_KEY }}
-          # Optional: only needed when your Airforce tenant exposes a Suno music task status URL.
-          AIRFORCE_MUSIC_STATUS_URL_TEMPLATE: ${{ secrets.AIRFORCE_MUSIC_STATUS_URL_TEMPLATE }}
-          # Free backup music engine for Musical automations (used automatically when Suno fails).
-          # Get a free key at https://acemusic.ai/api-key and store it as ACESTEP_API_KEY.
+          # Musical: ACE-Step 1.5 is the music engine (keys are built in; a secret overrides them).
           ACESTEP_API_KEY: ${{ secrets.ACESTEP_API_KEY }}
-          # Optional: order of music engines (default suno,acestep,lyria) and the paid Google Lyria fallback.
-          MUSIC_PROVIDERS: ${{ vars.MUSIC_PROVIDERS }}
+          # Optional: max minutes to wait for ACE-Step per run (default 30).
+          ACESTEP_MAX_MINUTES: ${{ vars.ACESTEP_MAX_MINUTES }}
+          # Optional paid fallback: Google Lyria (needs a billing-enabled Gemini key).
           LYRIA_ENABLED: ${{ vars.LYRIA_ENABLED }}
           # Optional: better / faster scene images.
           POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
