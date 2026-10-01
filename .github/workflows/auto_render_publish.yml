@@ -134,7 +134,7 @@ jobs:
           AIRFORCE_API_KEY: ${{ secrets.AIRFORCE_API_KEY }}
           # Musical: ACE-Step 1.5 is the music engine (keys are built in; a secret overrides them).
           ACESTEP_API_KEY: ${{ secrets.ACESTEP_API_KEY }}
-          # Optional: max minutes to wait for ACE-Step per run (default 12).
+          # Optional: max minutes to wait for ACE-Step per run (default 18).
           ACESTEP_MAX_MINUTES: ${{ vars.ACESTEP_MAX_MINUTES }}
           # Must match timeout-minutes above (the renderer budgets its time from it).
           JOB_TIMEOUT_MINUTES: '60'

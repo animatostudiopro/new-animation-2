@@ -193,7 +193,7 @@ const CFG = {
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
   maxRenderSeconds: parseInt(pick(ENV.MAX_VIDEO_SECONDS, '0'), 10) || 0,
   // Longest time a run spends waiting for ACE-Step before giving up (the next run retries).
-  acestepBudgetMin: parseInt(pick(ENV.ACESTEP_MAX_MINUTES, '12'), 10) || 12
+  acestepBudgetMin: parseInt(pick(ENV.ACESTEP_MAX_MINUTES, '18'), 10) || 18
 };
 
 if (IN_ACTIONS) {
@@ -3208,24 +3208,34 @@ async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; 
   const errors: string[] = [];
   aceStarted = Date.now();
   aceDeadline = aceStarted + CFG.acestepBudgetMin * 60 * 1000;
-  for (let round = 0; round < 2 && aceLeft() > 90000; round++) {
-    if (round > 0) { log('🎵 ACE-Step is busy on every key; waiting 30s, then one more round in fast mode…'); await aceStatus('ACE-Step busy on every key — retrying in 30s (fast mode)'); await sleep(30000); }
+  // The hosted service answers 504 (Cloudflare) when it is busy: keep cycling the keys, with short,
+  // growing pauses, for the whole time budget. "Thinking" (the slow planning model) is always off on the
+  // hosted API — it pushes generation past Cloudflare's ~100 s limit, which is what the 504s were.
+  let round = 0;
+  while (aceLeft() > 90000) {
+    if (round > 0) {
+      const wait = Math.min(60, 15 * round);
+      log(`🎵 ACE-Step busy on every key (round ${round}); waiting ${wait}s and trying again…`);
+      await aceStatus(`ACE-Step busy — retrying in ${wait}s (round ${round + 1})`);
+      await sleep(Math.min(wait * 1000, Math.max(0, aceLeft() - 90000)));
+    }
     for (const key of order) {
       const tag = `key …${key.slice(-4)}`;
       for (const mode of modes) {
         if (aceLeft() < 90000) break;
-        await aceStatus(`${mode === 'stream' ? 'streaming' : mode} request · key …${key.slice(-4)} · round ${round + 1}/2`);
+        await aceStatus(`${mode === 'stream' ? 'streaming' : mode} request · ${tag} · round ${round + 1}`);
         try {
-          return mode === 'native' ? await aceStepNative(song, key, round > 0) : await aceStepChat(song, key, mode === 'stream', round > 0);
+          return mode === 'native' ? await aceStepNative(song, key, round > 0) : await aceStepChat(song, key, mode === 'stream', true);
         } catch (e: any) {
-          errors.push(`${tag} ${mode}: ${String(e?.message || e).slice(0, 160)}`);
-          log(`⚠️ ACE-Step ${mode} mode on ${tag} failed (${e?.message || e}).`);
-          if (e?.code === 'acestep_lyrics') throw e; // the song itself was rejected — retrying won't help
+          errors.push(`${tag} ${mode}: ${String(e?.message || e).replace(/\{"type":"https:\/\/developers\.cloudflare[^}]*\}?/g, '(Cloudflare gateway timeout)').slice(0, 160)}`);
+          log(`⚠️ ACE-Step ${mode} mode on ${tag} failed (${String(e?.message || e).slice(0, 200)}).`);
+          if (e?.code === 'acestep_lyrics' || e?.code === 'acestep_auth') { if (e?.code === 'acestep_lyrics') throw e; break; }
         }
       }
     }
+    round++;
   }
-  throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (tried every key for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
+  throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (its servers kept timing out — tried every key for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
 }
 /** Set on a regeneration when the first song came out in the wrong voice. */
 let aceGenderBoost = false;
@@ -3327,7 +3337,7 @@ async function aceStepChat(song: MusicalSong, apiKey: string, stream: boolean, f
     model: await aceModel(apiKey),
     messages: [{ role: 'user', content: `<prompt>${r.prompt}</prompt>\n<lyrics>${r.lyrics}</lyrics>` }],
     audio_config: { duration: r.target, vocal_language: r.lang, instrumental: false, format: 'mp3' },
-    stream, thinking: !fast, use_format: false, sample_mode: false, use_cot_caption: false, batch_size: 1,
+    stream, thinking: !fast, use_format: false, sample_mode: false, use_cot_caption: false, use_cot_language: false, use_cot_metas: false, batch_size: 1,
     ...(aceGenderBoost ? { seed: Math.floor(Math.random() * 1e9) } : {}),
   };
   const res = await fetch(`${CFG.acestepBase}/v1/chat/completions`, {
