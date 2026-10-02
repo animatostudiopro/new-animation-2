@@ -3285,6 +3285,8 @@ async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; 
   return aceLocalGenerate(song, prepareLocalAce());
 }
 let aceLocalPrep: Promise<{ base: string; stop: () => void }> | null = null;
+/** The local server's own key (sent as both the Bearer header and ai_token, which it checks). */
+const ACE_LOCAL_KEY = `animato-${crypto.randomBytes(8).toString('hex')}`;
 function prepareLocalAce(): Promise<{ base: string; stop: () => void }> {
   if (aceLocalPrep) return aceLocalPrep;
   aceLocalPrep = (async () => {
@@ -3314,7 +3316,7 @@ du -sh "${root}" 2>/dev/null || true
     if (r.code !== 0) throw new Error(`local ACE-Step setup failed: ${r.stderr.split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 400)}`);
     log(`🎵 Local ACE-Step installed in ${((Date.now() - t0) / 1000).toFixed(0)}s (${r.stdout.toString().trim().split('\n').pop() || ''}).`);
     const port = 8011, threads = String(Math.max(1, os.cpus().length));
-    const env = { ...process.env, ACESTEP_API_HOST: '127.0.0.1', ACESTEP_API_PORT: String(port), ACESTEP_API_KEY: '', ACESTEP_DEVICE: 'cpu', ACESTEP_INIT_LLM: 'false', ACESTEP_LM_BACKEND: 'pt',
+    const env = { ...process.env, ACESTEP_API_HOST: '127.0.0.1', ACESTEP_API_PORT: String(port), ACESTEP_API_KEY: ACE_LOCAL_KEY, ACESTEP_DEVICE: 'cpu', ACESTEP_INIT_LLM: 'false', ACESTEP_LM_BACKEND: 'pt',
       ACESTEP_USE_FLASH_ATTENTION: 'false', ACESTEP_CONFIG_PATH: 'acestep-v15-turbo', ACESTEP_PROJECT_ROOT: repo, ACESTEP_CHECKPOINTS_DIR: ckpt, OMP_NUM_THREADS: threads, MKL_NUM_THREADS: threads, TOKENIZERS_PARALLELISM: 'false' };
     const srv = spawn(py, ['-m', 'acestep.api_server'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let tail = '';
@@ -3347,7 +3349,7 @@ async function aceLocalGenerate(song: MusicalSong, prep: Promise<{ base: string;
   try {
     await aceStatus('ACE-Step on the runner is making the song (CPU)');
     const beat2 = setInterval(() => { aceStatus('ACE-Step on the runner is making the song (CPU)'); }, 30000);
-    try { return await aceStepNative(song, 'local', true); }
+    try { return await aceStepNative(song, ACE_LOCAL_KEY, true); }
     finally { clearInterval(beat2); }
   } finally {
     (CFG as any).acestepBase = saved;
