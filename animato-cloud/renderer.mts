@@ -139,7 +139,7 @@ const CFG = {
   // Set to the local ACE-Step server on the runner while a song is being made.
   acestepBase: 'http://127.0.0.1:8011',
   acestepModel: pick(ENV.ACESTEP_MODEL, ''),
-  // Musical song length (seconds), at most 60: intro → chorus → chorus again (the hook sticks) → outro.
+  // Musical song length (seconds), at most 60: intro → verse → pre-chorus → chorus → chorus again → outro.
   musicSeconds: Math.max(20, Math.min(60, parseInt(pick(ENV.MUSIC_SECONDS, '60'), 10) || 60)),
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
   lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
@@ -152,6 +152,11 @@ const CFG = {
   animStyle: pick(JOB.anim_style, ENV.ANIM_STYLE),
   podcastAbout: pick(JOB.podcast_about, ENV.PODCAST_ABOUT),
   podcastGuests: pick(JOB.podcast_guests, ENV.PODCAST_GUESTS) === 'true',
+  /** Musicals: the singer is the guest of her own show, interviewed about her latest songs. */
+  podcastSinger: pick(JOB.podcast_singer, ENV.PODCAST_SINGER) === 'true',
+  podcastSongs: (() => { try { const v = JSON.parse(pick(JOB.podcast_songs, ENV.PODCAST_SONGS) || '[]'); return Array.isArray(v) ? v.slice(0, 6) : []; } catch { return []; } })(),
+  /** The presenter's name: the YouTube channel's first word ("Lola Cooks" → Lola). */
+  presenterName: pick(JOB.presenter_name, ENV.PRESENTER_NAME),
   /** Podcasts: 'auto' = brand-new hosts every episode (podcastCastCount of them, besides the presenter in guest mode). */
   podcastCast: pick(JOB.podcast_cast, ENV.PODCAST_CAST, 'custom'),
   podcastCastCount: Math.max(1, Math.min(3, parseInt(pick(JOB.podcast_cast_count, '2'), 10) || 2)),
@@ -879,8 +884,8 @@ ${part >= last ? '- The title must NOT contain "(Part ...)" if the story ends he
 function buildPrompt(pastStory: string, pastTitles: string[], headlines: any[], pack: FactPack | null = null): string {
   const L = lengthSpec();
   const avoid = pastTitles.length ? `\nPrevious video titles (do NOT repeat these topics): ${pastTitles.slice(-15).join(' | ')}` : '';
-  return `You are writing a ${IS_SHORTS ? 'YouTube Short (vertical)' : 'YouTube video (16:9)'} of ${L.seconds}, narrated by an animated presenter.
-${categoryBrief(pastStory, headlines, pack)}${avoid}
+  return `You are writing a ${IS_SHORTS ? 'YouTube Short (vertical)' : 'YouTube video (16:9)'} of ${L.seconds}, narrated by an animated presenter${CFG.presenterName ? ` called ${CFG.presenterName}` : ''}.
+${categoryBrief(pastStory, headlines, pack)}${avoid}${CFG.presenterName ? `\nPRESENTER NAME: ${CFG.presenterName}. Whenever the presenter introduces themself or signs off, use this name (e.g. "Hi, I'm ${CFG.presenterName}") — never any other name.` : ''}
 
 RULES
 - Total narration: ${L.words} words across ${L.scenes} scenes. Each scene is 1-3 spoken sentences (8-40 words).
@@ -1358,7 +1363,7 @@ function templateScript(): Script {
 // ---------------------------------------------------------------------------
 // 2. Narration with word timings
 // ---------------------------------------------------------------------------
-interface Word { text: string; start: number; end: number; token?: number }
+interface Word { text: string; start: number; end: number; token?: number; line?: number }
 interface Narration { audioPath: string; duration: number; words: Word[]; wordsReliable: boolean; engine: string; neural: boolean }
 
 const VOICES: Record<string, Record<string, string[]>> = {
@@ -1382,7 +1387,8 @@ function cleanForSpeech(text: string): string {
 /** Attach the script's own tokens (with punctuation) to the TTS word timings. */
 function alignWords(boundaries: Word[], script: string): Word[] {
   const tokens = script.split(/\s+/).filter(Boolean);
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Letters of every alphabet count (Korean, Arabic, Cyrillic…), not just a–z.
+  const norm = (s: string) => s.toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
   const out: Word[] = [];
   let ti = 0;
   for (const b of boundaries) {
@@ -2515,6 +2521,7 @@ async function renderWithStage(opts: {
   size?: { w: number; h: number };
   musical?: { stageId?: number; stageAutoSeed?: string; style?: string; sections?: { start: number; end: number; tag: string; emotion?: string }[]; vocalSpans?: { start: number; end: number }[]; drumLevel?: number; keysLevel?: number };
   stems?: Stems;
+  lyrics?: { lines: { text: string; en: string }[]; noSpaces: boolean };
 }): Promise<{ ok: boolean; character: string; reason?: string }> {
   const audioExt = path.extname(opts.narration.audioPath) || '.mp3';
   const accent = CFG.category === 'cooking' ? '#FFB020' : CFG.category === 'tech' ? '#22D3EE' : CFG.category === 'news' ? '#FF4D4D' : '#FFD23F';
@@ -2526,7 +2533,8 @@ async function renderWithStage(opts: {
     width: RW, height: RH, fps: FPS, duration: opts.duration, category: CFG.category,
     title: opts.title, badge: opts.badge, endCard: opts.endCard, accent,
     audio: `/audio/narration${audioExt}`,
-    words: opts.narration.words.map((w) => ({ text: w.text, start: +w.start.toFixed(3), end: +w.end.toFixed(3) })),
+    words: opts.narration.words.map((w) => ({ text: w.text, start: +w.start.toFixed(3), end: +w.end.toFixed(3), ...(typeof w.line === 'number' ? { line: w.line } : {}) })),
+    ...(opts.lyrics ? { lyrics: opts.lyrics } : {}),
     wordsReliable: opts.narration.wordsReliable,
     segments: opts.scenes.map((s, i) => ({ start: opts.times[i].start, end: opts.times[i].end, text: s.narration, image: opts.images[i] ? `/img/${path.basename(opts.images[i]!)}` : null, shot: s.shot, emotion: s.emotion, credit: opts.credits?.[i] || null })),
     cues: opts.cues,
@@ -2864,7 +2872,7 @@ async function produceAnimated(t0: number, pastTitles: string[]): Promise<number
   const RW = landscapePodcast ? 1920 : W, RH = landscapePodcast ? 1080 : H;
   // A podcast hosted by the automation's own presenter keeps the presenter's usual voice.
   let hostVoice = '';
-  if (CFG.podcastGuests) {
+  if (CFG.podcastGuests || CFG.podcastSinger) {
     try { const cs = JSON.parse(String(CFG.castSpecs ? JSON.stringify(CFG.castSpecs) : '[]')); const g = cs[0]?.gender === 'male' ? 'male' : 'female'; hostVoice = (VOICES[g][CFG.hostCategory] || VOICES[g].default)[0]; } catch {}
   }
   const kit = {
@@ -3255,6 +3263,34 @@ function fillerHeavy(lyrics: string): boolean {
   const unique = new Set(words).size / words.length;
   return filler / words.length > 0.22 || unique < 0.38;
 }
+/**
+ * The producer's pass: a hit songwriter reviews the draft (hook strength, rhyme and flow, story clarity,
+ * genre authenticity, singability, line length) and returns an improved version with the same structure.
+ */
+async function polishSong(d: { title: string; hook: string; message: string; sections: MusicalSection[] }): Promise<{ title: string; sections: MusicalSection[] } | null> {
+  const lang = musicLanguage(), f = genreFeel();
+  const draft = d.sections.map((x) => `[${x.tag.toUpperCase()}]\n${x.lyrics}`).join('\n\n');
+  const user = `You are the producer polishing this ${CFG.subGenre || 'pop'} song (${lang.name} lyrics) before it is recorded. Genre sound: ${f.tags}; vocal: ${f.vocal}${f.bpm ? `; ${f.bpm} BPM` : ''}.
+Message: ${d.message || '(see lyrics)'} · Hook: ${d.hook || '(find the strongest one)'}
+
+DRAFT:
+${draft}
+
+Make it a song people replay: (1) the hook is short, punchy and instantly memorable, and opens the chorus; (2) every line rhymes or flows naturally on the beat and is 4–8 words; (3) the verse tells one clear, concrete story that builds into the chorus; (4) it sounds authentically ${CFG.subGenre || 'pop'} — its slang, rhythm and attitude; (5) no filler, no clichés without meaning; (6) the outro pays the story off and lands the hook. Keep the SAME sections in the same order (same tags), the same language (${lang.name}) and roughly the same length. Return JSON only: {"title": "...", "sections": [{"tag": "...", "lyrics": "...", "emotion": "..."}]}`;
+  for await (const a of LLM.attempts({ system: 'You are a Grammy-winning songwriter and producer. Original lyrics only.', user, saferUser: user, temperature: 0.7, maxTokens: 4000, json: true, task: 'musical_polish' })) {
+    try {
+      const j = extractJsonObject(a.text) as any;
+      const secs = validMusicSections(j.sections);
+      const tags = (x: MusicalSection[]) => x.map((y) => y.tag).join(',');
+      if (secs.length && tags(secs) === tags(d.sections) && !fillerHeavy(secs.map((x) => x.lyrics).join('\n'))) {
+        log(`🎵 Producer's pass: lyrics polished${j.title ? ` (“${String(j.title).slice(0, 60)}”)` : ''}.`);
+        return { title: String(j.title || '').trim().slice(0, 90), sections: secs };
+      }
+    } catch {}
+    break;   // one model try is enough — the draft is already good
+  }
+  return null;
+}
 async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   const profile = musicalProfile();
   const gender = CFG.gender === 'male' ? 'male' : 'female';
@@ -3263,7 +3299,7 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   const idea = songConcept();
   log(`🎵 Song idea (${idea.theme}): ${idea.concept}`);
   const meaning = `WHAT THE SONG IS ABOUT (mandatory): ${idea.concept}. Tell THIS story from the singer’s point of view. Every single line must belong to it — concrete people, places, objects and actions (a named street, mama’s kitchen, the bus stop, the DJ booth, a phone screen…), one clear emotion, and a message a listener can repeat in one sentence. No vague filler about “good vibes”, “just the good”, “feeling good tonight” with nothing behind it; at most one short ad-lib (e.g. “eh!”) per section. `;
-  const user = `${meaning}Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: INTRO (2 short lines that set the scene of the story — who, where, what just happened — so the listener is hooked and knows what the song is about), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and again in line 3 or 4; lines 2 and 4 add the feeling/detail and rhyme; this is most of the song), OUTRO (2 lines that land the story — a payoff, a twist or a punchline that answers the intro — ending on the hook). No verses, no bridge. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : CFG.musicSeconds <= 75 ? `The song is about ${CFG.musicSeconds} SECONDS long and must feel like a real hit single cut down to one minute. Write exactly three sections: INTRO (4 lines that set the story and the mood — who, where, what just happened — in the genre’s own voice and slang), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and repeated in line 3 or 4; lines 2 and 4 add the feeling and rhyme; simple, singable, built for people to sing along), OUTRO (2 lines that land the story — a payoff or twist — ending on the hook). The CHORUS will be sung TWICE back to back, so it must be strong enough to repeat. The emotion and rhythm of every line must match the genre: ${(() => { const f = genreFeel(); return `${f.tags}; vocal: ${f.vocal}${f.bpm ? `; about ${f.bpm} BPM` : ''}`; })()}. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 75 ? `Use about ${Math.round(CFG.musicSeconds * 0.85)}–${Math.round(CFG.musicSeconds * 1.1)} lyric words in total across intro + chorus + outro (the chorus repeats, so the sung total is higher).` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
+  const user = `${meaning}Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: INTRO (2 short lines that set the scene of the story — who, where, what just happened — so the listener is hooked and knows what the song is about), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and again in line 3 or 4; lines 2 and 4 add the feeling/detail and rhyme; this is most of the song), OUTRO (2 lines that land the story — a payoff, a twist or a punchline that answers the intro — ending on the hook). No verses, no bridge. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : CFG.musicSeconds <= 75 ? `The song is about ${CFG.musicSeconds} SECONDS long and must feel like a real hit single cut down to one minute, with a complete song structure. Write exactly five sections, in this order: INTRO (2 short lines — a call-out or vocal hook that sets the mood and hints at the story), VERSE (4 short lines that tell the story with concrete detail — who, where, what happened; natural rhymes), PRE-CHORUS (tag "prechorus": 2 short lines that lift the energy and build anticipation — a rising question, promise or turn — so the chorus explodes), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and repeated in line 3 or 4; lines 2 and 4 add the feeling and rhyme; simple, singable, built for people to sing along — the emotional release of the verse), OUTRO (2 lines that land the story — a payoff or twist — ending on the hook). Keep every line short (4–8 words) so it fits the beat. The CHORUS will be sung TWICE back to back. The emotion, rhythm and slang of every line must match the genre: ${(() => { const f = genreFeel(); return `${f.tags}; vocal: ${f.vocal}${f.bpm ? `; about ${f.bpm} BPM` : ''}`; })()}. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 75 ? `Use about ${Math.round(CFG.musicSeconds * 0.95)}–${Math.round(CFG.musicSeconds * 1.25)} lyric words in total across intro + verse + pre-chorus + chorus + outro (the chorus repeats, so the sung total is higher).` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
   let last = '', fillerRejects = 0;
   for await (const a of LLM.attempts({
     system: 'You are a hit songwriter (think chart-topping Afrobeats/pop writers) and music-video creative director. A great short song tells one specific, relatable story with a hook people sing after one listen. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
@@ -3280,12 +3316,19 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
       if (j.message) log(`🎵 Song message: ${String(j.message).slice(0, 160)}${j.hook ? ` · hook: “${String(j.hook).slice(0, 60)}”` : ''}`);
       if (String(j.title || '').trim() && words >= (CFG.musicSeconds <= 75 ? Math.round(CFG.musicSeconds * 0.6) : IS_SHORTS ? 70 : 150) && hasChorus) {
         // Too many words for the length → keep intro + chorus (+ outro) so it fits and stays in sync.
-        if (CFG.musicSeconds <= 75 && words > CFG.musicSeconds * 2.4) { const allowed = ['intro', 'chorus', 'outro']; const seen = new Set<string>(); const keep = sections.filter((x) => allowed.includes(x.tag) && !seen.has(x.tag) && (seen.add(x.tag), true)); if (keep.some((x) => x.tag === 'chorus')) { sections.splice(0, sections.length, ...keep); lyrics = cleanMusicLyrics(sectionLyricText(sections)); } }
-        // One-minute song: intro → chorus → chorus again (the hook sticks) → outro.
+        if (CFG.musicSeconds <= 75 && words > CFG.musicSeconds * 2.4) { const allowed = ['intro', 'verse', 'prechorus', 'chorus', 'outro']; const seen = new Set<string>(); const keep = sections.filter((x) => allowed.includes(x.tag) && !seen.has(x.tag) && (seen.add(x.tag), true)); if (keep.some((x) => x.tag === 'chorus')) { sections.splice(0, sections.length, ...keep); lyrics = cleanMusicLyrics(sectionLyricText(sections)); } }
+        // Producer's pass: review the draft like a hit-maker and rewrite it once (hook, rhyme, flow, story, genre).
+        const polished = await polishSong({ title: String(j.title), hook: String(j.hook || ''), message: String(j.message || ''), sections: sections.map((x) => ({ ...x })) }).catch(() => null);
+        if (polished) {
+          sections.splice(0, sections.length, ...polished.sections);
+          lyrics = cleanMusicLyrics(sectionLyricText(sections));
+          if (polished.title) j.title = polished.title;
+        }
+        // One-minute song: intro → verse → pre-chorus → chorus → chorus again (the hook sticks) → outro.
         if (CFG.musicSeconds <= 75) {
-          const intro = sections.find((x) => x.tag === 'intro'), chorus = sections.find((x) => x.tag === 'chorus'), outro = sections.find((x) => x.tag === 'outro');
+          const intro = sections.find((x) => x.tag === 'intro'), verse = sections.find((x) => x.tag === 'verse'), pre = sections.find((x) => x.tag === 'prechorus'), chorus = sections.find((x) => x.tag === 'chorus'), outro = sections.find((x) => x.tag === 'outro');
           if (chorus) {
-            const shaped = [intro, chorus, { ...chorus, emotion: chorus.emotion || 'excited' }, outro].filter(Boolean) as MusicalSection[];
+            const shaped = [intro, verse, pre, chorus, { ...chorus, emotion: chorus.emotion || 'excited' }, outro].filter(Boolean) as MusicalSection[];
             sections.splice(0, sections.length, ...shaped);
             lyrics = cleanMusicLyrics(sectionLyricText(sections));
             log(`🎵 Song shape: ${sections.map((x) => x.tag).join(' → ')} (${lyricWordCount(lyrics)} sung words).`);
@@ -3733,15 +3776,57 @@ function wordsOverSpans(text: string, spans: { start: number; end: number }[]): 
     if (si >= spans.length) break;
     const sp = spans[si], start = sp.start + used;
     const dur = Math.min(need, sp.end - start);
-    out.push({ text: w, start: +start.toFixed(3), end: +(start + Math.max(0.08, dur)).toFixed(3) });
+    out.push({ text: w, start: +start.toFixed(3), end: +(start + Math.max(0.08, dur)).toFixed(3), token: out.length });
     used += dur;
   }
   return out;
 }
+/** Languages written without spaces: split into real words (Intl.Segmenter) so lyrics can be timed and captioned. */
+const NO_SPACE_LANGS = new Set(['ja', 'zh', 'th', 'lo', 'km', 'my']);
+function lyricTokens(line: string, lang: string): string[] {
+  if (NO_SPACE_LANGS.has(lang) && typeof (Intl as any).Segmenter === 'function') {
+    try {
+      const seg = new (Intl as any).Segmenter(lang, { granularity: 'word' });
+      const out: string[] = [];
+      for (const s of seg.segment(line)) { const w = String(s.segment).trim(); if (!w) continue; if (!s.isWordLike && out.length) out[out.length - 1] += w; else out.push(w); }
+      return out;
+    } catch {}
+  }
+  return line.split(/\s+/).filter(Boolean);
+}
+/** The sung lyric lines (in order, the repeated chorus included) and each token's line. */
+function lyricLayout(song: MusicalSong): { lines: string[]; script: string; tokenLine: number[] } {
+  const lang = musicLanguage().code;
+  const lines = cleanMusicLyrics(song.lyrics).split('\n').map((x) => x.trim()).filter(Boolean);
+  const toks: string[] = [], tokenLine: number[] = [];
+  lines.forEach((l, i) => { for (const t of lyricTokens(l, lang)) { toks.push(t); tokenLine.push(i); } });
+  return { lines, script: toks.join(' '), tokenLine };
+}
+/** English translation of each lyric line (one per line, same order) — for the second subtitle row. */
+async function translateLyricLines(lines: string[]): Promise<string[]> {
+  const lang = musicLanguage();
+  if (!lines.length || lang.name.toLowerCase() === 'english') return [];
+  const user = `Translate these ${lines.length} song lyric lines from ${lang.name} into natural, singable-sounding English (keep the meaning and feeling, not word-for-word). Return JSON only: {"lines": [ ... exactly ${lines.length} strings, one per input line, same order ... ]}.\n\n${lines.map((l, i) => `${i + 1}. ${l}`).join('\n')}`;
+  try {
+    for await (const a of LLM.attempts({ system: 'You are a professional song translator for subtitles.', user, saferUser: user, temperature: 0.2, maxTokens: 2500, json: true, task: 'lyric_translation' })) {
+      try {
+        const j = extractJsonObject(a.text) as any;
+        const out = Array.isArray(j?.lines) ? j.lines.map((x: any) => String(x || '').trim()) : [];
+        if (out.length === lines.length && out.every(Boolean)) return out;
+      } catch {}
+    }
+  } catch {}
+  log('⚠️ Lyric translation unavailable — showing the original-language captions only.');
+  return [];
+}
 function timingForMusic(song: MusicalSong, transcript: Word[], duration: number, vocalSpans: { start: number; end: number }[] = []): { words: Word[]; sections: { start: number; end: number; tag: string; emotion: string }[] } {
-  const base = transcript.length ? alignWords(transcript, cleanMusicLyrics(song.lyrics)) : [];
+  const lay = lyricLayout(song);
+  const base = transcript.length ? alignWords(transcript, lay.script) : [];
   // No usable transcript: the lyrics go where she is really singing (never spread over the instrumental parts).
-  const words = base.length > 5 ? base : vocalSpans.length ? wordsOverSpans(cleanMusicLyrics(song.lyrics), vocalSpans) : estimateWordTimes(cleanMusicLyrics(song.lyrics), duration);
+  const words0 = base.length > 5 ? base : vocalSpans.length ? wordsOverSpans(lay.script, vocalSpans) : estimateWordTimes(lay.script, duration);
+  // Every word knows its lyric line (captions show whole lines, with the English translation under them).
+  let lastLine = 0;
+  const words = words0.map((w) => { const ln = typeof w.token === 'number' && w.token >= 0 ? lay.tokenLine[w.token] ?? lastLine : lastLine; lastLine = ln; return { ...w, line: ln } as Word; });
   const sections: { start: number; end: number; tag: string; emotion: string }[] = [];
   const totalWords = Math.max(1, song.lyrics.split(/\s+/).filter(Boolean).length);
   let cursor = 0;
@@ -3805,11 +3890,14 @@ async function produceMusical(t0: number, pastTitles: string[]): Promise<number>
   const cues = timing.sections.flatMap((sg) => [{ t: sg.start, tag: sg.emotion }, ...(sg.tag === 'chorus' ? [{ t: sg.start + 0.15, tag: 'excited' }] : [])]).filter((x) => EMOTION_TAGS.includes(x.tag));
   const chorusIntervals = timing.sections.filter((s) => s.tag === 'chorus').map((s) => ({ start: s.start, end: s.end }));
   await reportStatus('running', '3/6 Building the music-video performance', 45, `Timed ${timing.words.length} words; ${chorusIntervals.length} chorus sections will bring in the choir.`);
+  const lyricLines = lyricLayout(song).lines;
+  const lyricEn = await translateLyricLines(lyricLines);
+  if (lyricEn.length) log(`🌍 Bilingual captions: ${musicLanguage().name} + English (${lyricEn.length} lines).`);
   const narration: Narration = { audioPath: generated.file, duration: generated.duration, words: timing.words, wordsReliable: transcript.length > 5 || vocalSpans.length > 0, engine: engineName, neural: true };
   const title = song.title;
   const badge = (CFG.subGenre || 'MUSICAL').toUpperCase().slice(0, 24);
   const endCard = 'Follow for the next original song';
-  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })) as unknown as Scene[], times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals, musical: { stageId: CFG.stageId || 0, stageAutoSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`, style: CFG.subGenre || '', sections: timing.sections, vocalSpans, drumLevel, keysLevel }, stems: stems || undefined });
+  const stage = await renderWithStage({ narration, scenes: timing.sections.map((s) => ({ narration: s.tag === 'chorus' ? 'CHORUS' : s.tag, shot: 'scene', emotion: s.emotion, imageQuery: '', imageCredit: '' })) as unknown as Scene[], times: timing.sections.map((s) => ({ start: s.start, end: s.end })), cues, images: timing.sections.map(() => null), title, badge, endCard, music: null, duration: generated.duration, musicalStage: true, chorusIntervals, lyrics: { lines: lyricLines.map((text, i) => ({ text, en: lyricEn[i] || '' })), noSpaces: NO_SPACE_LANGS.has(musicLanguage().code) }, musical: { stageId: CFG.stageId || 0, stageAutoSeed: `${CFG.campaignId || CFG.campaignName || 'local'}:${CFG.partNumber}`, style: CFG.subGenre || '', sections: timing.sections, vocalSpans, drumLevel, keysLevel }, stems: stems || undefined });
   if (!stage.ok) throw new PipelineError('musical_render_failed', `Musical stage render failed: ${stage.reason || 'unknown error'}`);
   const outDur = await probeDuration(OUTPUT_VIDEO);
   if (outDur < 5) throw new PipelineError('musical_render_failed', `Rendered musical video is only ${outDur.toFixed(1)}s long.`);

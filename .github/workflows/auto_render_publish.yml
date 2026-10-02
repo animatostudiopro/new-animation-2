@@ -102,7 +102,7 @@ jobs:
       - name: Install FFmpeg, fonts and voice engine
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core > /dev/null
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core fonts-noto-core fonts-noto-cjk > /dev/null
           python -m pip install --quiet --disable-pip-version-check edge-tts
           ffmpeg -hide_banner -version | head -n 1
           edge-tts --help > /dev/null && echo "edge-tts ready"

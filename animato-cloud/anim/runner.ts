@@ -333,7 +333,14 @@ async function podcast(kit: Kit): Promise<AnimResult> {
   const CFG = kit.CFG;
   let specs: any[] = (Array.isArray(CFG.castSpecs) && CFG.castSpecs.length ? CFG.castSpecs : [null, null]).slice(0, 3);
   // Auto cast: brand-new hosts (or guests, when the automation's presenter hosts) for every episode.
-  if (CFG.podcastCast === 'auto') {
+  // Musicals: the singer is the GUEST of her own show; two brand-new hosts interview her.
+  const singerMode = !!CFG.podcastSinger && !!specs[0];
+  if (singerMode) {
+    const singer = { ...specs[0], gender: specs[0]?.gender === 'male' ? 'male' : 'female' };
+    const auto = autoCast(`${CFG.campaignId}:${CFG.partNumber}:hosts`, 2, [String(singer?.name || '')]);
+    specs = [...auto, singer];
+    kit.log(`Podcast hosts this episode: ${auto.map((a) => `${a.name} (${a.gender}, ${a.personality})`).join(', ')}; guest: ${clean(singer?.name, 24) || 'the singer'}.`);
+  } else if (CFG.podcastCast === 'auto') {
     const keep = CFG.podcastGuests && specs[0] ? [specs[0]] : [];
     const auto = autoCast(`${CFG.campaignId}:${CFG.partNumber}`, Math.max(keep.length ? 1 : 2, Math.min(3 - keep.length, Number(CFG.podcastCastCount) || 2)), keep.map((k: any) => String(k?.name || '')));
     specs = [...keep, ...auto];
@@ -347,16 +354,22 @@ async function podcast(kit: Kit): Promise<AnimResult> {
     return { id: `h${i + 1}`, name: clean(sp?.name, 24) || ['Maya', 'Jordan', 'Sam'][i], gender, spec, seed: sp?.seed ? String(sp.seed) : undefined, personality: clean(sp?.personality, 40), color: PALETTE[i] };
   });
   // In an automation's rotation, a podcast with no topics of its own talks about the automation's topics.
-  const about = clean(CFG.podcastAbout, 300);
+  const songs: { title: string; genre: string; lyrics: string }[] = singerMode ? (Array.isArray(CFG.podcastSongs) ? CFG.podcastSongs : []).map((x: any) => ({ title: clean(x?.title, 100), genre: clean(x?.genre, 60), lyrics: String(x?.lyrics || '').replace(/\[[^\]]*\]/g, ' ').replace(/[ \t]+/g, ' ').trim().slice(0, 600) })).filter((x: any) => x.title) : [];
+  const about = singerMode ? (songs.length ? `the inspiration behind ${songs.map((x) => `"${x.title}"`).join(', ')}` : 'her music and her latest concert') : clean(CFG.podcastAbout, 300);
   const topic = clean(CFG.topic || about || (/^podcast$/i.test(String(CFG.subGenre || '')) ? '' : CFG.subGenre) || 'the biggest story this week', 200);
   const queries = about && !CFG.topic ? about.split(/\s*,\s*/).filter(Boolean).slice(0, 3) : [topic];
   const news: { title: string; source: string }[] = [];
-  for (const q of queries) for (const h of await headlinesFor(kit, q)) if (news.length < 10 && !news.some((n) => n.title === h.title)) news.push(h);
+  if (!singerMode) for (const q of queries) for (const h of await headlinesFor(kit, q)) if (news.length < 10 && !news.some((n) => n.title === h.title)) news.push(h);
   const shorts = lengthOf(kit);
   const n = shorts ? '12-16 lines, 130-160 words in total (under 60 seconds)' : '40-60 lines, 480-620 words in total (3-4 minutes)';
-  const guestMode = !!CFG.podcastGuests && hosts.length > 1;
+  const guestMode = !singerMode && !!CFG.podcastGuests && hosts.length > 1;
+  const star = hosts[hosts.length - 1];
   const guestNames = hosts.slice(1).map((h) => h.name).join(' and ');
-  const cast = guestMode
+  const cast = singerMode
+    ? `hosted by ${hosts[0].name} (${hosts[0].gender}, ${hosts[0].personality.toLowerCase() || 'warm'}) and ${hosts[1].name} (${hosts[1].gender}, ${hosts[1].personality.toLowerCase() || 'curious'}). Today's GUEST is the singer ${star.name} (${star.gender}) — the star of this channel. She is NOT a host: the hosts interview HER.
+Speakers: 1 = ${hosts[0].name} (lead host), 2 = ${hosts[1].name} (co-host), 3 = ${star.name} (the singer, guest).
+THE HOSTS OPEN: welcome viewers back to ${studio.showName}, then introduce ${star.name} with real excitement and say she is here to talk about her latest songs. The two hosts take turns asking; ${star.name} answers in the first person ("I wrote it when…").`
+    : guestMode
     ? `hosted by ${hosts[0].name} (${hosts[0].gender}), the channel's regular presenter. Today's GUEST${hosts.length > 2 ? 'S' : ''} on the show: ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (${h.gender}${h.personality ? `, ${h.personality.toLowerCase()}` : ''})`).join('; ')}.
 Speakers: 1 = ${hosts[0].name} (the host), ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (guest)`).join(', ')}.
 THE HOST OPENS: welcomes the viewers back, then introduces the guest by name — e.g. "We have ${hosts[1].name} on the show today" — and says what they will talk about. The host asks the questions and steers; the guest${hosts.length > 2 ? 's bring' : ' brings'} expertise, strong opinions and predictions. The host thanks ${guestNames} by name at the end and asks viewers to follow`
@@ -367,7 +380,11 @@ ${news.length ? `FRESH HEADLINES (last 3 days). Facts may ONLY come from these; 
 EPISODES ALREADY MADE (never repeat one of these angles):
 ${avoidTitles(kit)}
 
-${about && !CFG.topic ? `ANGLE: a roundup of the latest in ${about} — what just happened, why it matters, the hosts' honest takes, and bold predictions about the next big thing (clearly framed as speculation).\n` : ''}HOW IT SOUNDS: a real conversation between friends who know the subject — quick back-and-forth, reactions ("wait, really?"), a disagreement, a laugh, a clear takeaway. Short lines (one or two sentences each). Line 1 is a HOOK (a surprising fact or bold opinion, max 14 words). The last line thanks the audience and asks them to follow.
+${singerMode ? `THE SONGS SHE RELEASED SINCE THE LAST EPISODE (talk about EACH one, in this order, by its exact title):
+${songs.length ? songs.map((x, i) => `${i + 1}. "${x.title}"${x.genre ? ` (${x.genre})` : ''}${x.lyrics ? `\n   lyrics: ${x.lyrics.replace(/\n+/g, ' / ')}` : ''}`).join('\n') : '(no song list was saved — talk about her music in general, her last concert and what she is working on, without naming song titles)'}
+INTERVIEW: for every song the hosts ask about the INSPIRATION — the moment, person or feeling behind it, what the lyrics really mean (she may quote one short line ONLY from the lyrics given above), how the band and backup singers built it, and how the crowd reacted at the concert. Follow-up questions, laughs and honest emotion. ${star.name} speaks about 45% of the lines, each host about a quarter. End with what she is working on next, the hosts thank ${star.name} by name and ask viewers to follow.
+Never invent awards, chart positions, sales or real collaborators.
+` : ''}${about && !CFG.topic && !singerMode ? `ANGLE: a roundup of the latest in ${about} — what just happened, why it matters, the hosts' honest takes, and bold predictions about the next big thing (clearly framed as speculation).\n` : ''}HOW IT SOUNDS: a real conversation between friends who know the subject — quick back-and-forth, reactions ("wait, really?"), a disagreement, a laugh, a clear takeaway. Short lines (one or two sentences each). Line 1 is a HOOK (a surprising fact or bold opinion, max 14 words). The last line thanks the audience and asks them to follow.
 Performance tags (optional, before the word they apply to): ${[...EMO_TAGS, 'nod', 'shake_head', 'lean_in', 'point', 'explain', 'count', 'shrug', 'hands_up', 'hand_chest', 'think'].map((t) => `[${t}]`).join(' ')}.
 LENGTH: ${n}.
 Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description": "2-3 sentences for YouTube", "hashtags": ["5-8 specific hashtags without #"], "lines": [{"host": 1, "text": "[excited] Line text"}]}`;
@@ -377,8 +394,17 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
     return null;
   }, 'podcast_script');
   const script = got?.j || {
-    title: `${topic}: what everyone is missing`, description: `The hosts of ${studio.showName} talk about ${topic}.`, hashtags: ['podcast', 'talk'],
+    title: singerMode ? `${star.name}: the stories behind the songs` : `${topic}: what everyone is missing`, description: singerMode ? `${star.name} joins ${studio.showName} to talk about ${topic}.` : `The hosts of ${studio.showName} talk about ${topic}.`, hashtags: singerMode ? ['podcast', 'music', 'interview'] : ['podcast', 'talk'],
     lines: [
+      ...(singerMode ? [
+      { host: 1, text: `[excited] Welcome back to ${studio.showName}! And today the star herself is here — ${star.name}!` },
+      { host: 3, text: `[happy] Thank you so much, I'm so happy to be here.` },
+      { host: 2, text: `[curious] So tell us — where did ${songs[0] ? `"${songs[0].title}"` : 'your latest song'} come from?` },
+      { host: 3, text: `[hand_chest] Honestly, it came from a real moment in my life. I wrote it for everyone who needed to hear it.` },
+      { host: 1, text: `[laugh] And the crowd sang every word at the concert!` },
+      { host: 3, text: `[happy] That night I will never forget. Thank you all for listening.` },
+      { host: 2, text: `[happy] Thank you, ${star.name}! Follow for the next episode.` },
+      ] : [
       { host: 1, text: guestMode ? `[excited] Welcome back to ${studio.showName}! We have ${hosts[1].name} on the show today, and we are talking about ${topic}.` : `[excited] Welcome back to ${studio.showName}! Today we are talking about ${topic}.` },
       { host: 2, text: `[curious] Honestly, I have a strong opinion on this one.` },
       { host: 1, text: `[laugh] Of course you do. Go on then.` },
@@ -386,6 +412,7 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
       { host: 1, text: `[nod] That's fair. So what should people actually do?` },
       { host: 2, text: `[count] Start small, stay curious, and check more than one source.` },
       { host: 1, text: `[happy] Great advice. Thanks for listening, and follow for the next episode!` },
+    ]),
     ],
   };
   if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'No free AI model produced the podcast script this time. Nothing was posted; the next attempt runs automatically.');
@@ -394,8 +421,8 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
   // Voices: one per host, distinct.
   const used = new Set<string>();
   const voiceOf = (g: 'female' | 'male', i: number) => { const v = VOICE_POOL[g].find((x) => !used.has(x)) || VOICE_POOL[g][i % VOICE_POOL[g].length]; used.add(v); return v; };
-  if (guestMode && kit.hostVoice) used.add(kit.hostVoice);
-  const voices = hosts.map((h, i) => (i === 0 && guestMode && kit.hostVoice ? kit.hostVoice : voiceOf(h.gender, i)));
+  if ((guestMode || singerMode) && kit.hostVoice) used.add(kit.hostVoice);
+  const voices = hosts.map((h, i) => (i === 0 && guestMode && kit.hostVoice ? kit.hostVoice : singerMode && i === hosts.length - 1 && kit.hostVoice ? kit.hostVoice : voiceOf(h.gender, i)));
   const lines = script.lines.map((l: any, i: number) => ({ host: clamp(Math.round(Number(l.host)), 1, hosts.length) - 1, ...parseTags(clean(l.text, 400)), i })).filter((l: any) => l.text);
   const clips = await pool(lines, 4, (l: any) => speak(kit, l.text, voices[l.host], '+4%', hosts[l.host].gender, `p${l.i}`));
   // Natural pacing: quick exchanges, a beat longer on a change of speaker.
@@ -418,7 +445,7 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
   const text = lines.map((l: any) => `${hosts[l.host].name}: ${l.text}`).join('\n');
   return {
     highlights: emotionMoments(mix.cues),
-    title: clean(script.title, 95), description: `${clean(script.description, 900)}\n\n${guestMode ? `Host: ${hosts[0].name}. Guest${hosts.length > 2 ? 's' : ''}: ${guestNames}.` : `Hosts: ${hosts.map((h) => h.name).join(', ')}.`}${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
+    title: clean(script.title, 95), description: `${clean(script.description, 900)}\n\n${singerMode ? `Hosts: ${hosts[0].name} & ${hosts[1].name}. Guest: ${star.name}.${songs.length ? `\n\nSongs in this episode:\n${songs.map((x) => `• ${x.title}`).join('\n')}` : ''}` : guestMode ? `Host: ${hosts[0].name}. Guest${hosts.length > 2 ? 's' : ''}: ${guestNames}.` : `Hosts: ${hosts.map((h) => h.name).join(', ')}.`}${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
     hashtags: [...cleanTags(script.hashtags), 'podcast'], tags: [topic, studio.showName, 'podcast', ...hosts.map((h) => h.name)].map((x) => clean(x, 40)).filter(Boolean),
     script: text, durationSec: duration, character: res.character || 'podcast', model: got?.model || 'template', sources: news.slice(0, 4).map((h) => h.title), showName: studio.showName,
   };
