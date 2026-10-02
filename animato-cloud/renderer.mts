@@ -139,8 +139,8 @@ const CFG = {
   // Set to the local ACE-Step server on the runner while a song is being made.
   acestepBase: 'http://127.0.0.1:8011',
   acestepModel: pick(ENV.ACESTEP_MODEL, ''),
-  // Musical song length (seconds). Default 50: intro → verse (the story) → catchy chorus → outro.
-  musicSeconds: Math.max(20, Math.min(180, parseInt(pick(ENV.MUSIC_SECONDS, '50'), 10) || 50)),
+  // Musical song length (seconds), at most 60: intro → chorus → chorus again (the hook sticks) → outro.
+  musicSeconds: Math.max(20, Math.min(60, parseInt(pick(ENV.MUSIC_SECONDS, '60'), 10) || 60)),
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
   lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
   lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
@@ -3111,6 +3111,35 @@ const MUSICAL_PROFILES: Record<string, { style: string; emotion: string; instrum
   'edm / electronic': { style: 'festival EDM, euphoric build-up and drop, supersaw chords, pumping sidechain bass, soaring vocal', emotion: 'excited', instruments: 'supersaws, sidechained bass and four-on-the-floor kick' },
   'highlife': { style: 'West African highlife, sweet interlocking guitars, horns, bright percussion, joyful call-and-response vocals', emotion: 'happy', instruments: 'highlife guitars, horns and percussion' },
 };
+/** How each genre really sounds: tempo, key, groove, production and vocal delivery (fed to ACE-Step). */
+const GENRE_FEEL: Record<string, { bpm: [number, number]; keys: string[]; tags: string; vocal: string }> = {
+  'sad / heartbreak': { bpm: [68, 78], keys: ['A minor', 'D minor', 'E minor', 'F# minor'], tags: 'emotional ballad, slow tempo, minor key, soft piano intro, swelling strings in the chorus, sparse drums, wide reverb, heartfelt', vocal: 'breathy, vulnerable, emotional vocal with long held notes and a crack of pain on the hook' },
+  'happy / feel-good': { bpm: [108, 122], keys: ['C major', 'G major', 'D major'], tags: 'feel-good pop, major key, bouncy groove, handclaps, bright guitars, uplifting chorus lift', vocal: 'bright, smiling, confident vocal with playful ad-libs' },
+  'dance / party': { bpm: [120, 126], keys: ['A minor', 'F major', 'G minor'], tags: 'dance-pop, four-on-the-floor kick, pumping bass, build-up into an explosive chorus drop, club energy', vocal: 'energetic, punchy, chant-like vocal hook made for crowds' },
+  'love / r&b': { bpm: [70, 88], keys: ['Eb major', 'Bb major', 'F minor'], tags: 'smooth R&B, laid-back groove, lush electric piano chords, deep warm bass, intimate', vocal: 'silky, sensual, soulful vocal with runs and harmonies' },
+  'pop anthem': { bpm: [118, 128], keys: ['C major', 'D major', 'E major'], tags: 'stadium pop anthem, big drums, layered harmonies, huge singalong chorus, uplifting', vocal: 'powerful, soaring belted vocal on the hook' },
+  'afrobeats': { bpm: [100, 112], keys: ['A minor', 'C major', 'G major', 'D minor'], tags: 'Afrobeats, Afropop, afro-swing groove, log drum and shekere percussion, syncopated afro drums, melodic bassline, highlife-tinged clean guitar riff, warm Lagos club vibe', vocal: 'smooth melodic Afrobeats vocal with Naija ad-libs, call-and-response hook, relaxed swagger' },
+  'christian / gospel': { bpm: [72, 92], keys: ['Ab major', 'Db major', 'Eb major'], tags: 'gospel worship, Hammond organ, piano, choir responses, building to a powerful praise chorus', vocal: 'soulful gospel lead with passionate runs, answered by a choir' },
+  'muslim / nasheed': { bpm: [80, 96], keys: ['D minor', 'A minor'], tags: 'nasheed-inspired devotional, frame drum and daf percussion, vocal harmonies, reverent and peaceful', vocal: 'warm, sincere, melodic vocal with group harmonies' },
+  'k-pop': { bpm: [116, 128], keys: ['C# minor', 'F minor', 'A minor'], tags: 'K-pop, punchy synth bass, trap hats, explosive dance chorus, catchy post-chorus chant', vocal: 'crisp, polished idol-style vocal with a chanted hook' },
+  'hip-hop / rap': { bpm: [84, 96], keys: ['C minor', 'F minor', 'G minor'], tags: 'modern hip-hop, hard 808 bass, crisp hi-hat rolls, dark melodic loop, head-nod groove', vocal: 'confident rhythmic flow with a sung melodic hook' },
+  'rock': { bpm: [120, 140], keys: ['E minor', 'A major', 'D major'], tags: 'arena rock, driving drums, distorted guitar riff, big gang-vocal chorus', vocal: 'gritty, powerful rock vocal' },
+  'reggae / dancehall': { bpm: [88, 100], keys: ['G major', 'A minor'], tags: 'reggae dancehall, one-drop groove, offbeat skank guitar, deep dub bass, sunny', vocal: 'relaxed, melodic island vocal with toasting ad-libs' },
+  'amapiano': { bpm: [110, 115], keys: ['F minor', 'A minor', 'D minor'], tags: 'amapiano, deep log drum basslines, shakers, airy piano chords, slow-burn groove, South African club', vocal: 'smooth, soulful, chant-style vocal hooks' },
+  'country': { bpm: [92, 110], keys: ['G major', 'D major', 'A major'], tags: 'modern country, acoustic guitar, pedal steel, warm storytelling, singalong chorus', vocal: 'warm storytelling country vocal' },
+  'jazz / soul': { bpm: [76, 96], keys: ['Bb major', 'Eb major', 'F major'], tags: 'jazz soul, Rhodes, upright bass, brushed drums, horn section, smoky late-night club', vocal: 'velvet, expressive soul vocal with jazzy phrasing' },
+  'lo-fi / chill': { bpm: [72, 86], keys: ['F major', 'C major'], tags: 'lo-fi chill pop, dusty keys, laid-back swing beat, warm tape saturation', vocal: 'soft, intimate, close-mic vocal' },
+  'edm / electronic': { bpm: [124, 128], keys: ['F minor', 'A minor'], tags: 'festival EDM, supersaw chords, riser build-up, massive drop, sidechained bass', vocal: 'soaring, euphoric vocal hook' },
+  'highlife': { bpm: [104, 118], keys: ['C major', 'G major'], tags: 'West African highlife, sweet interlocking guitars, brass horns, bright percussion, joyful', vocal: 'joyful, melodic vocal with call-and-response' },
+};
+/** This video's tempo / key / production for the genre (stable per video, varied between videos). */
+function genreFeel(): { bpm: number; key: string; tags: string; vocal: string } {
+  const k = String(CFG.subGenre || '').trim().toLowerCase();
+  const g = GENRE_FEEL[k];
+  const n = parseInt(crypto.createHash('md5').update(`${CFG.campaignId || CFG.campaignName}:${CFG.partNumber}:feel`).digest('hex').slice(0, 8), 16);
+  if (!g) return { bpm: 0, key: '', tags: `${CFG.subGenre || 'pop'}, authentic to the genre, polished modern production`, vocal: 'expressive, emotional lead vocal' };
+  return { bpm: g.bpm[0] + (n % (g.bpm[1] - g.bpm[0] + 1)), key: g.keys[Math.floor(n / 7) % g.keys.length], tags: g.tags, vocal: g.vocal };
+}
 function musicalProfile(): { style: string; emotion: string; instruments: string } {
   const k = String(CFG.subGenre || '').trim().toLowerCase();
   if (MUSICAL_PROFILES[k]) return MUSICAL_PROFILES[k];
@@ -3234,7 +3263,7 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   const idea = songConcept();
   log(`🎵 Song idea (${idea.theme}): ${idea.concept}`);
   const meaning = `WHAT THE SONG IS ABOUT (mandatory): ${idea.concept}. Tell THIS story from the singer’s point of view. Every single line must belong to it — concrete people, places, objects and actions (a named street, mama’s kitchen, the bus stop, the DJ booth, a phone screen…), one clear emotion, and a message a listener can repeat in one sentence. No vague filler about “good vibes”, “just the good”, “feeling good tonight” with nothing behind it; at most one short ad-lib (e.g. “eh!”) per section. `;
-  const user = `${meaning}Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: INTRO (2 short lines that set the scene of the story — who, where, what just happened — so the listener is hooked and knows what the song is about), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and again in line 3 or 4; lines 2 and 4 add the feeling/detail and rhyme; this is most of the song), OUTRO (2 lines that land the story — a payoff, a twist or a punchline that answers the intro — ending on the hook). No verses, no bridge. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : CFG.musicSeconds <= 75 ? `The song is about ${CFG.musicSeconds} SECONDS long — a complete mini-song where every line counts. Use exactly this structure, in this order: INTRO (2 short lines that set the scene — who, where, what just happened — so the listener is hooked instantly), VERSE (4 lines that tell the story with concrete detail: the struggle or the moment, what the singer sees, feels and does; each line moves the story forward; natural rhymes), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and again in line 3 or 4; lines 2 and 4 add the feeling and rhyme; the chorus must feel like the emotional release of the verse), OUTRO (2 lines that land the story — a payoff, a twist or a punchline that answers the intro — ending on the hook). No second verse, no bridge. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 75 ? `Use ${Math.round(CFG.musicSeconds * 1.5)}–${Math.round(CFG.musicSeconds * 1.9)} lyric words in total (singable at a natural pace, with room for the music to breathe).` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
+  const user = `${meaning}Write one completely ORIGINAL ${IS_SHORTS ? 'short-form' : 'full-length'} song for a music video. LANGUAGE: write the title and ALL the lyrics in ${lang.name}${lang.name.toLowerCase() === 'english' ? '' : ` (natural, idiomatic ${lang.name} as native songwriters write it — not a translation; the description and tags may be in English)`}. Lead vocalist gender: ${gender}. Style/mood: ${CFG.subGenre || 'cinematic pop'}. Musical direction: ${profile.style}. Emotional performance must fit the style. The lyrics must be clean, singable, coherent and specific, with natural rhymes and a memorable chorus. ${CFG.musicSeconds <= 40 ? `The song is ONLY ${CFG.musicSeconds} SECONDS long, so every line must count. Use exactly this structure: INTRO (2 short lines that set the scene of the story — who, where, what just happened — so the listener is hooked and knows what the song is about), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and again in line 3 or 4; lines 2 and 4 add the feeling/detail and rhyme; this is most of the song), OUTRO (2 lines that land the story — a payoff, a twist or a punchline that answers the intro — ending on the hook). No verses, no bridge. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : CFG.musicSeconds <= 75 ? `The song is about ${CFG.musicSeconds} SECONDS long and must feel like a real hit single cut down to one minute. Write exactly three sections: INTRO (4 lines that set the story and the mood — who, where, what just happened — in the genre’s own voice and slang), CHORUS (4 short, very catchy lines: the HOOK is one short memorable phrase (2–5 words) that states the song’s message, sung in line 1 and repeated in line 3 or 4; lines 2 and 4 add the feeling and rhyme; simple, singable, built for people to sing along), OUTRO (2 lines that land the story — a payoff or twist — ending on the hook). The CHORUS will be sung TWICE back to back, so it must be strong enough to repeat. The emotion and rhythm of every line must match the genre: ${(() => { const f = genreFeel(); return `${f.tags}; vocal: ${f.vocal}${f.bpm ? `; about ${f.bpm} BPM` : ''}`; })()}. Also return "hook" (the hook phrase) and "message" (the song’s point in one English sentence).` : 'Use this structure when it helps: intro, verse, pre-chorus, chorus, verse 2, pre-chorus, chorus, bridge, final chorus, outro.'} The chorus must be strong enough for a choir to answer behind the lead. Do not quote, adapt, imitate or reuse any copyrighted lyrics or named artist/song. Return JSON only with title, description, lyrics, sections (array of {tag,lyrics,emotion}), hashtags, tags. ${CFG.musicSeconds <= 75 ? `Use about ${Math.round(CFG.musicSeconds * 0.85)}–${Math.round(CFG.musicSeconds * 1.1)} lyric words in total across intro + chorus + outro (the chorus repeats, so the sung total is higher).` : `Aim for at least ${IS_SHORTS ? 90 : 220} lyric words.`} Previous titles to avoid repeating: ${already || '(none)'}`;
   let last = '', fillerRejects = 0;
   for await (const a of LLM.attempts({
     system: 'You are a hit songwriter (think chart-topping Afrobeats/pop writers) and music-video creative director. A great short song tells one specific, relatable story with a hook people sing after one listen. Create original lyrics only. Never provide copyrighted lyrics. Make section labels and emotions explicit so a timed video renderer can stage the performance.',
@@ -3249,9 +3278,19 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
       const words = lyricWordCount(lyrics);
       if (fillerRejects < 2 && fillerHeavy(lyrics)) { fillerRejects++; last = 'lyrics were mostly filler'; log('⚠️ Song draft rejected: lyrics were mostly filler words — rewriting.'); continue; }
       if (j.message) log(`🎵 Song message: ${String(j.message).slice(0, 160)}${j.hook ? ` · hook: “${String(j.hook).slice(0, 60)}”` : ''}`);
-      if (String(j.title || '').trim() && words >= (CFG.musicSeconds <= 75 ? Math.round(CFG.musicSeconds * 1.1) : IS_SHORTS ? 70 : 150) && hasChorus) {
+      if (String(j.title || '').trim() && words >= (CFG.musicSeconds <= 75 ? Math.round(CFG.musicSeconds * 0.6) : IS_SHORTS ? 70 : 150) && hasChorus) {
         // Too many words for the length → keep intro + chorus (+ outro) so it fits and stays in sync.
-        if (CFG.musicSeconds <= 75 && words > CFG.musicSeconds * 2.4) { const allowed = CFG.musicSeconds <= 40 ? ['intro', 'chorus', 'outro'] : ['intro', 'verse', 'chorus', 'outro']; const seen = new Set<string>(); const keep = sections.filter((x) => allowed.includes(x.tag) && !seen.has(x.tag) && (seen.add(x.tag), true)); if (keep.some((x) => x.tag === 'chorus')) { sections.splice(0, sections.length, ...keep); lyrics = cleanMusicLyrics(sectionLyricText(sections)); } }
+        if (CFG.musicSeconds <= 75 && words > CFG.musicSeconds * 2.4) { const allowed = ['intro', 'chorus', 'outro']; const seen = new Set<string>(); const keep = sections.filter((x) => allowed.includes(x.tag) && !seen.has(x.tag) && (seen.add(x.tag), true)); if (keep.some((x) => x.tag === 'chorus')) { sections.splice(0, sections.length, ...keep); lyrics = cleanMusicLyrics(sectionLyricText(sections)); } }
+        // One-minute song: intro → chorus → chorus again (the hook sticks) → outro.
+        if (CFG.musicSeconds <= 75) {
+          const intro = sections.find((x) => x.tag === 'intro'), chorus = sections.find((x) => x.tag === 'chorus'), outro = sections.find((x) => x.tag === 'outro');
+          if (chorus) {
+            const shaped = [intro, chorus, { ...chorus, emotion: chorus.emotion || 'excited' }, outro].filter(Boolean) as MusicalSection[];
+            sections.splice(0, sections.length, ...shaped);
+            lyrics = cleanMusicLyrics(sectionLyricText(sections));
+            log(`🎵 Song shape: ${sections.map((x) => x.tag).join(' → ')} (${lyricWordCount(lyrics)} sung words).`);
+          }
+        }
         return {
           title: String(j.title).trim().slice(0, 90),
           description: String(j.description || `Original ${CFG.subGenre || 'musical'} song performed by a ${gender} lead singer with a cinematic stage and choir chorus.`).trim().slice(0, 1200),
@@ -3284,10 +3323,11 @@ let aceLocalRun = false;
 async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
   return aceLocalGenerate(song, prepareLocalAce());
 }
-let aceLocalPrep: Promise<{ base: string; stop: () => void }> | null = null;
+let aceLocalPrep: Promise<{ base: string; stop: () => void; lm: boolean }> | null = null;
+let aceLocalWantLm = true;
 /** The local server's own key (sent as both the Bearer header and ai_token, which it checks). */
 const ACE_LOCAL_KEY = `animato-${crypto.randomBytes(8).toString('hex')}`;
-function prepareLocalAce(): Promise<{ base: string; stop: () => void }> {
+function prepareLocalAce(): Promise<{ base: string; stop: () => void; lm: boolean }> {
   if (aceLocalPrep) return aceLocalPrep;
   aceLocalPrep = (async () => {
     const t0 = Date.now();
@@ -3307,6 +3347,10 @@ fi
 if [ ! -d "${ckpt}/acestep-v15-turbo" ] || [ ! -d "${ckpt}/vae" ] || [ ! -d "${ckpt}/Qwen3-Embedding-0.6B" ]; then
   "${py}" -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/Ace-Step1.5', local_dir='${ckpt}', allow_patterns=['acestep-v15-turbo/*','vae/*','Qwen3-Embedding-0.6B/*','*.json','*.txt'])"
 fi
+# The small planning LM ("thinking": plans the song's sections and melody before the music is made).
+if [ ! -d "${ckpt}/acestep-5Hz-lm-0.6B" ]; then
+  "${py}" -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/acestep-5Hz-lm-0.6B', local_dir='${ckpt}/acestep-5Hz-lm-0.6B')" || echo "LM download failed (songs will be made without planning)"
+fi
 du -sh "${root}" 2>/dev/null || true
 `;
     const scriptFile = path.join(WORK_DIR, 'acestep_local_setup.sh');
@@ -3315,8 +3359,9 @@ du -sh "${root}" 2>/dev/null || true
     const r = await run('bash', [scriptFile], { timeoutMs: 22 * 60000 });
     if (r.code !== 0) throw new Error(`local ACE-Step setup failed: ${r.stderr.split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 400)}`);
     log(`🎵 Local ACE-Step installed in ${((Date.now() - t0) / 1000).toFixed(0)}s (${r.stdout.toString().trim().split('\n').pop() || ''}).`);
+    const useLm = aceLocalWantLm && fs.existsSync(path.join(ckpt, 'acestep-5Hz-lm-0.6B'));
     const port = 8011, threads = String(Math.max(1, os.cpus().length));
-    const env = { ...process.env, ACESTEP_API_HOST: '127.0.0.1', ACESTEP_API_PORT: String(port), ACESTEP_API_KEY: ACE_LOCAL_KEY, ACESTEP_DEVICE: 'cpu', ACESTEP_INIT_LLM: 'false', ACESTEP_LM_BACKEND: 'pt',
+    const env = { ...process.env, ACESTEP_API_HOST: '127.0.0.1', ACESTEP_API_PORT: String(port), ACESTEP_API_KEY: ACE_LOCAL_KEY, ACESTEP_DEVICE: 'cpu', ACESTEP_INIT_LLM: useLm ? 'true' : 'false', ACESTEP_LM_BACKEND: 'pt', ACESTEP_LM_MODEL_PATH: 'acestep-5Hz-lm-0.6B', ACESTEP_LM_DEVICE: 'cpu',
       ACESTEP_USE_FLASH_ATTENTION: 'false', ACESTEP_CONFIG_PATH: 'acestep-v15-turbo', ACESTEP_PROJECT_ROOT: repo, ACESTEP_CHECKPOINTS_DIR: ckpt, OMP_NUM_THREADS: threads, MKL_NUM_THREADS: threads, TOKENIZERS_PARALLELISM: 'false' };
     const srv = spawn(py, ['-m', 'acestep.api_server'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let tail = '';
@@ -3331,30 +3376,42 @@ du -sh "${root}" 2>/dev/null || true
       await sleep(3000);
     }
     if (Date.now() >= until) { try { srv.kill('SIGKILL'); } catch {} throw new Error('local ACE-Step server did not start within 12 min'); }
-    log(`🎵 Local ACE-Step server ready in ${((Date.now() - t0) / 1000).toFixed(0)}s.`);
-    return { base, stop: () => { try { srv.kill('SIGKILL'); } catch {} aceLocalPrep = null; } };
+    log(`🎵 Local ACE-Step server ready in ${((Date.now() - t0) / 1000).toFixed(0)}s${useLm ? ' (with the song-planning model)' : ''}.`);
+    return { base, lm: useLm, stop: () => { try { srv.kill('SIGKILL'); } catch {} aceLocalPrep = null; } };
   })();
   return aceLocalPrep;
 }
-async function aceLocalGenerate(song: MusicalSong, prep: Promise<{ base: string; stop: () => void }>): Promise<{ file: string; duration: number; taskId?: string }> {
+async function aceLocalGenerate(song: MusicalSong, prep: Promise<{ base: string; stop: () => void; lm: boolean }>): Promise<{ file: string; duration: number; taskId?: string }> {
   aceStarted = Date.now();
   aceDeadline = aceStarted + CFG.acestepLocalMin * 60000;
-  await aceStatus('setting up ACE-Step on the runner (CPU)');
-  const beat = setInterval(() => { aceStatus('ACE-Step on the runner: installing / loading the model'); }, 30000);
-  let srv: { base: string; stop: () => void };
-  try { srv = await prep; } finally { clearInterval(beat); }
-  const saved = CFG.acestepBase;
-  (CFG as any).acestepBase = srv.base;
-  aceLocalRun = true;
-  try {
-    await aceStatus('ACE-Step on the runner is making the song (CPU)');
-    const beat2 = setInterval(() => { aceStatus('ACE-Step on the runner is making the song (CPU)'); }, 30000);
-    try { return await aceStepNative(song, ACE_LOCAL_KEY, true); }
-    finally { clearInterval(beat2); }
-  } finally {
-    (CFG as any).acestepBase = saved;
-    aceLocalRun = false;
-    srv.stop();   // free the RAM for the stems + the video render
+  const once = async (p: Promise<{ base: string; stop: () => void; lm: boolean }>) => {
+    await aceStatus('setting up ACE-Step on the runner (CPU)');
+    const beat = setInterval(() => { aceStatus('ACE-Step on the runner: installing / loading the model'); }, 30000);
+    let srv: { base: string; stop: () => void; lm: boolean };
+    try { srv = await p; } finally { clearInterval(beat); }
+    const saved = CFG.acestepBase;
+    (CFG as any).acestepBase = srv.base;
+    aceLocalRun = true;
+    try {
+      const what = `ACE-Step on the runner is ${srv.lm ? 'planning and ' : ''}making the song (CPU)`;
+      await aceStatus(what);
+      const beat2 = setInterval(() => { aceStatus(what); }, 30000);
+      try { return await aceStepNative(song, ACE_LOCAL_KEY, !srv.lm); }   // with the planning LM: thinking on
+      finally { clearInterval(beat2); }
+    } finally {
+      (CFG as any).acestepBase = saved;
+      aceLocalRun = false;
+      srv.stop();   // free the RAM for the stems + the video render
+    }
+  };
+  try { return await once(prep); }
+  catch (e: any) {
+    if (!aceLocalWantLm || aceLeft() < 5 * 60000) throw e;
+    // The planning model failed (or the server could not load it): make the song without it.
+    log(`⚠️ ACE-Step with the planning model failed (${String(e?.message || e).slice(0, 200)}) — trying again without it.`);
+    aceLocalWantLm = false;
+    aceLocalPrep = null;
+    return once(prepareLocalAce());
   }
 }
 /** Set on a regeneration when the first song came out in the wrong voice. */
@@ -3389,8 +3446,11 @@ function aceStepRequest(song: MusicalSong) {
   const voice = gender === 'female'
     ? 'female vocals, solo female singer, woman lead voice, feminine vocal tone'
     : 'male vocals, solo male singer, man lead voice, masculine vocal tone';
-  const prompt = `${voice}${aceGenderBoost ? (gender === 'female' ? ', high female voice, no male vocals' : ', deep male voice, no female vocals') : ''}, ${profile.style}, ${profile.instruments}, sung in ${musicLanguage().name}, ${profile.emotion} emotion, ${gender} backing harmonies on the chorus`;
-  return { prompt, lyrics, target, lang: musicLanguage().code };
+  const feel = genreFeel();
+  const prompt = [feel.tags, voice + (aceGenderBoost ? (gender === 'female' ? ', high female voice, no male vocals' : ', deep male voice, no female vocals') : ''), feel.vocal,
+    feel.bpm ? `${feel.bpm} BPM` : '', feel.key, profile.instruments, `sung in ${musicLanguage().name}`, `${profile.emotion} mood`,
+    'clear song structure: short instrumental intro, catchy repeated chorus hook, satisfying ending', `${gender} backing harmonies on the chorus`, 'professional studio mix'].filter(Boolean).join(', ');
+  return { prompt, lyrics, target, lang: musicLanguage().code, bpm: feel.bpm, key: feel.key };
 }
 const aceErrCode = (status: number, body: string) => status === 401 || status === 403 ? 'acestep_auth' : status === 429 || /quota|limit|credit|insufficient/i.test(body) ? 'acestep_quota' : status >= 500 || status === 408 ? 'acestep_busy' : 'acestep_failed';
 async function saveAceAudio(buf: Buffer, label: string) {
@@ -3404,7 +3464,8 @@ async function aceStepNative(song: MusicalSong, apiKey: string, fast: boolean): 
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8' };
   // "thinking" (the 5Hz planning LM) gives better songs but is slower; the retry rounds switch it off.
   const body: any = {
-    prompt: r.prompt, lyrics: r.lyrics, audio_duration: r.target, audio_format: 'mp3', batch_size: 1, vocal_language: r.lang,
+    prompt: r.prompt, caption: r.prompt, lyrics: r.lyrics, audio_duration: r.target, audio_format: 'mp3', batch_size: 1, vocal_language: r.lang,
+    ...(r.bpm ? { bpm: r.bpm } : {}), ...(r.key ? { key_scale: r.key } : {}), time_signature: '4',
     thinking: !fast, use_cot_caption: false, ai_token: apiKey, ...(CFG.acestepModel ? { model: CFG.acestepModel } : {}),
   };
   let taskId = '';
