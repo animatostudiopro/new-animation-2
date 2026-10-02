@@ -136,13 +136,11 @@ const CFG = {
   musicLanguage: pick(JOB.music_language, ENV.MUSIC_LANGUAGE, 'English'),
   // Music engine: ACE-Step 1.5 official cloud (free API key from https://acemusic.ai/api-key).
   // Personal project: built-in ACE-Step keys (rotated); a repository secret still overrides them.
-  acestepKeys: keyList(AUTH.acestep_api_keys, AUTH.acestep_api_key, ENV.ACESTEP_API_KEYS, ENV.ACESTEP_API_KEY).concat(['8610e37f3cb54f3e96590563826526ff', '91ca7836737847fc99db7ffcccc716f0', '2efebedddf6a45b4a968282ce79aa90d']).filter((k, i, a) => k && a.indexOf(k) === i),
-  acestepBase: pick(ENV.ACESTEP_BASE, 'https://api.acemusic.ai').replace(/\/+$/, ''),
+  // Set to the local ACE-Step server on the runner while a song is being made.
+  acestepBase: 'http://127.0.0.1:8011',
   acestepModel: pick(ENV.ACESTEP_MODEL, ''),
   // Musical song length (seconds). Default 50: intro → verse (the story) → catchy chorus → outro.
   musicSeconds: Math.max(20, Math.min(180, parseInt(pick(ENV.MUSIC_SECONDS, '50'), 10) || 50)),
-  // 'chat' = the hosted api.acemusic.ai (OpenAI-style /v1/chat/completions); 'native' = a self-hosted ACE-Step server (/release_task).
-  acestepMode: pick(ENV.ACESTEP_MODE, 'chat').toLowerCase(),
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
   lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
   lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
@@ -195,11 +193,12 @@ const CFG = {
   allowFallbackPublish: ENV.PUBLISH_WITH_FALLBACK_CONTENT === 'true',
   maxRenderSeconds: parseInt(pick(ENV.MAX_VIDEO_SECONDS, '0'), 10) || 0,
   // Longest time a run spends waiting for ACE-Step before giving up (the next run retries).
-  acestepBudgetMin: parseInt(pick(ENV.ACESTEP_MAX_MINUTES, '18'), 10) || 18
+  // Max minutes for ACE-Step on the runner (setup on the first run + making the song on the CPU).
+  acestepLocalMin: parseInt(pick(ENV.ACESTEP_LOCAL_MINUTES, '35'), 10) || 35
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey, ...CFG.acestepKeys]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -3265,59 +3264,96 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
   }
   throw new PipelineError('musical_song_retry', `No free AI writer produced a valid original song (${last || 'all models failed'}). Nothing was posted; the next scheduled run will retry.`);
 }
-/** ACE-Step 1.5 (open-source, MIT) via its official cloud API (api.acemusic.ai) — the ONLY music engine.
- *  The hosted service is busy at times, so every step waits long enough and retries:
- *   1. Native async mode: POST /release_task → poll /query_result → download the file.
- *   2. If that keeps timing out: POST /v1/chat/completions with streaming (keeps the connection
- *      alive while the song renders, so the gateway can't cut it off) → base64 audio.
- *  Every key is tried, and if the service is busy on all of them it waits and goes round again. */
+/** ACE-Step 1.5 (open-source, MIT) — the only music engine — runs on the GitHub runner itself:
+ *  its own REST server (/release_task → /query_result → download), never an online API. */
 let aceDeadline = 0, aceStarted = 0;
 const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`;
 /** Shows what ACE-Step is doing on the automation card, so a slow song never looks frozen. */
 async function aceStatus(what: string) {
   const el = Date.now() - aceStarted;
-  try { await reportStatus('running', `2/6 Generating music (ACE-Step 1.5) · ${mmss(el)} of max ${CFG.acestepBudgetMin}:00`, Math.min(40, 24 + Math.round((el / (CFG.acestepBudgetMin * 60000)) * 16)), `🎵 ${what} (${mmss(el)} elapsed)`); } catch {}
+  try { await reportStatus('running', `2/6 Generating music (ACE-Step on the runner) · ${mmss(el)} of max ${CFG.acestepLocalMin}:00`, Math.min(40, 24 + Math.round((el / (CFG.acestepLocalMin * 60000)) * 16)), `🎵 ${what} (${mmss(el)} elapsed)`); } catch {}
 }
 const aceLeft = () => Math.max(0, aceDeadline - Date.now());
+/**
+ * ACE-Step everywhere: the hosted API first; when it is down / overloaded (Cloudflare 504s), the SAME
+ * open-source model runs on the GitHub runner's CPU (installed in the background while the hosted API
+ * is tried, and cached between runs), through ACE-Step's own REST server (/release_task → /query_result).
+ */
+let aceLocalRun = false;
+/** ACE-Step runs ONLY on the GitHub runner (no online API): installed once, cached between runs. */
 async function generateAceStepMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
-  if (!CFG.acestepKeys.length) throw new PipelineError('acestep_missing_key', 'ACESTEP_API_KEY is not set (free key: https://acemusic.ai/api-key).');
-  // Start from a different key each run so the free quota is shared across all of them.
-  const order = CFG.acestepKeys.map((_, i) => CFG.acestepKeys[(i + CFG.partNumber) % CFG.acestepKeys.length]);
-  // The hosted api.acemusic.ai only has the OpenAI-style endpoint. Streaming first (keeps the
-  // connection alive so the gateway can't time it out), then a plain request; /release_task only for self-hosted servers.
-  const modes: ('stream' | 'sync' | 'native')[] = CFG.acestepMode === 'native' ? ['native', 'stream', 'sync'] : ['stream', 'sync'];
-  const errors: string[] = [];
+  return aceLocalGenerate(song, prepareLocalAce());
+}
+let aceLocalPrep: Promise<{ base: string; stop: () => void }> | null = null;
+function prepareLocalAce(): Promise<{ base: string; stop: () => void }> {
+  if (aceLocalPrep) return aceLocalPrep;
+  aceLocalPrep = (async () => {
+    const t0 = Date.now();
+    const root = path.join(os.homedir(), 'acestep-local'), repo = path.join(root, 'repo'), venv = path.join(root, 'venv'), py = path.join(venv, 'bin', 'python');
+    const ckpt = path.join(repo, 'checkpoints');
+    const script = `set -e
+mkdir -p "${root}"
+if [ ! -d "${repo}/acestep" ]; then git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git "${repo}"; fi
+if [ ! -x "${py}" ]; then python3 -m venv "${venv}"; fi
+if ! "${py}" -c "import acestep, torch, diffusers, transformers" 2>/dev/null; then
+  "${py}" -m pip install -q --disable-pip-version-check --upgrade pip
+  "${py}" -m pip install -q --disable-pip-version-check torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+  "${py}" -m pip install -q --disable-pip-version-check "transformers>=4.51.0,<4.58.0" "diffusers>=0.37.0" "matplotlib>=3.7.5" "scipy>=1.10.1" "soundfile>=0.13.1" "loguru>=0.7.3" "einops>=0.8.1" "accelerate>=1.12.0" "fastapi>=0.110.0" diskcache "uvicorn[standard]>=0.27.0" "numba>=0.63.1" "vector-quantize-pytorch>=1.27.15" "torchao>=0.16.0,<0.17.0" toml "peft>=0.18.0" lycoris-lora modelscope "typer-slim>=0.21.1" "pytorch-wavelets>=1.3.0" "pywavelets>=1.9.0" "setuptools<72" huggingface_hub "gradio==6.2.0" "lightning>=2.0.0" "tensorboard>=2.20.0"
+  "${py}" -m pip install -q --disable-pip-version-check --no-deps -e "${repo}"
+fi
+# Only what text-to-music needs (turbo DiT, VAE, text encoder) — not the 1.7B planning LM.
+if [ ! -d "${ckpt}/acestep-v15-turbo" ] || [ ! -d "${ckpt}/vae" ] || [ ! -d "${ckpt}/Qwen3-Embedding-0.6B" ]; then
+  "${py}" -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/Ace-Step1.5', local_dir='${ckpt}', allow_patterns=['acestep-v15-turbo/*','vae/*','Qwen3-Embedding-0.6B/*','*.json','*.txt'])"
+fi
+du -sh "${root}" 2>/dev/null || true
+`;
+    const scriptFile = path.join(WORK_DIR, 'acestep_local_setup.sh');
+    fs.writeFileSync(scriptFile, script);
+    log('🎵 Preparing ACE-Step on this runner (background; cached after the first run)…');
+    const r = await run('bash', [scriptFile], { timeoutMs: 22 * 60000 });
+    if (r.code !== 0) throw new Error(`local ACE-Step setup failed: ${r.stderr.split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 400)}`);
+    log(`🎵 Local ACE-Step installed in ${((Date.now() - t0) / 1000).toFixed(0)}s (${r.stdout.toString().trim().split('\n').pop() || ''}).`);
+    const port = 8011, threads = String(Math.max(1, os.cpus().length));
+    const env = { ...process.env, ACESTEP_API_HOST: '127.0.0.1', ACESTEP_API_PORT: String(port), ACESTEP_API_KEY: '', ACESTEP_DEVICE: 'cpu', ACESTEP_INIT_LLM: 'false', ACESTEP_LM_BACKEND: 'pt',
+      ACESTEP_USE_FLASH_ATTENTION: 'false', ACESTEP_CONFIG_PATH: 'acestep-v15-turbo', ACESTEP_PROJECT_ROOT: repo, ACESTEP_CHECKPOINTS_DIR: ckpt, OMP_NUM_THREADS: threads, MKL_NUM_THREADS: threads, TOKENIZERS_PARALLELISM: 'false' };
+    const srv = spawn(py, ['-m', 'acestep.api_server'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    const keep = (d: Buffer) => { tail = (tail + d.toString()).slice(-4000); };
+    srv.stdout.on('data', keep); srv.stderr.on('data', keep);
+    let exited = false; srv.on('close', () => { exited = true; });
+    const base = `http://127.0.0.1:${port}`;
+    const until = Date.now() + 12 * 60000;
+    while (Date.now() < until) {
+      if (exited) throw new Error(`local ACE-Step server stopped: ${tail.split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 400)}`);
+      try { const h = await fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) }); if (h.ok) break; } catch {}
+      await sleep(3000);
+    }
+    if (Date.now() >= until) { try { srv.kill('SIGKILL'); } catch {} throw new Error('local ACE-Step server did not start within 12 min'); }
+    log(`🎵 Local ACE-Step server ready in ${((Date.now() - t0) / 1000).toFixed(0)}s.`);
+    return { base, stop: () => { try { srv.kill('SIGKILL'); } catch {} aceLocalPrep = null; } };
+  })();
+  return aceLocalPrep;
+}
+async function aceLocalGenerate(song: MusicalSong, prep: Promise<{ base: string; stop: () => void }>): Promise<{ file: string; duration: number; taskId?: string }> {
   aceStarted = Date.now();
-  aceDeadline = aceStarted + CFG.acestepBudgetMin * 60 * 1000;
-  // The hosted service answers 504 (Cloudflare cuts any request at ~100 s) when it is overloaded.
-  // Each try: the next key, streaming (sync only every third try — it fails the same way when the server
-  // is slow). After two timeouts the song is shortened (a shorter take renders faster): 100% → 75% → 55%.
-  // "Thinking" is always off on the hosted API.
-  // A 30 s song is already short: only longer songs (MUSIC_SECONDS) get shortened.
-  const scales = CFG.musicSeconds <= 35 ? [1] : [1, 1, 0.8, 0.8, 0.6];
-  let attempt = 0, timeouts = 0;
-  while (aceLeft() > 90000) {
-    const key = order[attempt % order.length], tag = `key …${key.slice(-4)}`;
-    const mode: 'stream' | 'sync' | 'native' = modes[0] === 'native' && attempt % 3 === 0 ? 'native' : attempt % 3 === 2 ? 'sync' : 'stream';
-    const scale = scales[Math.min(timeouts, scales.length - 1)];
-    if (scale !== aceLengthScale) {
-      aceLengthScale = scale;
-      if (scale < 1) { trimSongTo(song, aceFullTarget() * scale); log(`🎵 ACE-Step keeps timing out — asking for a shorter take (${Math.round(aceFullTarget() * scale)}s).`); }
-    }
-    await aceStatus(`${mode} request · ${tag} · try ${attempt + 1}${scale < 1 ? ` · ${Math.round(aceFullTarget() * scale)}s take` : ''}`);
-    try {
-      return mode === 'native' ? await aceStepNative(song, key, true) : await aceStepChat(song, key, mode === 'stream', true);
-    } catch (e: any) {
-      const msg = String(e?.message || e).replace(/\{"type":"https:\/\/developers\.cloudflare[^}]*\}?/g, '(Cloudflare gateway timeout)').replace(/acemusic\.ai \| 504: Gateway time-out.*$/i, '(Cloudflare gateway timeout)');
-      errors.push(`${tag} ${mode}: ${msg.slice(0, 140)}`);
-      log(`⚠️ ACE-Step ${mode} on ${tag} failed: ${msg.slice(0, 200)}`);
-      if (e?.code === 'acestep_lyrics') throw e;
-      if (/504|timeout|time-out|no song after/i.test(msg)) timeouts++;
-      else await sleep(Math.min(20000, Math.max(0, aceLeft() - 90000)));   // quota / network: short pause
-    }
-    attempt++;
+  aceDeadline = aceStarted + CFG.acestepLocalMin * 60000;
+  await aceStatus('setting up ACE-Step on the runner (CPU)');
+  const beat = setInterval(() => { aceStatus('ACE-Step on the runner: installing / loading the model'); }, 30000);
+  let srv: { base: string; stop: () => void };
+  try { srv = await prep; } finally { clearInterval(beat); }
+  const saved = CFG.acestepBase;
+  (CFG as any).acestepBase = srv.base;
+  aceLocalRun = true;
+  try {
+    await aceStatus('ACE-Step on the runner is making the song (CPU)');
+    const beat2 = setInterval(() => { aceStatus('ACE-Step on the runner is making the song (CPU)'); }, 30000);
+    try { return await aceStepNative(song, 'local', true); }
+    finally { clearInterval(beat2); }
+  } finally {
+    (CFG as any).acestepBase = saved;
+    aceLocalRun = false;
+    srv.stop();   // free the RAM for the stems + the video render
   }
-  throw new PipelineError('acestep_failed', `ACE-Step is not responding right now (its servers kept timing out — tried every key for ${CFG.acestepBudgetMin} min). Last errors: ${errors.slice(-3).join(' · ')}`);
 }
 /** Set on a regeneration when the first song came out in the wrong voice. */
 let aceGenderBoost = false;
@@ -3391,7 +3427,7 @@ async function aceStepNative(song: MusicalSong, apiKey: string, fast: boolean): 
   }
   log(`🎵 ACE-Step task ${taskId.slice(0, 24)} accepted${fast ? ' (fast mode)' : ''}; waiting for the song…`);
   const started = Date.now();
-  for (let attempt = 0; Date.now() - started < Math.min(15 * 60 * 1000, aceLeft()); attempt++) {
+  for (let attempt = 0; Date.now() - started < Math.min(aceLocalRun ? 60 * 60 * 1000 : 15 * 60 * 1000, aceLeft()); attempt++) {
     await sleep(attempt < 6 ? 5000 : 8000);
     let q: Response;
     try { q = await fetch(`${CFG.acestepBase}/query_result`, { method: 'POST', headers, body: JSON.stringify({ task_id_list: [taskId] }), signal: AbortSignal.timeout(45000) }); }
@@ -3419,70 +3455,6 @@ async function aceStepNative(song: MusicalSong, apiKey: string, fast: boolean): 
   }
   throw new PipelineError('acestep_busy', `ACE-Step task ${taskId} did not finish in time (${Math.round((Date.now() - started) / 60000)} min).`);
 }
-let aceModelId = '';
-/** Picks the hosted model id from /v1/models once (falls back to acemusic/acestep-v15-turbo). */
-async function aceModel(apiKey: string): Promise<string> {
-  if (CFG.acestepModel) return CFG.acestepModel.includes('/') ? CFG.acestepModel : `acemusic/${CFG.acestepModel}`;
-  if (aceModelId) return aceModelId;
-  try {
-    const r = await fetch(`${CFG.acestepBase}/v1/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(20000) });
-    const j: any = await r.json().catch(() => ({}));
-    const ids: string[] = (Array.isArray(j?.data) ? j.data : []).map((m: any) => String(m?.id || '')).filter(Boolean);
-    aceModelId = ids.find((x) => /turbo/i.test(x)) || ids[0] || '';
-    if (aceModelId) log(`🎵 ACE-Step models: ${ids.join(', ')} → using ${aceModelId}`);
-  } catch {}
-  return aceModelId || 'acemusic/acestep-v15-turbo';
-}
-/** Hosted ACE-Step (api.acemusic.ai): POST /v1/chat/completions. Audio comes back as a base64 data URL
- *  at choices[0].message.audio[0].audio_url.url (or in the stream's delta.audio). */
-async function aceStepChat(song: MusicalSong, apiKey: string, stream: boolean, fast: boolean): Promise<{ file: string; duration: number }> {
-  const r = aceStepRequest(song);
-  const body: any = {
-    model: await aceModel(apiKey),
-    messages: [{ role: 'user', content: `<prompt>${r.prompt}</prompt>\n<lyrics>${r.lyrics}</lyrics>` }],
-    audio_config: { duration: r.target, vocal_language: r.lang, instrumental: false, format: 'mp3' },
-    stream, thinking: !fast, use_format: false, sample_mode: false, use_cot_caption: false, use_cot_language: false, use_cot_metas: false, batch_size: 1,
-    ...(aceGenderBoost ? { seed: Math.floor(Math.random() * 1e9) } : {}),
-  };
-  const res = await fetch(`${CFG.acestepBase}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json; charset=utf-8', Accept: stream ? 'text/event-stream' : 'application/json', 'User-Agent': 'curl/8.7.1' },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(45000, Math.min((stream ? 6 : 4) * 60 * 1000, aceLeft()))),
-  }).catch((e: any) => { throw new PipelineError('acestep_busy', /abort|timeout/i.test(String(e?.name || e?.message)) ? `no song after ${stream ? 6 : 4} min (ACE-Step queue busy)` : `connection failed: ${e?.message || e}`); });
-  if (!res.ok) {
-    const t = (await res.text().catch(() => '')).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    throw new PipelineError(aceErrCode(res.status, t), `ACE-Step ${stream ? 'streaming' : ''} request failed (HTTP ${res.status}): ${t.slice(0, 180)}`);
-  }
-  log(`🎵 ACE-Step ${stream ? 'streaming' : 'request'} accepted (${body.model}${fast ? ', fast mode' : ''}); waiting for the song…`);
-  const beat = setInterval(() => { aceStatus(`ACE-Step is making the song (${stream ? 'streaming' : 'request'} · key …${apiKey.slice(-4)})`); }, 30000);
-  let raw = '';
-  try { raw = await res.text(); }
-  catch (e: any) { throw new PipelineError('acestep_busy', /abort|timeout/i.test(String(e?.name || e?.message)) ? `no song after ${stream ? 6 : 4} min (ACE-Step queue busy)` : `stream broke: ${e?.message || e}`); }
-  finally { clearInterval(beat); }
-  // The audio can be in delta.audio (stream), message.audio (plain), or split across stream chunks.
-  let joined = raw;
-  if (stream) {
-    const parts: string[] = [];
-    for (const line of raw.split(/\r?\n/)) {
-      if (!line.startsWith('data:')) continue;
-      const d = line.slice(5).trim();
-      if (!d || d === '[DONE]') continue;
-      try { const j = JSON.parse(d); for (const a of (j?.choices?.[0]?.delta?.audio || j?.choices?.[0]?.message?.audio || [])) parts.push(String(a?.audio_url?.url || a?.url || '')); } catch {}
-    }
-    if (parts.length) joined = parts.join('');
-  }
-  const m = joined.match(/data:audio\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=\s]+)/i);
-  if (m) return saveAceAudio(Buffer.from(m[1].replace(/\s+/g, ''), 'base64'), stream ? 'stream' : 'request');
-  const urlM = joined.match(/"url"\s*:\s*"(https?:[^"]+)"/i);
-  if (urlM) {
-    const dl = await fetch(urlM[1].replace(/\\\//g, '/'), { signal: AbortSignal.timeout(240000) });
-    if (dl.ok) return saveAceAudio(Buffer.from(await dl.arrayBuffer()), stream ? 'stream' : 'request');
-  }
-  let errText = raw.replace(/\s+/g, ' ').slice(0, 200);
-  try { const j = JSON.parse(raw); errText = String(j?.error?.message || j?.error || j?.choices?.[0]?.message?.content || errText).slice(0, 200); } catch {}
-  throw new PipelineError('acestep_busy', `ACE-Step finished without audio: ${errText}`);
-}
-
 /** Google Lyria via the Gemini API (Interactions). PAID — only used when LYRIA_ENABLED=true and a billing-enabled Gemini key is set. */
 async function generateLyriaMusic(song: MusicalSong): Promise<{ file: string; duration: number; taskId?: string }> {
   if (!CFG.lyriaEnabled) throw new PipelineError('lyria_disabled', 'Lyria is off (set LYRIA_ENABLED=true; it needs a billing-enabled Gemini key).');
@@ -3512,11 +3484,10 @@ async function generateLyriaMusic(song: MusicalSong): Promise<{ file: string; du
   throw new PipelineError('lyria_failed', `Lyria music generation failed: ${lastErr || 'unknown error'}`);
 }
 
-const MUSIC_ENGINE_LABEL: Record<string, string> = { acestep: 'ACE-Step 1.5', lyria: 'Google Lyria' };
+const MUSIC_ENGINE_LABEL: Record<string, string> = { acestep: 'ACE-Step 1.5 (on the runner)', lyria: 'Google Lyria' };
 /** ACE-Step is the music engine. (Google Lyria is only tried if LYRIA_ENABLED=true with a paid Gemini key.) */
 async function generateMusicTrack(song: MusicalSong): Promise<{ file: string; duration: number; engine: string }> {
-  const available = ['acestep', 'lyria'].filter((p) => (p === 'acestep' ? CFG.acestepKeys.length > 0 : CFG.lyriaEnabled && CFG.geminiKeys.length > 0));
-  if (!available.length) throw new PipelineError('music_no_engine', 'No ACE-Step key is configured. Add ACESTEP_API_KEY (free: https://acemusic.ai/api-key) as a GitHub Actions secret.');
+  const available = ['acestep', 'lyria'].filter((p) => (p === 'acestep' ? true : CFG.lyriaEnabled && CFG.geminiKeys.length > 0));
   const errors: string[] = [];
   for (const p of available) {
     try {
@@ -3735,6 +3706,8 @@ function timingForMusic(song: MusicalSong, transcript: Word[], duration: number,
   return { words, sections };
 }
 async function produceMusical(t0: number, pastTitles: string[]): Promise<number> {
+  // Start installing / loading ACE-Step on this runner right away, while the lyrics are written.
+  prepareLocalAce().catch(() => {});
   await reportStatus('running', '1/6 Writing the original song', 10, `Writing a ${CFG.subGenre || 'musical'} song for a ${CFG.gender} lead singer…`);
   const song = await writeMusicalSong(pastTitles);
   let generated = await generateMusicTrack(song);
