@@ -57,6 +57,46 @@ const VOICE_POOL = {
 };
 const NARRATOR = 'en-US-AndrewMultilingualNeural';
 
+/**
+ * Spoken languages for podcasts: native neural voices (the multilingual
+ * English voices fill in when a language has few). A language with no
+ * neural voice (Yoruba, Igbo, Hausa) is spoken in English with Nigerian voices.
+ */
+const SPOKEN: Record<string, { name: string; female: string[]; male: string[] }> = {
+  korean: { name: 'Korean', female: ['ko-KR-SunHiNeural'], male: ['ko-KR-InJoonNeural', 'ko-KR-HyunsuMultilingualNeural'] },
+  japanese: { name: 'Japanese', female: ['ja-JP-NanamiNeural'], male: ['ja-JP-KeitaNeural'] },
+  chinese: { name: 'Mandarin Chinese', female: ['zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural'], male: ['zh-CN-YunxiNeural', 'zh-CN-YunjianNeural'] },
+  french: { name: 'French', female: ['fr-FR-DeniseNeural', 'fr-FR-EloiseNeural'], male: ['fr-FR-HenriNeural', 'fr-FR-RemyMultilingualNeural'] },
+  spanish: { name: 'Spanish', female: ['es-ES-ElviraNeural', 'es-MX-DaliaNeural'], male: ['es-ES-AlvaroNeural', 'es-MX-JorgeNeural'] },
+  portuguese: { name: 'Portuguese', female: ['pt-BR-FranciscaNeural', 'pt-PT-RaquelNeural'], male: ['pt-BR-AntonioNeural', 'pt-PT-DuarteNeural'] },
+  german: { name: 'German', female: ['de-DE-KatjaNeural', 'de-DE-AmalaNeural'], male: ['de-DE-ConradNeural', 'de-DE-KillianNeural'] },
+  italian: { name: 'Italian', female: ['it-IT-ElsaNeural', 'it-IT-IsabellaNeural'], male: ['it-IT-DiegoNeural', 'it-IT-GiuseppeMultilingualNeural'] },
+  arabic: { name: 'Arabic', female: ['ar-SA-ZariyahNeural', 'ar-EG-SalmaNeural'], male: ['ar-SA-HamedNeural', 'ar-EG-ShakirNeural'] },
+  hindi: { name: 'Hindi', female: ['hi-IN-SwaraNeural'], male: ['hi-IN-MadhurNeural'] },
+  swahili: { name: 'Swahili', female: ['sw-KE-ZuriNeural', 'sw-TZ-RehemaNeural'], male: ['sw-KE-RafikiNeural', 'sw-TZ-DaudiNeural'] },
+  zulu: { name: 'Zulu', female: ['zu-ZA-ThandoNeural'], male: ['zu-ZA-ThembaNeural'] },
+  amharic: { name: 'Amharic', female: ['am-ET-MekdesNeural'], male: ['am-ET-AmehaNeural'] },
+  turkish: { name: 'Turkish', female: ['tr-TR-EmelNeural'], male: ['tr-TR-AhmetNeural'] },
+  russian: { name: 'Russian', female: ['ru-RU-SvetlanaNeural', 'ru-RU-DariyaNeural'], male: ['ru-RU-DmitryNeural'] },
+  indonesian: { name: 'Indonesian', female: ['id-ID-GadisNeural'], male: ['id-ID-ArdiNeural'] },
+  tagalog: { name: 'Filipino (Tagalog)', female: ['fil-PH-BlessicaNeural'], male: ['fil-PH-AngeloNeural'] },
+  vietnamese: { name: 'Vietnamese', female: ['vi-VN-HoaiMyNeural'], male: ['vi-VN-NamMinhNeural'] },
+  thai: { name: 'Thai', female: ['th-TH-PremwadeeNeural'], male: ['th-TH-NiwatNeural'] },
+  dutch: { name: 'Dutch', female: ['nl-NL-ColetteNeural', 'nl-NL-FennaNeural'], male: ['nl-NL-MaartenNeural'] },
+  polish: { name: 'Polish', female: ['pl-PL-ZofiaNeural', 'pl-PL-AgnieszkaNeural'], male: ['pl-PL-MarekNeural'] },
+  'nigerian pidgin': { name: 'Nigerian Pidgin', female: ['en-NG-EzinneNeural'], male: ['en-NG-AbeoNeural'] },
+};
+const NIGERIAN = { female: ['en-NG-EzinneNeural'], male: ['en-NG-AbeoNeural'] };
+/** The podcast's spoken language: { name, voices } — null for English. */
+function podcastLanguage(CFG: any): { key: string; name: string; female: string[]; male: string[]; english: boolean } | null {
+  const raw = String(CFG.podcastLanguage || '').trim().toLowerCase();
+  if (!raw || raw === 'english') return null;
+  const key = Object.keys(SPOKEN).find((k) => raw === k || raw.startsWith(k) || raw.includes(k));
+  if (key) return { key, ...SPOKEN[key], english: key === 'nigerian pidgin' };
+  if (/yoruba|igbo|hausa/.test(raw)) return { key: raw, name: 'English', ...NIGERIAN, english: true };
+  return null;
+}
+
 export const EMO_TAGS = ['neutral', 'happy', 'excited', 'sad', 'crying', 'serious', 'worried', 'scared', 'surprised', 'angry', 'calm', 'curious', 'laugh'];
 export const GESTURE_TAGS = ['look_left', 'look_right', 'look_up', 'think', 'nod', 'shake_head', 'lean_in', 'point', 'explain', 'count', 'wave', 'shrug', 'hands_up', 'hand_chest', 'fist'];
 const ALL_TAGS = new Set([...EMO_TAGS, ...GESTURE_TAGS]);
@@ -374,7 +414,12 @@ THE HOSTS OPEN: welcome viewers back to ${studio.showName}, then introduce ${sta
 Speakers: 1 = ${hosts[0].name} (the host), ${hosts.slice(1).map((h, i) => `${i + 2} = ${h.name} (guest)`).join(', ')}.
 THE HOST OPENS: welcomes the viewers back, then introduces the guest by name — e.g. "We have ${hosts[1].name} on the show today" — and says what they will talk about. The host asks the questions and steers; the guest${hosts.length > 2 ? 's bring' : ' brings'} expertise, strong opinions and predictions. The host thanks ${guestNames} by name at the end and asks viewers to follow`
     : `with ${hosts.length} hosts: ${hosts.map((h, i) => `${i + 1} = ${h.name} (${h.gender}${h.personality ? `, personality: ${h.personality.toLowerCase()}` : ''}${i === 0 ? ', the lead host who opens and closes' : ', co-host with their own opinions'})`).join('; ')}. Each host speaks in a way that matches their personality.`;
-  const user = `Write one episode of "${studio.showName}", a video podcast ${cast}.
+  const lang = podcastLanguage(CFG);
+  const foreign = !!lang && !lang.english;
+  const langRule = lang ? (foreign
+    ? `LANGUAGE: the whole conversation is spoken in natural, everyday ${lang.name} (as native speakers really talk — not a translation). Every line ALSO has "en": a faithful, natural English translation of that line (it is shown as the English subtitle). Keep every line short — at most about 14 English words — so each subtitle fits on screen.\n`
+    : `LANGUAGE: ${lang.name === 'English' ? 'English with a warm Nigerian flavour (a few local expressions are welcome)' : lang.name}.\n`) : '';
+  const user = `${langRule}Write one episode of "${studio.showName}", a video podcast ${cast}.
 TOPIC: ${topic}
 ${news.length ? `FRESH HEADLINES (last 3 days). Facts may ONLY come from these; everything else is clearly the hosts' opinion, questions or reactions:\n${news.map((h, i) => `${i + 1}. ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : 'No live headlines were found: talk about the topic in general terms — opinions, experiences, tips — and do not invent news, numbers, dates or quotes.'}
 EPISODES ALREADY MADE (never repeat one of these angles):
@@ -386,11 +431,14 @@ INTERVIEW: for every song the hosts ask about the INSPIRATION — the moment, pe
 Never invent awards, chart positions, sales or real collaborators.
 ` : ''}${about && !CFG.topic && !singerMode ? `ANGLE: a roundup of the latest in ${about} — what just happened, why it matters, the hosts' honest takes, and bold predictions about the next big thing (clearly framed as speculation).\n` : ''}HOW IT SOUNDS: a real conversation between friends who know the subject — quick back-and-forth, reactions ("wait, really?"), a disagreement, a laugh, a clear takeaway. Short lines (one or two sentences each). Line 1 is a HOOK (a surprising fact or bold opinion, max 14 words). The last line thanks the audience and asks them to follow.
 Performance tags (optional, before the word they apply to): ${[...EMO_TAGS, 'nod', 'shake_head', 'lean_in', 'point', 'explain', 'count', 'shrug', 'hands_up', 'hand_chest', 'think'].map((t) => `[${t}]`).join(' ')}.
-LENGTH: ${n}.
-Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description": "2-3 sentences for YouTube", "hashtags": ["5-8 specific hashtags without #"], "lines": [{"host": 1, "text": "[excited] Line text"}]}`;
+${CFG.performanceNotes ? `WHAT IS WORKING ON THIS CHANNEL (learn from it):\n${CFG.performanceNotes}\n` : ''}LENGTH: ${n}.
+${foreign
+  ? `Return ONLY JSON: {"title": "catchy episode title in ${lang!.name} (max 60 chars)", "title_en": "the same title in English", "description": "2-3 sentences for YouTube, in English", "hashtags": ["5-8 specific hashtags without #"], "lines": [{"host": 1, "text": "[excited] the line in ${lang!.name}", "en": "the English translation"}]}`
+  : `Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description": "2-3 sentences for YouTube", "hashtags": ["5-8 specific hashtags without #"], "lines": [{"host": 1, "text": "[excited] Line text"}]}`}`;
   const got = await askJson(kit, 'You write natural, factual podcast conversations. You answer with one JSON object.', user, (j) => {
     if (!Array.isArray(j.lines) || j.lines.length < (shorts ? 8 : 25)) return 'too few lines';
     if (j.lines.some((l: any) => !(Number(l.host) >= 1 && Number(l.host) <= hosts.length) || !clean(l.text))) return 'bad line';
+    if (foreign && j.lines.filter((l: any) => clean(l.en)).length < j.lines.length * 0.8) return 'missing English translations';
     return null;
   }, 'podcast_script');
   const script = got?.j || {
@@ -420,10 +468,14 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
 
   // Voices: one per host, distinct.
   const used = new Set<string>();
-  const voiceOf = (g: 'female' | 'male', i: number) => { const v = VOICE_POOL[g].find((x) => !used.has(x)) || VOICE_POOL[g][i % VOICE_POOL[g].length]; used.add(v); return v; };
-  if ((guestMode || singerMode) && kit.hostVoice) used.add(kit.hostVoice);
-  const voices = hosts.map((h, i) => (i === 0 && guestMode && kit.hostVoice ? kit.hostVoice : singerMode && i === hosts.length - 1 && kit.hostVoice ? kit.hostVoice : voiceOf(h.gender, i)));
-  const lines = script.lines.map((l: any, i: number) => ({ host: clamp(Math.round(Number(l.host)), 1, hosts.length) - 1, ...parseTags(clean(l.text, 400)), i })).filter((l: any) => l.text);
+  // Another language: native voices first, then the multilingual voices (they speak it too).
+  const voicePool = lang ? { female: [...lang.female, 'en-US-AvaMultilingualNeural', 'en-US-EmmaMultilingualNeural'], male: [...lang.male, 'en-US-AndrewMultilingualNeural', 'en-US-BrianMultilingualNeural'] } : VOICE_POOL;
+  const voiceOf = (g: 'female' | 'male', i: number) => { const v = voicePool[g].find((x) => !used.has(x)) || voicePool[g][i % voicePool[g].length]; used.add(v); return v; };
+  const ownVoice = lang ? '' : kit.hostVoice;
+  if ((guestMode || singerMode) && ownVoice) used.add(ownVoice);
+  const voices = hosts.map((h, i) => (i === 0 && guestMode && ownVoice ? ownVoice : singerMode && i === hosts.length - 1 && ownVoice ? ownVoice : voiceOf(h.gender, i)));
+  if (lang) kit.log(`Podcast language: ${lang.name}${foreign ? ' with English subtitles' : ''} — voices ${voices.join(', ')}.`);
+  const lines = script.lines.map((l: any, i: number) => ({ host: clamp(Math.round(Number(l.host)), 1, hosts.length) - 1, ...parseTags(clean(l.text, 400)), en: clean(String(l.en || '').replace(/\[[^\]]*\]/g, ' '), 300), i })).filter((l: any) => l.text);
   const clips = await pool(lines, 4, (l: any) => speak(kit, l.text, voices[l.host], '+4%', hosts[l.host].gender, `p${l.i}`));
   // Natural pacing: quick exchanges, a beat longer on a change of speaker.
   let t = 0.5;
@@ -440,12 +492,14 @@ Return ONLY JSON: {"title": "catchy episode title (max 70 chars)", "description"
     mode: 'podcast', width: kit.W, height: kit.H, fps: kit.FPS, duration, title: clean(script.title, 90), badge: `🎙 ${studio.showName.toUpperCase()}`, endCard: 'Follow for the next episode', accent: studio.accent,
     fontUrl: '/font/Poppins-Bold.ttf', audio: '/audio/dialogue.wav', words: mix.words,
     hosts: hosts.map((h) => ({ ...h, cues: mix.cues[h.id] || [] })), studio,
+    // Another language: each spoken line on screen with its English translation underneath.
+    ...(foreign ? { subtitles: lines.map((l: any, i: number) => ({ start: placed[i].at, end: placed[i].at + clips[i].duration, text: l.text, en: l.en, speaker: hosts[l.host].id })) } : {}),
   };
   const res = await render(kit, job, mix, duration);
   const text = lines.map((l: any) => `${hosts[l.host].name}: ${l.text}`).join('\n');
   return {
     highlights: emotionMoments(mix.cues),
-    title: clean(script.title, 95), description: `${clean(script.description, 900)}\n\n${singerMode ? `Hosts: ${hosts[0].name} & ${hosts[1].name}. Guest: ${star.name}.${songs.length ? `\n\nSongs in this episode:\n${songs.map((x) => `• ${x.title}`).join('\n')}` : ''}` : guestMode ? `Host: ${hosts[0].name}. Guest${hosts.length > 2 ? 's' : ''}: ${guestNames}.` : `Hosts: ${hosts.map((h) => h.name).join(', ')}.`}${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
+    title: foreign && clean(script.title_en) ? clean(`${clean(script.title, 50)} | ${clean(script.title_en, 60)}`, 95) : clean(script.title, 95), description: `${foreign ? `🌐 ${lang!.name} with English subtitles.\n` : ''}${clean(script.description, 900)}\n\n${singerMode ? `Hosts: ${hosts[0].name} & ${hosts[1].name}. Guest: ${star.name}.${songs.length ? `\n\nSongs in this episode:\n${songs.map((x) => `• ${x.title}`).join('\n')}` : ''}` : guestMode ? `Host: ${hosts[0].name}. Guest${hosts.length > 2 ? 's' : ''}: ${guestNames}.` : `Hosts: ${hosts.map((h) => h.name).join(', ')}.`}${news.length ? `\n\nIn the news:\n${news.slice(0, 4).map((h) => `• ${h.title}${h.source ? ` (${h.source})` : ''}`).join('\n')}` : ''}`,
     hashtags: [...cleanTags(script.hashtags), 'podcast'], tags: [topic, studio.showName, 'podcast', ...hosts.map((h) => h.name)].map((x) => clean(x, 40)).filter(Boolean),
     script: text, durationSec: duration, character: res.character || 'podcast', model: got?.model || 'template', sources: news.slice(0, 4).map((h) => h.title), showName: studio.showName,
   };
