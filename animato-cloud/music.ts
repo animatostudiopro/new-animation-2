@@ -284,7 +284,7 @@ function compose(bus: Bus, mood: MusicMood, seconds: number, r: ReturnType<typeo
 }
 
 export function moodFor(category: string, subGenre = ''): MusicMood {
-  const c = category.toLowerCase(), s = subGenre.toLowerCase();
+  const c = String(category ?? '').toLowerCase(), s = String(subGenre ?? '').toLowerCase();
   if (c === 'news') return 'news';
   if (c === 'tech') return 'tech';
   if (c === 'cooking' || c === 'ads') return 'upbeat';

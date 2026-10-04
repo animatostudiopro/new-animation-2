@@ -146,7 +146,7 @@ async function speak(kit: Kit, text: string, voice: string, rate: string, gender
 /** The script's own tokens (with punctuation) on the TTS timings; estimated when there are none. */
 function attachPunctuation(bounds: Word[], text: string, duration: number): Word[] {
   const tokens = text.split(/\s+/).filter(Boolean);
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const norm = (s: string) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
   if (bounds.length >= Math.max(1, tokens.length * 0.6)) {
     const out: Word[] = [];
     let ti = 0;
@@ -349,7 +349,7 @@ function autoCast(seed: string, n: number, avoid: string[] = []): { autoHost: tr
   let h = 2166136261; for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
   const r = () => { h = Math.imul(h ^ (h >>> 13), 0x5bd1e995) >>> 0; h ^= h >>> 15; return (h % 100000) / 100000; };
   const out: { autoHost: true; name: string; gender: 'female' | 'male'; personality: string; seed: string }[] = [];
-  const used = new Set(avoid.map((x) => x.toLowerCase()));
+  const used = new Set(avoid.map((x) => String(x ?? '').toLowerCase()));
   const usedP = new Set<string>();
   for (let i = 0; i < n; i++) {
     const gender: 'female' | 'male' = i === 0 ? (r() < 0.5 ? 'female' : 'male') : (out[i - 1].gender === 'female' ? (r() < 0.7 ? 'male' : 'female') : (r() < 0.7 ? 'female' : 'male'));
@@ -406,7 +406,7 @@ async function podcast(kit: Kit): Promise<AnimResult> {
   const star = hosts[hosts.length - 1];
   const guestNames = hosts.slice(1).map((h) => h.name).join(' and ');
   const cast = singerMode
-    ? `hosted by ${hosts[0].name} (${hosts[0].gender}, ${hosts[0].personality.toLowerCase() || 'warm'}) and ${hosts[1].name} (${hosts[1].gender}, ${hosts[1].personality.toLowerCase() || 'curious'}). Today's GUEST is the singer ${star.name} (${star.gender}) — the star of this channel. She is NOT a host: the hosts interview HER.
+    ? `hosted by ${hosts[0].name} (${hosts[0].gender}, ${String(hosts[0].personality || '').toLowerCase() || 'warm'}) and ${hosts[1].name} (${hosts[1].gender}, ${String(hosts[1].personality || '').toLowerCase() || 'curious'}). Today's GUEST is the singer ${star.name} (${star.gender}) — the star of this channel. She is NOT a host: the hosts interview HER.
 Speakers: 1 = ${hosts[0].name} (lead host), 2 = ${hosts[1].name} (co-host), 3 = ${star.name} (the singer, guest).
 THE HOSTS OPEN: welcome viewers back to ${studio.showName}, then introduce ${star.name} with real excitement and say she is here to talk about her latest songs. The two hosts take turns asking; ${star.name} answers in the first person ("I wrote it when…").`
     : guestMode
@@ -525,7 +525,7 @@ export const FILM_GENRES: Record<string, { mood: string; grade: string; brief: s
   adventure: { mood: 'upbeat', grade: '', brief: 'an adventure: a quest, a discovery, friends who get each other through it' },
   friendship: { mood: 'upbeat', grade: '', brief: 'a friendship story: two friends tested, loyalty and laughter' },
 };
-const genreKey = (g: string) => { const x = g.toLowerCase(); return Object.keys(FILM_GENRES).find((k) => x.includes(k.replace('-', '')) || x.includes(k)) || (/love|romantic/.test(x) ? 'romance' : /scary|horror|ghost/.test(x) ? 'horror' : /funny|comed/.test(x) ? 'comedy' : /scifi|science|space|robot/.test(x) ? 'sci-fi' : ''); };
+const genreKey = (g: string) => { const x = String(g ?? '').toLowerCase(); return Object.keys(FILM_GENRES).find((k) => x.includes(k.replace('-', '')) || x.includes(k)) || (/love|romantic/.test(x) ? 'romance' : /scary|horror|ghost/.test(x) ? 'horror' : /funny|comed/.test(x) ? 'comedy' : /scifi|science|space|robot/.test(x) ? 'sci-fi' : ''); };
 
 /** A fresh, random cast for every film: who they are is decided here, the writer names and styles them. */
 function castBrief(seed: string): string {
@@ -703,7 +703,7 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
     gear: gears.includes(sd.gear) ? sd.gear : 'none',
   }));
   // Two sides in the same colour can't be told apart.
-  if (sides[0].color.toLowerCase() === sides[1].color.toLowerCase()) { sides[0].color = defaults[0].color; sides[1].color = defaults[1].color; }
+  if (String(sides[0].color || '').toLowerCase() === String(sides[1].color || '').toLowerCase()) { sides[0].color = defaults[0].color; sides[1].color = defaults[1].color; }
   // Rounds: best of N, the overall winner takes the last one.
   let rounds: VsRound[] = (j.rounds as any[]).slice(0, nRounds).map((r) => ({
     winner: r.winner === 'B' ? 'B' : 'A',
@@ -778,7 +778,7 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
     highlights: [{ t: Math.max(0.6, introEnd - 0.9), w: 0.5 }, ...fights.flatMap((f: any) => (f.choreo?.impacts || []).filter((im: any) => im.ko || im.ground || ['down', 'launchFar'].includes(im.kind) || (im.kind !== 'block' && im.strength >= 0.9)).map((im: any) => ({ t: im.t - 0.1, w: im.ko ? 0.8 : 0.5 })))],
     title,
     description: `${clean(j.description, 700)}\n\n${rounds.map((r, i) => `Round ${i + 1}: ${sides.find((x) => x.id === r.winner)!.label}`).join('\n')}\n🏆 ${score}.\n\nWho should fight next? Tell us in the comments.\nAn original stickman animation, just for fun — not a real-world test.`,
-    hashtags: [...cleanTags(j.hashtags), 'stickman', 'stickfight', 'whowins'], tags: ['stickman', 'stick fight', 'vs', 'who wins', 'animation', ...sides.map((x) => x.label.toLowerCase())],
+    hashtags: [...cleanTags(j.hashtags), 'stickman', 'stickfight', 'whowins'], tags: ['stickman', 'stick fight', 'vs', 'who wins', 'animation', ...sides.map((x) => String(x.label || '').toLowerCase())],
     script: [hook, ...rounds.map((r, i) => `Round ${i + 1}: ${sides.find((x) => x.id === r.winner)!.label}${(r.lines || []).map((l) => ` — ${sides.find((x) => x.id === l.side)!.label}: "${l.text}"`).join('')}`), verdict].filter(Boolean).join('\n'),
     durationSec: duration, character: res.character || 'stickman', model: got?.model || 'template', sources: [],
   };

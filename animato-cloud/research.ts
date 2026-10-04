@@ -338,7 +338,7 @@ function roundup(ctx: ResearchCtx, headlines: Headline[], tried: FactPack[]): Fa
     const more = tried.find((p) => p.subject === h.title)?.facts.filter((f) => !/^(SUMMARY|DATE|UNCONFIRMED)/.test(f)).slice(0, 2) || [];
     for (const m of more) facts.push(`  detail for headline ${i + 1}: ${m}`);
   });
-  const title = `Today's top ${topic.toLowerCase()} headlines`;
+  const title = `Today's top ${String(topic ?? '').toLowerCase()} headlines`;
   ctx.log(`Research: no single story could be read in full right now — making a credited roundup of ${pick.length} fresh headlines (${pick.map((h) => h.source).join(', ')}).`);
   return {
     subject: title, facts, excerpts: [], outlets: pick.map((h) => h.source), links: pick.filter((h) => h.link).map((h) => ({ title: h.source, url: h.link })),

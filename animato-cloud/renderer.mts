@@ -554,7 +554,7 @@ const TAG_ALIASES: Record<string, string> = {
 };
 
 function normaliseTag(raw: string): string | null {
-  const t = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const t = String(raw ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   const v = TAG_ALIASES[t] || t;
   return EMOTION_TAGS.includes(v) || GESTURE_TAGS.includes(v) ? v : null;
 }
@@ -1063,7 +1063,7 @@ function cleanDescriptionText(t: string): string {
   return d;
 }
 
-const firstSentence = (t: string) => { const m = String(t).match(/^.{20,180}?[.!?](\s|$)/); return (m ? m[0] : String(t).slice(0, 160)).trim(); };
+const firstSentence = (t: string) => { const m = String(t ?? '').match(/^.{20,180}?[.!?](\s|$)/); return (m ? m[0] : String(t).slice(0, 160)).trim(); };
 
 /** A readable, detailed body built from the (fact-checked) script when the writer's description is thin. */
 function descriptionFromScript(sc: Script): string {
@@ -1113,7 +1113,7 @@ function descriptionDetails(sc: Script): string {
   // News / tech / ads: the key points exactly as narrated (the narration passed the fact check).
   const seen = new Set<string>();
   const points = sc.scenes.map((x) => firstSentence(x.narration)).filter((p) => {
-    const k = p.toLowerCase().slice(0, 40);
+    const k = String(p ?? '').toLowerCase().slice(0, 40);
     if (p.split(' ').length < 5 || seen.has(k) || /\b(subscribe|follow|comment|like this video)\b/i.test(p)) return false;
     seen.add(k); return true;
   }).slice(0, 6);
@@ -1392,7 +1392,7 @@ function cleanForSpeech(text: string): string {
 function alignWords(boundaries: Word[], script: string): Word[] {
   const tokens = script.split(/\s+/).filter(Boolean);
   // Letters of every alphabet count (Korean, Arabic, Cyrillic…), not just a–z.
-  const norm = (s: string) => s.toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+  const norm = (s: string) => String(s ?? '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
   const out: Word[] = [];
   let ti = 0;
   for (const b of boundaries) {
@@ -3261,7 +3261,7 @@ function songConcept(): { theme: string; concept: string } {
 }
 /** Filler check: a song that keeps repeating empty words has no message. */
 function fillerHeavy(lyrics: string): boolean {
-  const words = lyrics.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').split(/\s+/).filter(Boolean);
+  const words = String(lyrics ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').split(/\s+/).filter(Boolean);
   if (words.length < 12) return true;
   const filler = words.filter((w) => /^(oh+|ah+|eh+|yeah+|yea|la+|na+|hey+|ooh+|woah+|whoa+|mm+|baby)$/.test(w)).length;
   const unique = new Set(words).size / words.length;
@@ -4197,7 +4197,10 @@ main()
   .then((code) => process.exit(code))
   .catch(async (err: any) => {
     const code = err instanceof PipelineError ? err.code : 'unexpected';
-    const message = err?.message || String(err);
+    // A plain crash (TypeError…) says nothing about WHERE it happened — add the first stack frame from our own code.
+    const frame = err instanceof PipelineError ? '' : String(err?.stack || '').split('\n').slice(1).map((l: string) => l.trim()).find((l: string) => /animato-cloud|renderer|runner/.test(l) && !/node_modules/.test(l)) || '';
+    const where = frame ? ` [at ${frame.replace(/^at\s+/, '').replace(/^.*[\\/]animato-cloud[\\/]/, 'animato-cloud/').slice(0, 140)}]` : '';
+    const message = `${err?.message || String(err)}${where}`;
     console.error(`❌ ${message}`);
     if (!(err instanceof PipelineError)) console.error(err?.stack || err);
     await reportStatus('failed', 'Failed', 0, `❌ ${message}`, { error: message, errorCode: code });
