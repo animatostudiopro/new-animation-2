@@ -10,6 +10,24 @@ import argparse, json, math, os, sys, time, traceback, urllib.request
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+
+def _patch_pil_shapes():
+    """PIL raises ValueError when x1<x0 or y1<y0. Odd crops (waist-up portraits, tiny
+    silhouettes) can produce those boxes, so normalise them instead of crashing the rig."""
+    from PIL import ImageDraw
+    def norm(xy):
+        v=list(xy)
+        if len(v)==2 and hasattr(v[0],"__len__"): v=[v[0][0],v[0][1],v[1][0],v[1][1]]
+        if len(v)==4:
+            x0,y0,x1,y1=v
+            v=[min(x0,x1),min(y0,y1),max(x0,x1),max(y0,y1)]
+        return v
+    for name in ("rectangle","ellipse"):
+        orig=getattr(ImageDraw.ImageDraw,name)
+        def wrap(self,xy,*a,_o=orig,**k): return _o(self,norm(xy),*a,**k)
+        setattr(ImageDraw.ImageDraw,name,wrap)
+_patch_pil_shapes()
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 PARTS = {
@@ -451,13 +469,16 @@ def build(input_path,out_dir,mode,plan,gender,full_body,seed):
     # Build conservative limb regions before saving the torso, then remove those pixels
     # from the body so moving a limb cannot leave a duplicate/ghost silhouette behind.
     b=alpha.getbbox() or (0,0,W,H)
-    torso_x0=int((b[0]+b[2])/2-W*.20); torso_x1=int((b[0]+b[2])/2+W*.20)
+    torso_x0=max(0,int((b[0]+b[2])/2-W*.20)); torso_x1=min(W,int((b[0]+b[2])/2+W*.20))
     shoulder_y=int(hb[3]+(hb[3]-hb[1])*.15)
     waist_y=int(b[1]+(b[3]-b[1])*.70)
+    # Waist-up portraits: the head can take most of the silhouette, which put the shoulders
+    # below the 70% mark and produced an inverted rectangle. Keep waist >= shoulders.
+    shoulder_y=min(shoulder_y,int(b[3])); waist_y=max(waist_y,shoulder_y)
     side_band_l=Image.new("L",(W,H),0); ImageDraw.Draw(side_band_l).rectangle([0,shoulder_y,torso_x0,waist_y],fill=255)
     side_band_r=Image.new("L",(W,H),0); ImageDraw.Draw(side_band_r).rectangle([torso_x1,shoulder_y,W,waist_y],fill=255)
     arm_l_mask=ImageChops.multiply(alpha,side_band_l); arm_r_mask=ImageChops.multiply(alpha,side_band_r)
-    leg_top=max(waist_y,shoulder_y); mid=int((b[0]+b[2])/2)
+    leg_top=min(max(waist_y,shoulder_y),int(b[3])); mid=int((b[0]+b[2])/2)
     leg_l=Image.new("L",(W,H),0); ImageDraw.Draw(leg_l).rectangle([b[0],leg_top,mid,int(b[3])],fill=255)
     leg_r=Image.new("L",(W,H),0); ImageDraw.Draw(leg_r).rectangle([mid,leg_top,b[2],int(b[3])],fill=255)
     leg_l_mask=ImageChops.multiply(alpha,leg_l); leg_r_mask=ImageChops.multiply(alpha,leg_r)
