@@ -127,7 +127,6 @@ const CFG = {
   groqKeys: keyList(AUTH.groq_api_keys, AUTH.groq_api_key, ENV.GROQ_API_KEYS, ENV.GROQ_API_KEY),
   geminiModels: listOf(pick(JOB.gemini_models, ENV.GEMINI_MODELS)),
   groqModels: listOf(pick(JOB.groq_models, ENV.GROQ_MODELS)),
-  nvidiaKey: pick(AUTH.nvidia_api_key, ENV.NVIDIA_API_KEY),
   // Personal/test project fallback. Environment/auth config still takes precedence when provided.
   airforceKey: pick(AUTH.airforce_api_key, ENV.AIRFORCE_API_KEY, 'sk-air-WbHJLcTArpFku1I1pQZpenjgZJiaoPdR9fK2mbfD6NnbjRVM'),
   airforceBase: pick(ENV.AIRFORCE_BASE, 'https://api.airforce').replace(/\/+$/, ''),
@@ -177,7 +176,6 @@ const CFG = {
   /** Ads promo for the current product: only mentioned when switched on in the app. */
   adPromo: (() => { try { const j = JSON.parse(pick(JOB.ad_promo) || '{}'); return j && j.enabled === true ? { enabled: true, discount: String(j.discount || '').slice(0, 60), details: String(j.details || '').slice(0, 400), code: String(j.code || '').slice(0, 40), ends: String(j.ends || '').slice(0, 60) } : null; } catch { return null; } })(),
   usedHeadlines: String(pick(JOB.used_headlines)).split('\n').map((x) => x.trim()).filter(Boolean),
-  pollinationsKey: pick(AUTH.pollinations_key, ENV.POLLINATIONS_API_KEY),
   pexelsKey: pick(AUTH.pexels_key, ENV.PEXELS_API_KEY),
   pixabayKey: pick(AUTH.pixabay_key, ENV.PIXABAY_API_KEY),
   runnerKey: pick(AUTH.runner_key, ENV.ANIMATO_RUNNER_KEY),
@@ -191,7 +189,6 @@ const CFG = {
   geminiBase: pick(ENV.GEMINI_BASE_URL, 'https://generativelanguage.googleapis.com/v1beta'),
   groqBase: pick(ENV.GROQ_BASE_URL, 'https://api.groq.com/openai/v1'),
   googleTokenUrl: pick(ENV.GOOGLE_TOKEN_URL, 'https://oauth2.googleapis.com/token'),
-  nvidiaBase: pick(ENV.NVIDIA_GENAI_BASE, 'https://ai.api.nvidia.com/v1/genai'),
   // Real-image sources (news, tech, tutorials, cooking, ads). Overridable for tests.
   wikiApiBase: pick(ENV.WIKI_API_BASE, 'https://en.wikipedia.org/w/api.php'),
   commonsApiBase: pick(ENV.COMMONS_API_BASE, 'https://commons.wikimedia.org/w/api.php'),
@@ -207,7 +204,7 @@ const CFG = {
 };
 
 if (IN_ACTIONS) {
-  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.nvidiaKey, CFG.runnerKey, CFG.pollinationsKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey]) {
+  for (const secret of [CFG.ytRefreshToken, CFG.ytClientSecret, ...CFG.geminiKeys, ...CFG.groqKeys, CFG.runnerKey, CFG.pexelsKey, CFG.pixabayKey, CFG.airforceKey]) {
     if (secret && secret.length > 6) console.log(`::add-mask::${secret}`);
   }
 }
@@ -1532,118 +1529,107 @@ async function toJpeg(src: string, dst: string, cropBottom = 0): Promise<boolean
 // the main pipeline) and only get framed into the vertical Short afterwards, so the
 // images fetched/generated for them should be landscape too, not portrait.
 const orientation = (CFG.category === 'ads' && IS_SHORTS) ? 'landscape' : W > H * 1.2 ? 'landscape' : H > W * 1.2 ? 'portrait' : 'square';
-let lastPollinationsAt = 0;
+// ---------------------------------------------------------------------------
+// AI pictures (story scenes, plus cooking / news fallbacks) are drawn by a local
+// CPU image generator that runs on this runner: animato-cloud/imagegen.py
+// (1-step SDXS model + detail upscaler). No API keys, no rate limits, no web
+// service. The model is loaded ONCE per run and every scene reuses it.
+// ---------------------------------------------------------------------------
+const IMAGEGEN_PORT = 8012;
+const IMAGEGEN_BASE = `http://127.0.0.1:${IMAGEGEN_PORT}`;
+let imagegenReady: Promise<boolean> | null = null;
+let imagegenDisabled = '';
+let imagegenCount = 0;
+let imagegenStreak = 0;
+let imagegenProc: ReturnType<typeof spawn> | null = null;
 
-// NVIDIA NIM (build.nvidia.com): FLUX text-to-image. The hosted API may only
-// accept 1024x1024; we ask for the video's shape first and remember if it is refused.
-let nvidiaDisabled = '';
-let nvidiaSquareOnly = false;
-let nvidiaCount = 0;
-const NVIDIA_MODELS = [
-  { id: 'black-forest-labs/flux.1-dev', body: { mode: 'base', cfg_scale: 3.5, steps: 28, samples: 1 } },
-  { id: 'black-forest-labs/flux.1-schnell', body: { mode: 'base', cfg_scale: 0, steps: 4, samples: 1 } }
-];
+/** Short style prefixes. The text encoder reads only ~77 tokens, so style stays tiny and the scene gets the rest. */
+const STORY_STYLE = '3D animated movie still, cute cartoon characters, big expressive eyes, warm cinematic lighting, vibrant colours';
+const FOOD_STYLE = 'professional food photography, appetizing, natural window light, sharp focus';
+const EDITORIAL_STYLE = 'editorial illustration, realistic, cinematic lighting, wide view';
 
-/** Tone a prompt down for safety filters (horror/crime scenes) while keeping the scene. */
-function softenPrompt(p: string): string {
-  const swaps: [RegExp, string][] = [
-    [/\b(blood(y|ied)?|gore|gory|guts|wound(s|ed)?|bleeding)\b/gi, 'dark stains'],
-    [/\b(corpse|dead body|body bag|cadaver|remains)\b/gi, 'silhouette'],
-    [/\b(murder(ed|er|ing)?|kill(ed|er|ing|s)?|slaughter(ed)?|stab(bed|bing)?|strangl(ed|ing))\b/gi, 'mystery'],
-    [/\b(knife|knives|gun|pistol|rifle|weapon|axe|machete)\b/gi, 'shadowy object'],
-    [/\b(demon(ic)?|possessed|satanic|occult)\b/gi, 'eerie'],
-    [/\b(naked|nude|undressed)\b/gi, 'dressed'],
-    [/\b(scream(ing|ed)?|terrified|horrif(ied|ying)|gruesome|disturbing)\b/gi, 'tense'],
-    [/\b(child|girl|boy|kid)\b/gi, 'person']
-  ];
-  let out = p;
-  for (const [re, to] of swaps) out = out.replace(re, to);
-  return `${out}. Atmospheric, suspenseful, tasteful, no violence, no gore, cinematic lighting`;
+/** Drop style/boilerplate words the style prefix already says, so the scene keeps its token budget. */
+function slimPrompt(p: string, maxChars: number): string {
+  return p
+    .replace(/\b(high[- ]end|3d animated|animated|feature[- ]film|family[- ]film|still from|render(ed)?|cinematic|highly detailed|ultra[- ]detailed|8k|4k|masterpiece|wholesome|painterly|saturated|no text|no watermark|no captions|no logos?)\b/gi, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, '$1')
+    .replace(/^[\s,.;:!?]+|[\s,.;:!?]+$/g, '')
+    .slice(0, maxChars);
 }
 
-async function nvidiaImage(prompt: string, seed: number, file: string): Promise<boolean> {
-  if (!CFG.nvidiaKey || nvidiaDisabled) return false;
-  let softened = false;
-  const shaped = orientation === 'portrait' ? { width: 768, height: 1344 } : orientation === 'landscape' ? { width: 1344, height: 768 } : { width: 1024, height: 1024 };
-  for (const model of NVIDIA_MODELS) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const size = nvidiaSquareOnly ? { width: 1024, height: 1024 } : shaped;
-      const framing = size.width === size.height && orientation !== 'square' ? ', centered composition with the main subject in the middle of the frame' : '';
-      let res: Response;
-      try {
-        res = await fetch(`${CFG.nvidiaBase}/${model.id}`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${CFG.nvidiaKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ prompt: ((softened ? softenPrompt(prompt) : prompt) + framing).slice(0, 2000), ...size, seed: seed % 4294967295, ...model.body }),
-          signal: AbortSignal.timeout(120000)
-        });
-      } catch (err: any) {
-        log(`NVIDIA ${model.id} request failed (${err?.message}).`);
-        break; // next model
-      }
-      const text = await res.text();
-      if (res.status === 401 || res.status === 403) {
-        nvidiaDisabled = `HTTP ${res.status}`;
-        log(`⚠️ The NVIDIA API key was rejected (HTTP ${res.status}) — using other image sources for this run.`);
+/** Starts the local generator (once) and resolves true when the model is loaded and ready. */
+function startImageGenerator(): Promise<boolean> {
+  if (imagegenReady) return imagegenReady;
+  imagegenReady = (async () => {
+    if (CFG.offline) return false;
+    const script = path.join(HERE, 'imagegen.py');
+    if (!fs.existsSync(script)) { imagegenDisabled = 'imagegen.py is missing'; return false; }
+    const py = ENV.IMAGEGEN_PYTHON || 'python3';
+    const t0 = Date.now();
+    log('🖼️ Starting the local image generator (model loads while the script is written)…');
+    const proc = spawn(py, [script, 'serve', `--port=${IMAGEGEN_PORT}`], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONUNBUFFERED: '1' } });
+    imagegenProc = proc;
+    let tail = '';
+    let exited = false;
+    const onData = (d: Buffer) => {
+      const text = d.toString();
+      tail = (tail + text).slice(-3000);
+      for (const line of text.split('\n')) if (line.startsWith('[imagegen]')) log(`🖼️ ${line.slice(10).trim()}`);
+    };
+    proc.stdout?.on('data', onData);
+    proc.stderr?.on('data', onData);
+    proc.on('error', (e) => { exited = true; imagegenDisabled = `could not start (${e.message})`; });
+    proc.on('close', () => { exited = true; if (!imagegenDisabled) imagegenDisabled = 'the generator stopped'; });
+    process.on('exit', () => { try { proc.kill('SIGKILL'); } catch {} });
+    const until = Date.now() + 10 * 60000; // the very first run also downloads the model
+    while (Date.now() < until) {
+      if (exited) {
+        log(`⚠️ The image generator is not available (${imagegenDisabled || 'stopped'}): ${tail.split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300)}`);
         return false;
       }
-      if (res.status === 422 && !nvidiaSquareOnly && (size.width !== 1024 || size.height !== 1024)) {
-        nvidiaSquareOnly = true; // this endpoint only takes 1024x1024
-        continue;
-      }
-      if (res.status === 429 || res.status >= 500) {
-        await sleep(2500 * (attempt + 1));
-        continue;
-      }
-      if (!res.ok) {
-        log(`NVIDIA ${model.id}: HTTP ${res.status} ${text.slice(0, 160)}`);
-        break;
-      }
-      let data: any = {};
-      try { data = JSON.parse(text); } catch {}
-      const art = Array.isArray(data?.artifacts) ? data.artifacts[0] : null;
-      const b64 = art?.base64 || data?.image || data?.b64_json || data?.data?.[0]?.b64_json;
-      const finish = String(art?.finishReason || art?.finish_reason || data?.finish_reason || 'SUCCESS').toUpperCase();
-      if (!b64 || (finish !== 'SUCCESS' && finish !== 'STOP')) {
-        if (/FILTER|SAFETY|MODERAT|BLOCK/.test(finish) && !softened) {
-          softened = true; // retry this model with a toned-down prompt
-          log(`NVIDIA ${model.id}: prompt filtered — retrying with a softer wording.`);
-          continue;
-        }
-        log(`NVIDIA ${model.id}: no image (${finish}).`);
-        break;
-      }
-      fs.writeFileSync(file, Buffer.from(String(b64).replace(/^data:[^,]+,/, ''), 'base64'));
-      const [w, h] = await imageSize(file);
-      if (w >= 320 && h >= 320) { nvidiaCount++; return true; }
-      break;
+      try {
+        const h = await fetch(`${IMAGEGEN_BASE}/health`, { signal: AbortSignal.timeout(4000) });
+        const j: any = await h.json();
+        if (j?.error) { imagegenDisabled = String(j.error).slice(0, 200); log(`⚠️ The image generator failed to load: ${imagegenDisabled}`); try { proc.kill('SIGKILL'); } catch {} return false; }
+        if (j?.ready) { log(`🖼️ Image generator ready in ${((Date.now() - t0) / 1000).toFixed(0)}s (upscaler: ${j.upscaler || 'resize'}).`); return true; }
+      } catch {}
+      await sleep(1500);
     }
-  }
-  return false;
+    imagegenDisabled = 'the model did not load within 10 minutes';
+    log(`⚠️ ${imagegenDisabled}.`);
+    try { proc.kill('SIGKILL'); } catch {}
+    return false;
+  })();
+  return imagegenReady;
 }
 
-/** 'ai' = anonymous Pollinations (bottom watermark cropped), 'ai-clean' = NVIDIA / keyed. */
-let pollinationsGate: Promise<void> = Promise.resolve();
-
-async function aiImage(prompt: string, seed: number, file: string): Promise<'ai' | 'ai-clean' | null> {
-  if (CFG.offline || !prompt) return null;
-  if (await nvidiaImage(prompt, seed, file)) return 'ai-clean';
+/** Draws one picture with the local generator. Returns 'ai-clean' (never watermarked) or null. */
+async function aiImage(prompt: string, seed: number, file: string, style = ''): Promise<'ai' | 'ai-clean' | null> {
+  if (CFG.offline || !prompt || imagegenDisabled) return null;
+  if (!(await startImageGenerator())) return null;
   const size = orientation === 'portrait' ? { w: 864, h: 1536 } : orientation === 'landscape' ? { w: 1536, h: 864 } : { w: 1152, h: 1152 };
-  const enc = encodeURIComponent(prompt.slice(0, 480));
-  if (CFG.pollinationsKey) {
-    const url = `https://gen.pollinations.ai/image/${enc}?model=flux&width=${size.w}&height=${size.h}&seed=${seed}&nologo=true&private=true`;
-    if (await download(url, file, 90000, { Authorization: `Bearer ${CFG.pollinationsKey}` })) return 'ai-clean';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (imagegenDisabled) return null;
+    try {
+      const res = await fetch(`${IMAGEGEN_BASE}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt.slice(0, 1200), style, seed: seed % 4294967295, width: size.w, height: size.h, out: file }),
+        signal: AbortSignal.timeout(240000)
+      });
+      const data: any = await res.json().catch(() => ({}));
+      if (res.ok && data?.ok && fs.existsSync(file)) { imagegenCount++; imagegenStreak = 0; return 'ai-clean'; }
+      log(`Image generator: HTTP ${res.status} ${String(data?.error || '').slice(0, 160)}`);
+      if (res.status === 503) await sleep(2000);
+    } catch (err: any) {
+      log(`Image generator request failed (${err?.message}).`);
+    }
   }
-  // Anonymous tier: about one request every 15 s (serialised across parallel workers).
-  const turn = pollinationsGate.then(async () => {
-    const wait = lastPollinationsAt + 15500 - Date.now();
-    if (wait > 0) await sleep(wait);
-    lastPollinationsAt = Date.now();
-  });
-  pollinationsGate = turn.catch(() => {});
-  await turn;
-  const url = `https://image.pollinations.ai/prompt/${enc}?model=flux&width=${size.w}&height=${size.h}&seed=${seed}&nologo=true&private=true`;
-  return (await download(url, file, 90000)) ? 'ai' : null;
+  if (++imagegenStreak >= 3) { imagegenDisabled = 'it failed 3 times in a row'; log('⚠️ Image generator disabled for the rest of this run (it failed 3 times in a row).'); }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2155,9 +2141,9 @@ async function looksRight(file: string, subject: string): Promise<boolean | null
 /** Realistic food photo when no real photo of that ingredient / step exists (cooking only). */
 async function foodImage(s: Scene, subject: string, seed: number, raw: string, out: string): Promise<boolean> {
   const what = (s.imagePrompt && !/\b(person|people|man|woman|chef|hand|hands|face)\b/i.test(s.imagePrompt) ? s.imagePrompt : `${subject}, fresh, on a kitchen counter`).slice(0, 300);
-  const prompt = `${what}. Realistic professional food photography of ${subject}, appetizing, natural window light, shallow depth of field, sharp focus, true-to-life colours, no people, no hands, no text, no labels, no logos, no watermark`;
+  const prompt = slimPrompt(`${subject}, ${what}`, 220);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const got = await aiImage(prompt, seed + attempt * 101, raw);
+    const got = await aiImage(prompt, seed + attempt * 101, raw, FOOD_STYLE);
     if (!got || !(await toJpeg(raw, out, got === 'ai' ? 0.04 : 0))) continue;
     if ((await looksRight(out, subject)) === false) continue;
     return true;
@@ -2182,23 +2168,21 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
 
   if (isStory) {
     // ---- STORIES: fiction, so every picture is drawn — original 3D animated cartoon scenes only.
-    const style = ANIMATED_STYLE;
     const seedBase = parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}`).digest('hex').slice(0, 6), 16);
-    const deadline = Date.now() + (CFG.pollinationsKey || CFG.nvidiaKey ? 7 : 9) * 60 * 1000;
+    const ready = await startImageGenerator(); // already loading since the run started
+    const deadline = Date.now() + 9 * 60 * 1000;
     const drawOne = async (i: number) => {
-      if (Date.now() > deadline) return;
+      if (!ready || imagegenDisabled || Date.now() > deadline) return;
       const s = script.scenes[i];
       const raw = path.join(WORK_DIR, `scene_${i}.raw`), out = path.join(WORK_DIR, `scene_${i}.jpg`);
-      const prompt = [animatedPrompt(s.imagePrompt || s.narration), animatedPrompt(castFor(script, s)), `The moment: ${animatedPrompt(s.narration.slice(0, 220))}`, style, 'no text, no watermark, no captions'].filter(Boolean).join('. ');
-      const got = await aiImage(prompt, seedBase + i * 7, raw);
-      if (got && await toJpeg(raw, out, got === 'ai' ? 0.04 : 0)) { files[i] = out; aiCount++; }
+      // Scene first, then the fixed look of the characters in it. The generator trims the tail to fit.
+      const prompt = [slimPrompt(animatedPrompt(s.imagePrompt || s.narration), 230), slimPrompt(animatedPrompt(castFor(script, s)), 110)].filter(Boolean).join('. ');
+      const got = await aiImage(prompt, seedBase + i * 7, raw, STORY_STYLE);
+      if (got && await toJpeg(raw, out, 0)) { files[i] = out; aiCount++; }
     };
-    if (CFG.pollinationsKey || CFG.nvidiaKey) {
-      const queue = script.scenes.map((_, i) => i);
-      await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await drawOne(queue.shift()!); }));
-    } else {
-      for (let i = 0; i < n; i++) await drawOne(i); // anonymous AI is rate-limited: early scenes first
-    }
+    // One picture is drawn at a time (the CPU is the limit); the 2nd worker only overlaps file conversion.
+    const queue = script.scenes.map((_, i) => i);
+    await Promise.all(Array.from({ length: 2 }, async () => { while (queue.length) await drawOne(queue.shift()!); }));
   } else {
     // ---- EVERYTHING ELSE: real images found on the web. Nothing is generated.
     const deadline = Date.now() + 5 * 60 * 1000;
@@ -2376,8 +2360,8 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
         if (got) { files[i] = out; credits[i] = got.credit; if (got.attribution && !attributions.includes(got.attribution)) attributions.push(got.attribution); continue; }
         if (aiMade < 4 && cat !== 'cooking') {
           const what = (s.imagePrompt || s.narration || topic).slice(0, 260);
-          const prompt = `Editorial ${cat === 'news' ? 'news' : 'documentary'} illustration: ${what}. Context: ${topic}. Realistic, cinematic lighting, wide establishing view, no text, no captions, no logos, no watermark, no identifiable real people`;
-          const ai = await aiImage(prompt, 4000 + i * 17, raw);
+          const prompt = slimPrompt(`${what}. ${topic}`, 230);
+          const ai = await aiImage(prompt, 4000 + i * 17, raw, EDITORIAL_STYLE);
           if (ai && await toJpeg(raw, out, ai === 'ai' ? 0.04 : 0)) { files[i] = out; credits[i] = 'AI-generated illustration'; aiMade++; aiCount++; }
         }
       }
@@ -2405,7 +2389,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     files.fill(grad);
   }
   script.imageCredits = Array.from(new Set(credits.filter((c): c is string => !!c && c !== 'Product image')));
-  if (isStory) log(`Images: ${files.filter(Boolean).length}/${n} scenes, ${aiCount} drawn as original 3D animated scenes${nvidiaCount ? `, ${nvidiaCount} by NVIDIA FLUX` : ''}${nvidiaDisabled ? `; NVIDIA unavailable: ${nvidiaDisabled}` : ''}.`);
+  if (isStory) log(`Images: ${files.filter(Boolean).length}/${n} scenes, ${aiCount} drawn as original 3D animated scenes by the local image generator${imagegenDisabled ? `; generator unavailable: ${imagegenDisabled}` : ''}.`);
   else log(`Images: ${new Set(files.filter(Boolean)).size} real image(s) for ${n} scenes — none generated. Sources: ${script.imageCredits.join(', ') || 'none found'}.`);
   return { files, aiCount, credits };
 }
@@ -3948,6 +3932,9 @@ async function main() {
   console.log('ANIMATO CLOUD RENDERER');
   console.log(`campaign=${CFG.campaignId || '(none)'} part=${CFG.partNumber}/${CFG.arcParts} category=${CFG.category} format=${CFG.format} ${W}x${H} gender=${CFG.gender} autoPost=${CFG.autoPost}`);
   console.log('='.repeat(64));
+
+  // Stories are drawn by the local image generator: start loading its model now, while the script is written.
+  if (CFG.category === 'stories' && !CFG.offline) void startImageGenerator();
 
   let pastStory = CFG.previousScript ? `PART ${CFG.partNumber - 1}:\n${CFG.previousScript}` : '';
   let pastTitles: string[] = [];

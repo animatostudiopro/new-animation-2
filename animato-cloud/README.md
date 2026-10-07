@@ -11,7 +11,7 @@ Each GitHub Actions run renders **one** episode and publishes it to YouTube:
    keys, instant failover; Groq as the fallback — see `llm.ts`), with
    performance tags such as `[sad]`, `[point]`, `[wave]`, `[laugh]` pinned to
    words. It records the voice-over with word timings (Microsoft Edge neural
-   voices via `edge-tts`), creates one matching image per scene (NVIDIA FLUX),
+   voices via `edge-tts`), creates one matching image per scene (drawn locally on the runner by `imagegen.py`),
    then renders the video in headless Chrome (`stage.html` + `stage.js`) with
    the CSS presenter designed in the app: lip-sync, blinking, expressions,
    gestures and pointing, 2.5D head turns, word-by-word captions. FFmpeg

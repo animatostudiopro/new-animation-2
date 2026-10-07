@@ -1,0 +1,116 @@
+# Animato image generator — draws one picture on the runner's CPU (no API keys).
+#
+# Installed and kept up to date automatically by the Animato app.
+# Edits made here are overwritten on the next update; change
+# server/bootstrap/image.yml in the app instead.
+#
+# Run it from the Actions tab (or the API) with a prompt; the picture is attached
+# to the run as the "animato-image-<run id>" artifact. It uses the same generator
+# (animato-cloud/imagegen.py) as the video render, so results look the same.
+
+name: Animato Image Generator
+
+run-name: "Animato image · ${{ inputs.prompt }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: What to draw
+        type: string
+        required: true
+        default: A cute fox cub and a little girl sharing an umbrella in a rainy village at sunset
+      style:
+        description: Style prefix (kept in full; the scene text is trimmed to fit)
+        type: string
+        default: 3D animated movie still, cute cartoon characters, big expressive eyes, warm cinematic lighting, vibrant colours
+      width:
+        description: Output width in pixels
+        type: string
+        default: '1152'
+      height:
+        description: Output height in pixels
+        type: string
+        default: '1152'
+      seed:
+        description: Seed (same prompt + seed = same picture)
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Draw the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache the image generator (model + Python environment)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/imagegen-venv
+            ~/.cache/huggingface
+            ~/.cache/animato-imagegen
+          key: animato-imagegen-v1-${{ runner.os }}
+
+      - name: Set up the image generator
+        run: |
+          set -e
+          VENV="$HOME/imagegen-venv"
+          if [ ! -f "$VENV/.ready-v1" ]; then
+            python -m venv "$VENV"
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check --upgrade pip
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check torch torchvision --index-url https://download.pytorch.org/whl/cpu
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check diffusers transformers accelerate safetensors pillow numpy
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check spandrel || echo "::warning::spandrel could not be installed - the picture uses the plain resize"
+            "$VENV/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('rupeshs/sdxs-512-0.9-orig-vae')" || echo "::warning::model pre-download failed - it downloads when the picture is drawn"
+            touch "$VENV/.ready-v1"
+          fi
+
+      - name: Draw the image
+        env:
+          # The prompt is passed as environment data, never pasted into code, so quotes in it are harmless.
+          IMG_PROMPT: ${{ inputs.prompt }}
+          IMG_STYLE: ${{ inputs.style }}
+          IMG_WIDTH: ${{ inputs.width }}
+          IMG_HEIGHT: ${{ inputs.height }}
+          IMG_SEED: ${{ inputs.seed }}
+        run: |
+          mkdir -p output
+          python - <<'PY'
+          import json, os
+          def num(name, default, lo, hi):
+              try:
+                  return max(lo, min(hi, int(float(os.environ.get(name) or default))))
+              except ValueError:
+                  return default
+          job = {
+              "prompt": os.environ["IMG_PROMPT"],
+              "style": os.environ.get("IMG_STYLE", ""),
+              "width": num("IMG_WIDTH", 1152, 256, 2048),
+              "height": num("IMG_HEIGHT", 1152, 256, 2048),
+              "seed": num("IMG_SEED", 1, 0, 2**32 - 1),
+              "out": "output/image.png",
+          }
+          json.dump(job, open("job.json", "w"))
+          PY
+          "$HOME/imagegen-venv/bin/python" animato-cloud/imagegen.py batch --jobs job.json
+
+      - name: Attach the image to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: animato-image-${{ github.run_id }}
+          path: output/image.png
+          retention-days: 7
+          if-no-files-found: error
