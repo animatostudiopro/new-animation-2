@@ -71,7 +71,7 @@ jobs:
             ~/character-venv
             ~/.cache/huggingface
             ~/.cache/animato-character
-          key: animato-character-v3-${{ runner.os }}-py${{ steps.py.outputs.python-version }}
+          key: animato-character-v4-${{ runner.os }}-py${{ steps.py.outputs.python-version }}
 
       - name: Set up AI character engine
         run: |

@@ -63,13 +63,23 @@ class FaceParser:
     def __init__(self):
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
+        import shutil
         CACHE.mkdir(parents=True, exist_ok=True)
         p = CACHE / FACE_MODEL_FILE
+        # A previous run may have left a dangling symlink here (HF cache links are relative,
+        # so moving them breaks them). Remove it and any empty file.
+        if p.is_symlink() and not p.exists():
+            p.unlink()
+        if p.exists() and p.stat().st_size == 0:
+            p.unlink()
         if not p.exists():
             log("downloading the face parser weights…")
             src = hf_hub_download(repo_id=FACE_MODEL_REPO, filename=FACE_MODEL_FILE, cache_dir=str(CACHE))
-            try: Path(src).replace(p)
-            except Exception: p = Path(src)
+            real = Path(src).resolve()  # follow the HF symlink to the real blob
+            if not real.exists() or real.stat().st_size == 0:
+                raise FileNotFoundError(f"face parser weights missing after download: {src}")
+            shutil.copy2(real, p)  # copy the real bytes, never move/rename the symlink
+        log(f"face parser weights: {p} ({p.stat().st_size/1e6:.1f} MB)")
         self.session = ort.InferenceSession(str(p), providers=["CPUExecutionProvider"])
         self.input = self.session.get_inputs()[0].name
 
