@@ -126,8 +126,17 @@ jobs:
           curl --fail --location --retry 4 --retry-delay 2 --max-time 120 -o input/source.jpg "$url"
           test -s input/source.jpg
 
+      - name: Add swap (CPU diffusion needs more than the 7 GB runner RAM)
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
+          sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+          free -h
+
       - name: Dissect, restore and rig the character
+        timeout-minutes: 35
         env:
+          PYTHONUNBUFFERED: '1'
           MODE: ${{ inputs.mode }}
           GENDER: ${{ inputs.gender }}
           FULL_BODY: ${{ inputs.full_body }}
@@ -139,8 +148,10 @@ jobs:
           mkdir -p output/rig
           export CHARACTER_CACHE="$HOME/.cache/animato-character"
           export CHARACTER_ENABLE_INPAINT=1
-          export CHARACTER_INPAINT_STEPS=20
-          export CHARACTER_VARIANT_STEPS=12
+          export CHARACTER_INPAINT_STEPS=16
+          export CHARACTER_VARIANT_STEPS=8
+          export CHARACTER_INPAINT_MAX_SIDE=384
+          export CHARACTER_INPAINT_BUDGET=720
           export CHARACTER_GENERATE_VARIANTS=1
           if [ "$MODE" = "generate" ]; then SRC=input/generated.png; else SRC=input/source.jpg; fi
           "$HOME/character-venv/bin/python" animato-cloud/character_pipeline.py --input "$SRC" --output output/rig --mode "$MODE" --gender "$GENDER" $([ "$FULL_BODY" = "true" ] && echo --full-body) --seed "${SEED:-1}" --plan "$PLAN"

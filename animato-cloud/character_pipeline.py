@@ -150,11 +150,27 @@ def extract(img, mask, out_file, pad=3):
 def inpaint_pipe():
     import torch
     from diffusers import StableDiffusionInpaintPipeline
-    pipe=StableDiffusionInpaintPipeline.from_pretrained(INPAINT_MODEL, torch_dtype=torch.float32, safety_checker=None)
+    pipe=StableDiffusionInpaintPipeline.from_pretrained(INPAINT_MODEL, torch_dtype=torch.float32, safety_checker=None, low_cpu_mem_usage=True)
     pipe.set_progress_bar_config(disable=True); pipe.to("cpu")
-    try: pipe.enable_attention_slicing()
-    except Exception: pass
+    for fn in ("enable_attention_slicing","enable_vae_slicing"):
+        try: getattr(pipe,fn)()
+        except Exception: pass
     return pipe
+
+
+INPAINT_T0=time.time()
+def inpaint_budget_left():
+    """CPU diffusion is slow; stop starting new inpaints once the time budget is used up."""
+    return float(os.environ.get("CHARACTER_INPAINT_BUDGET","720"))-(time.time()-INPAINT_T0)
+
+
+def rss_mb():
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"): return int(line.split()[1])//1024
+    except Exception: pass
+    return -1
 
 
 def inpaint_region(pipe, image, mask, prompt, seed=1, steps=None):
@@ -171,15 +187,17 @@ def inpaint_region(pipe, image, mask, prompt, seed=1, steps=None):
     crop=original_crop
     m=original_mask
     # Diffusers on CPU is happier with a 384–512ish canvas.
-    max_side=512
+    max_side=int(os.environ.get("CHARACTER_INPAINT_MAX_SIDE","384"))
     scale=min(1.0,max_side/max(crop.size))
     if scale<1:
         size=(max(256,int(crop.width*scale)//8*8), max(256,int(crop.height*scale)//8*8))
         crop=crop.resize(size,Image.Resampling.LANCZOS); m=m.resize(size,Image.Resampling.BILINEAR)
     gen=torch.Generator(device="cpu").manual_seed(int(seed)%(2**32))
     steps=int(steps or os.environ.get("CHARACTER_INPAINT_STEPS","20"))
+    log(f"inpaint start: {crop.size[0]}x{crop.size[1]}, {steps} steps, {rss_mb()} MB RAM"); _t=time.time()
     with torch.inference_mode():
         out=pipe(prompt=prompt, image=crop, mask_image=m, num_inference_steps=steps, guidance_scale=float(os.environ.get("CHARACTER_INPAINT_GUIDANCE","7")), generator=gen).images[0].convert("RGB")
+    log(f"inpaint done in {time.time()-_t:.1f}s, {rss_mb()} MB RAM")
     if out.size!=original_size:
         out=out.resize(original_size,Image.Resampling.LANCZOS)
     blended=original_crop.convert("RGBA")
@@ -374,7 +392,11 @@ def build(input_path,out_dir,mode,plan,gender,full_body,seed):
     ImageDraw.Draw(scalp_region).ellipse([hb[0]-int(fw*.10),hb[1]-int(fh*.38),hb[2]+int(fw*.10),hb[1]+int(fh*.62)],fill=255)
     hair_reveal=ImageChops.multiply(dilate(hair,4),scalp_region)
     if hair_back or hair_front:
-        if pipe and hair_reveal.getbbox(): filled=inpaint_region(pipe,filled,hair_reveal,hair_fill_prompt,seed+11)
+        if pipe and hair_reveal.getbbox():
+            try: filled=inpaint_region(pipe,filled,hair_reveal,hair_fill_prompt,seed+11)
+            except Exception as e:
+                log(f"hair inpaint failed ({str(e)[:140]}) — using CPU pixel fill fallback")
+                filled=cv_inpaint(filled,hair_reveal)
         elif hair_reveal.getbbox(): filled=cv_inpaint(filled,hair_reveal)
     # Mouth/eye variants are localized and optional. Default: two realistic eye/mouth variants,
     # then map the 9 engine visemes onto them so CPU time remains bounded.
@@ -382,14 +404,23 @@ def build(input_path,out_dir,mode,plan,gender,full_body,seed):
     eye_masks={}
     for side,key in (("l","l_eye"),("r","r_eye")):
         eye_masks[side]=split_eye_details(m[key], img)
-    if pipe and os.environ.get("CHARACTER_GENERATE_VARIANTS","1")!="0":
+    if pipe and os.environ.get("CHARACTER_GENERATE_VARIANTS","1")!="0" and inpaint_budget_left()<=60:
+        log("time budget used up — skipping eye/mouth variants")
+    elif pipe and os.environ.get("CHARACTER_GENERATE_VARIANTS","1")!="0":
         try:
             eye_mask=union(dilate(union(m["l_eye"],m["r_eye"]),3))
             eye_closed=inpaint_region(pipe,img,eye_mask,"same character, relaxed closed eyelids, natural eyelid crease, keep the rest of the face unchanged",seed+31,steps=int(os.environ.get("CHARACTER_VARIANT_STEPS","12")))
             mouth_mask=union(dilate(union(m["mouth"],m["u_lip"],m["l_lip"]),3))
+            if inpaint_budget_left()<=30: raise RuntimeError("time budget used up")
             mouth_open=inpaint_region(pipe,img,mouth_mask,"same character, naturally speaking with a moderately open mouth, photorealistic, keep all other facial features unchanged",seed+41,steps=int(os.environ.get("CHARACTER_VARIANT_STEPS","12")))
+            if inpaint_budget_left()<=30: raise RuntimeError("time budget used up")
             mouth_round=inpaint_region(pipe,img,mouth_mask,"same character, rounded O-shaped mouth while speaking, photorealistic, keep all other facial features unchanged",seed+43,steps=int(os.environ.get("CHARACTER_VARIANT_STEPS","12")))
         except Exception as e: log(f"facial variants skipped ({str(e)[:140]})")
+    # Free the ~4 GB diffusion model before the layer-extraction stage.
+    if pipe is not None:
+        try:
+            import gc; del pipe; pipe=None; gc.collect(); log(f"inpaint model released, {rss_mb()} MB RAM")
+        except Exception: pass
 
     assets={}
     def save(pid,label,mask,source,parent,z,tags):
