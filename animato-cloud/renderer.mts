@@ -30,7 +30,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LlmPool, extractJsonObject } from './llm.ts';
-import { researchNews, bingNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
+import { researchNews, bingNews, researchRecipe, factSheet, unsupportedNumbers, visionMatches, visionAnatomy, metadataMatches, identifierTokens, type FactPack, type ResearchCtx } from './research.ts';
 import { composeBuffers, eqForVoice, automateLevel, levelDb, encodeWav, moodFor } from './music.ts';
 import { runAnimated, ANIM_CATEGORIES } from './anim/runner.ts';
 
@@ -877,7 +877,7 @@ ${arcStep}
 - Short spoken sentences, past tense, plain words. Keep the viewer feeling it: sounds, smells, small physical details.
 ${part >= last ? '- The title must NOT contain "(Part ...)" if the story ends here; instead make it the story\'s own title.' : `- Title must end with "(Part ${part})".`}
 - Also return "premise": 2-3 sentences of what this story is about, who is in it and what has happened so far (the next part is written from this), and "characters": each named person's fixed look (age, build, hair, clothes) for the pictures.
-- imagePrompt: describe the exact moment of that scene as a still from a high-end 3D animated family film (big-studio feature quality) — WHO (named character as an ORIGINAL stylised cartoon character + their fixed look; never an existing movie character), WHERE (a cartoon version of the place), WHAT is happening, the light and the camera angle. Every person is a cartoon character with big expressive eyes and soft rounded features — never a real or photorealistic human.`;
+- imagePrompt: describe the exact moment of that scene as a still from a high-end 3D animated family film (big-studio feature quality) — WHO (named character as an ORIGINAL stylised cartoon character + their fixed look; never an existing movie character), WHERE (a cartoon version of the place), WHAT is happening, the light and the camera angle. Every person is a cartoon character with big expressive eyes and soft rounded features — never a real or photorealistic human. FRAMING (important — the image model draws faces and torsos well but mangles hands, full-body action and crowds): frame every scene as a medium shot or close-up of ONE or TWO characters, waist-up or head-and-shoulders, in a calm simple pose (standing, sitting, talking, looking), hands low or out of frame; put the story's action and place in the background and props. Never full-body running / jumping / fighting poses, never crowds or groups, never close-ups of fingers.`;
     }
   }
 }
@@ -1544,7 +1544,6 @@ let imagegenStreak = 0;
 let imagegenProc: ReturnType<typeof spawn> | null = null;
 
 /** Short style prefixes. The text encoder reads only ~77 tokens, so style stays tiny and the scene gets the rest. */
-const STORY_STYLE = '3D animated movie still, cute cartoon characters, big expressive eyes, warm cinematic lighting, vibrant colours';
 const FOOD_STYLE = 'professional food photography, appetizing, natural window light, sharp focus';
 const EDITORIAL_STYLE = 'editorial illustration, realistic, cinematic lighting, wide view';
 
@@ -1607,7 +1606,7 @@ function startImageGenerator(): Promise<boolean> {
 }
 
 /** Draws one picture with the local generator. Returns 'ai-clean' (never watermarked) or null. */
-async function aiImage(prompt: string, seed: number, file: string, style = ''): Promise<'ai' | 'ai-clean' | null> {
+async function aiImage(prompt: string, seed: number, file: string, style = '', mode = ''): Promise<'ai' | 'ai-clean' | null> {
   if (CFG.offline || !prompt || imagegenDisabled) return null;
   if (!(await startImageGenerator())) return null;
   const size = orientation === 'portrait' ? { w: 864, h: 1536 } : orientation === 'landscape' ? { w: 1536, h: 864 } : { w: 1152, h: 1152 };
@@ -1617,7 +1616,7 @@ async function aiImage(prompt: string, seed: number, file: string, style = ''): 
       const res = await fetch(`${IMAGEGEN_BASE}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt.slice(0, 1200), style, seed: seed % 4294967295, width: size.w, height: size.h, out: file }),
+        body: JSON.stringify({ prompt: prompt.slice(0, 1200), style, mode, seed: seed % 4294967295, width: size.w, height: size.h, out: file }),
         signal: AbortSignal.timeout(240000)
       });
       const data: any = await res.json().catch(() => ({}));
@@ -2138,6 +2137,25 @@ async function looksRight(file: string, subject: string): Promise<boolean | null
   return v.match;
 }
 
+/**
+ * Story frames: a vision model checks that the characters are drawn correctly (no melted faces,
+ * extra or fused limbs). false = redraw with a new seed; null = no vision model answered.
+ */
+let anatomyBudget = 36;
+let anatomyRedraws = 0;
+async function anatomyOk(file: string): Promise<boolean | null> {
+  if (anatomyBudget <= 0 || CFG.offline || !LLM.hasKeys || ENV.STORY_ANATOMY_CHECK === 'off') return null;
+  anatomyBudget--;
+  const small = `${file}.anat.jpg`;
+  const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', file, '-vf', 'scale=512:-2', '-q:v', '5', small], { timeoutMs: 20000 });
+  if (r.code !== 0 || !fs.existsSync(small)) return null;
+  const v = await visionAnatomy(researchCtx(), fs.readFileSync(small).toString('base64'));
+  try { fs.unlinkSync(small); } catch {}
+  if (!v) { anatomyBudget = 0; log('Anatomy check: no vision model answered — drawn scenes are used as they are.'); return null; }
+  if (!v.ok) log(`Anatomy check: redrawing a scene (${v.problem || 'drawing error'}).`);
+  return v.ok;
+}
+
 /** Realistic food photo when no real photo of that ingredient / step exists (cooking only). */
 async function foodImage(s: Scene, subject: string, seed: number, raw: string, out: string): Promise<boolean> {
   const what = (s.imagePrompt && !/\b(person|people|man|woman|chef|hand|hands|face)\b/i.test(s.imagePrompt) ? s.imagePrompt : `${subject}, fresh, on a kitchen counter`).slice(0, 300);
@@ -2175,10 +2193,24 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
       if (!ready || imagegenDisabled || Date.now() > deadline) return;
       const s = script.scenes[i];
       const raw = path.join(WORK_DIR, `scene_${i}.raw`), out = path.join(WORK_DIR, `scene_${i}.jpg`);
-      // Scene first, then the fixed look of the characters in it. The generator trims the tail to fit.
-      const prompt = [slimPrompt(animatedPrompt(s.imagePrompt || s.narration), 230), slimPrompt(animatedPrompt(castFor(script, s)), 110)].filter(Boolean).join('. ');
-      const got = await aiImage(prompt, seedBase + i * 7, raw, STORY_STYLE);
-      if (got && await toJpeg(raw, out, 0)) { files[i] = out; aiCount++; }
+      // Scene first, then the fixed look of the characters in it. The generator cleans the prompt
+      // (calm medium shots, no crowds / fingers), adds the story style and trims the tail to fit.
+      const prompt = [animatedPrompt(s.imagePrompt || s.narration).slice(0, 320), animatedPrompt(castFor(script, s)).slice(0, 160)].filter(Boolean).join('. ');
+      const tries: string[] = [];
+      let chosen = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0 && (imagegenDisabled || Date.now() > deadline - 20000)) break;
+        const got = await aiImage(prompt, seedBase + i * 7 + attempt * 977, raw, '', 'story');
+        if (!got) break;
+        const cand = path.join(WORK_DIR, `scene_${i}_try${attempt}.jpg`);
+        if (!(await toJpeg(raw, cand, 0))) continue;
+        tries.push(cand);
+        const ok = await anatomyOk(cand); // false = melted face / extra limbs → draw it again
+        if (ok !== false) { chosen = cand; break; }
+        anatomyRedraws++;
+      }
+      if (!chosen && tries.length) chosen = tries[0]; // every try was flagged: keep the first one
+      if (chosen) { fs.copyFileSync(chosen, out); files[i] = out; aiCount++; }
     };
     // One picture is drawn at a time (the CPU is the limit); the 2nd worker only overlaps file conversion.
     const queue = script.scenes.map((_, i) => i);
@@ -2389,7 +2421,7 @@ async function gatherImages(script: Script): Promise<{ files: (string | null)[];
     files.fill(grad);
   }
   script.imageCredits = Array.from(new Set(credits.filter((c): c is string => !!c && c !== 'Product image')));
-  if (isStory) log(`Images: ${files.filter(Boolean).length}/${n} scenes, ${aiCount} drawn as original 3D animated scenes by the local image generator${imagegenDisabled ? `; generator unavailable: ${imagegenDisabled}` : ''}.`);
+  if (isStory) log(`Images: ${files.filter(Boolean).length}/${n} scenes, ${aiCount} drawn as original 3D animated scenes by the local image generator${anatomyRedraws ? ` (${anatomyRedraws} redrawn after the anatomy check)` : ''}${imagegenDisabled ? `; generator unavailable: ${imagegenDisabled}` : ''}.`);
   else log(`Images: ${new Set(files.filter(Boolean)).size} real image(s) for ${n} scenes — none generated. Sources: ${script.imageCredits.join(', ') || 'none found'}.`);
   return { files, aiCount, credits };
 }

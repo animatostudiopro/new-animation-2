@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """Animato image generator — runs on the GitHub runner's CPU, no API keys.
 
-Model: rupeshs/sdxs-512-0.9-orig-vae (1-step distilled Stable Diffusion, 512px).
-Pipeline per image:  fit the prompt to the text encoder -> 1-step generation at
-the target aspect ratio -> detail upscale (Real-ESRGAN anime-video model when
-available, otherwise a Lanczos resize) -> light sharpen -> exact output size.
+Pipeline per image:
+  clean/fit the prompt -> 1-step generation at the target aspect ratio ->
+  detail upscale (Real-ESRGAN anime-video model when available, else Lanczos) ->
+  light sharpen -> exact output size.
+
+Model profiles (pick with IMAGEGEN_PROFILE, or per job with "profile"):
+  character  DEFAULT. SDXS-512-DreamShaper: the same 1-step speed class as before, but distilled
+             from DreamShaper — far better at cartoon characters, faces and bodies.
+  classic    SDXS-512-0.9 with the original VAE (the first version we shipped).
+  anime      character + the SDXS DreamShaper *anime* adapter (needs `peft`).
+  detail     DreamShaper-8 LCM, 4 steps. Slower (tens of seconds on a CPU) but the most detailed.
 
 Modes
-  serve   long-running local HTTP server (the video renderer uses this; the model
-          is loaded ONCE and every scene is drawn by the same process)
-  batch   draw a JSON list of jobs and exit (used by the image workflow)
+  serve   long-running local HTTP server (the video renderer uses this; the model is
+          loaded ONCE and every scene is drawn by the same process)
+  batch   draw a JSON list of jobs and exit (used by the stand-alone image workflow)
 
-Every optional stage fails safe: if the upscaler is unavailable or slow the image
-is still produced with a plain high-quality resize.
+Every optional stage fails safe: if the upscaler is unavailable or slow the image is still
+produced with a plain high-quality resize, and a model that cannot load falls back to the next.
 """
 import argparse
+import gc
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -27,7 +36,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-MODEL_ID = os.environ.get("IMAGEGEN_MODEL", "rupeshs/sdxs-512-0.9-orig-vae")
 BASE_AREA = 512 * 512
 MAX_TOKENS = 77
 UPSCALER_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
@@ -35,14 +43,79 @@ UPSCALER_FILE = "realesr-animevideov3.pth"
 # If one AI upscale takes longer than this, switch to the plain resize for the rest of the run.
 MAX_UPSCALE_SECONDS = float(os.environ.get("IMAGEGEN_MAX_UPSCALE_SECONDS", "25"))
 
-STATE = {"ready": False, "error": "", "upscaler": "lanczos", "count": 0, "load_seconds": 0.0}
+PROFILES = {
+    "character": {
+        "label": "Cartoon characters (DreamShaper, 1 step)",
+        "models": ["IDKiro/sdxs-512-dreamshaper", os.environ.get("IMAGEGEN_MODEL", "rupeshs/sdxs-512-0.9-orig-vae")],
+        "steps": 1, "guidance": 0.0, "vae_large": True,
+    },
+    "classic": {
+        "label": "Classic (SDXS 0.9, first version)",
+        "models": [os.environ.get("IMAGEGEN_MODEL", "rupeshs/sdxs-512-0.9-orig-vae")],
+        "steps": 1, "guidance": 0.0,
+    },
+    "anime": {
+        "label": "Anime cartoon (DreamShaper + anime adapter, 1 step)",
+        "models": ["IDKiro/sdxs-512-dreamshaper"],
+        "adapter": "IDKiro/sdxs-512-dreamshaper-anime",
+        "steps": 1, "guidance": 0.0, "vae_large": True,
+    },
+    "detail": {
+        "label": "Detail (DreamShaper-8 LCM, 4 steps — slower)",
+        "models": ["Lykon/dreamshaper-8-lcm"],
+        "steps": 4, "guidance": 1.0, "lcm": True,
+    },
+}
+DEFAULT_PROFILE = os.environ.get("IMAGEGEN_PROFILE", "character")
+if DEFAULT_PROFILE not in PROFILES:
+    DEFAULT_PROFILE = "character"
+
+STATE = {"ready": False, "error": "", "upscaler": "lanczos", "count": 0, "load_seconds": 0.0,
+         "profile": "", "model": "", "label": ""}
 LOCK = threading.Lock()
-PIPE = None
+PIPE = None          # the loaded pipeline
+LOADED = {}          # profile settings of the loaded pipeline
 UPSCALER = None
 
 
 def log(msg):
     print(f"[imagegen] {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Story prompts: keep the model on what it draws well
+# ---------------------------------------------------------------------------
+STORY_STYLE = "3D animated family-film still, medium shot, cute cartoon characters with natural proportions, big expressive eyes, soft shading, warm lighting"
+
+# Style words the style prefix already says (they would only eat the 77-token budget).
+_FILLER = re.compile(
+    r"\b(high[- ]end|3d animated|animated|feature[- ]film|family[- ]film|still (?:from|of)|render(?:ed)?|cinematic|"
+    r"highly detailed|ultra[- ]detailed|8k|4k|masterpiece|wholesome|painterly|saturated|"
+    r"no text|no watermark|no captions|no logos?)\b", re.I)
+
+# What small one-step models draw badly: full-body action, crowds, fingers. Swap for calm medium shots.
+_CALM = [
+    (re.compile(r"\bfull[- ](?:body|length)\b|\b(?:wide|long|establishing) shot\b|\bfar away\b", re.I), "medium shot"),
+    (re.compile(r"\b(?:through|into|in|among|across|amid) (?:a |the )?(?:crowds?|groups? of [a-z]+|many (?:people|characters|children|kids|villagers))\b", re.I), "beside a friend"),
+    (re.compile(r"\b(?:crowds?|groups? of [a-z]+|many (?:people|characters|children|kids|villagers))\b", re.I), "two friends"),
+    (re.compile(r"\b(?:running|sprinting|racing|dashing)\b", re.I), "walking"),
+    (re.compile(r"\b(?:jumping|leaping|flying through the air|mid-?air|somersaults?|flipping)\b", re.I), "cheering"),
+    (re.compile(r"\b(?:fighting|wrestling|punching|kicking|battling)\b", re.I), "facing each other"),
+    (re.compile(r"\bdancing\b", re.I), "swaying happily"),
+    (re.compile(r"\b(?:holding hands|clasped hands?|raised hands?|waving hands?|pointing (?:a |his |her |their )?fingers?|fingers?|fists?)\b", re.I), ""),
+]
+
+
+def clean_story_prompt(text, max_chars=380):
+    out = " ".join((text or "").split())
+    for pattern, repl in _CALM:
+        out = pattern.sub(repl, out)
+    out = _FILLER.sub(" ", out)
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    out = re.sub(r"([,.;:!?])(?:\s*[,.;:!?])+", r"\1", out)
+    out = re.sub(r"^[\s,.;:!?]+|[\s,.;:!?]+$", "", out)
+    return out[:max_chars]
 
 
 # ---------------------------------------------------------------------------
@@ -126,34 +199,87 @@ class Upscaler:
 
 
 # ---------------------------------------------------------------------------
-# Model
+# Models
 # ---------------------------------------------------------------------------
-def load_pipeline():
+def _load_one(cfg, model_id):
     import torch
 
-    threads = int(os.environ.get("IMAGEGEN_THREADS") or os.cpu_count() or 2)
-    torch.set_num_threads(max(1, threads))
-    t0 = time.time()
     try:
         from diffusers import AutoPipelineForText2Image
 
-        pipe = AutoPipelineForText2Image.from_pretrained(MODEL_ID, torch_dtype=torch.float32)
+        pipe = AutoPipelineForText2Image.from_pretrained(model_id, torch_dtype=torch.float32)
     except Exception as err:
-        log(f"AutoPipeline load failed ({str(err)[:120]}), trying StableDiffusionPipeline")
+        log(f"AutoPipeline load of {model_id} failed ({str(err)[:120]}), trying StableDiffusionPipeline")
         from diffusers import StableDiffusionPipeline
 
-        pipe = StableDiffusionPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.float32)
+        pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    if cfg.get("lcm"):
+        from diffusers import LCMScheduler
+
+        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+    if cfg.get("vae_large") and os.environ.get("IMAGEGEN_VAE", "large").lower() != "tiny":
+        try:  # the sharper decoder (the default one is the tiny TAESD)
+            from diffusers import AutoencoderKL
+
+            pipe.vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae_large", torch_dtype=torch.float32)
+        except Exception as err:
+            log(f"large VAE not available for {model_id}, keeping the default ({str(err)[:100]})")
+    if cfg.get("adapter"):
+        from peft import PeftModel
+
+        pipe.unet = PeftModel.from_pretrained(pipe.unet, cfg["adapter"])
     pipe.set_progress_bar_config(disable=True)
     pipe.to("cpu")
+    return pipe
+
+
+def load_profile(name):
+    """Loads a profile (trying its models in order). Returns (pipe, settings)."""
+    import torch
+
+    cfg = PROFILES[name]
+    threads = int(os.environ.get("IMAGEGEN_THREADS") or os.cpu_count() or 2)
+    torch.set_num_threads(max(1, threads))
+    t0 = time.time()
+    last = None
+    for model_id in cfg["models"]:
+        try:
+            pipe = _load_one(cfg, model_id)
+            break
+        except Exception as err:
+            last = err
+            log(f"could not load {model_id} ({str(err)[:160]})")
+    else:
+        raise RuntimeError(f"no model of profile '{name}' could be loaded ({str(last)[:200]})")
     # Warm-up: the first call is always slower (kernel setup); pay for it before the first scene.
     try:
         with torch.inference_mode():
-            pipe(prompt="warm up", num_inference_steps=1, guidance_scale=0.0, width=256, height=256)
+            pipe(prompt="warm up", num_inference_steps=cfg["steps"], guidance_scale=cfg["guidance"], width=256, height=256)
     except Exception as err:
         log(f"warm-up skipped ({str(err)[:120]})")
-    STATE["load_seconds"] = round(time.time() - t0, 1)
-    log(f"model ready in {STATE['load_seconds']}s")
-    return pipe
+    settings = {"name": name, "model": model_id, "steps": cfg["steps"], "guidance": cfg["guidance"], "label": cfg["label"]}
+    STATE.update(profile=name, model=model_id, label=cfg["label"], load_seconds=round(time.time() - t0, 1))
+    log(f"model '{name}' ({model_id}) ready in {STATE['load_seconds']}s")
+    return pipe, settings
+
+
+def ensure_profile(name):
+    """Makes `name` the loaded profile (called with LOCK held). Only one model stays in memory."""
+    global PIPE, LOADED
+    name = name if name in PROFILES else DEFAULT_PROFILE
+    if PIPE is not None and LOADED.get("name") == name:
+        return
+    previous = LOADED.get("name")
+    PIPE = None
+    LOADED = {}
+    gc.collect()
+    try:
+        PIPE, LOADED = load_profile(name)
+    except Exception:
+        if previous and previous != name:
+            log(f"profile '{name}' failed — going back to '{previous}'")
+            PIPE, LOADED = load_profile(previous)
+        raise
 
 
 def native_size(width, height):
@@ -212,24 +338,39 @@ def generate(job):
     height = int(job.get("height") or 1152)
     out = job["out"]
     seed = int(job.get("seed") or 0) % (2**32)
-    prompt = fit_prompt(PIPE, job.get("style", ""), job.get("prompt", ""))
-    gw, gh = native_size(width, height)
-    t0 = time.time()
-    img = None
-    for attempt in range(2):  # a black/flat frame is retried once with a new seed
-        gen = torch.Generator("cpu").manual_seed((seed + attempt * 7919) % (2**32))
-        with LOCK, torch.inference_mode():
-            img = PIPE(prompt=prompt, num_inference_steps=1, guidance_scale=0.0, width=gw, height=gh, generator=gen).images[0]
-        if not is_blank(img):
-            break
-    t1 = time.time()
-    with LOCK:  # the upscaler shares the CPU with the model: one job at a time
+    t_start = time.time()
+    with LOCK:  # one image at a time: the model and the upscaler share the CPU
+        ensure_profile(job.get("profile") or DEFAULT_PROFILE)
+        mode = (job.get("mode") or "").lower()
+        if mode == "story":
+            style = (job.get("style") or "").strip() or STORY_STYLE
+            scene = clean_story_prompt(job.get("prompt", ""))
+        else:
+            style = job.get("style", "")
+            scene = job.get("prompt", "")
+        prompt = fit_prompt(PIPE, style, scene)
+        gw, gh = native_size(width, height)
+        t0 = time.time()
+        img = None
+        for attempt in range(2):  # a black/flat frame is retried once with a new seed
+            gen = torch.Generator("cpu").manual_seed((seed + attempt * 7919) % (2**32))
+            with torch.inference_mode():
+                img = PIPE(prompt=prompt, num_inference_steps=LOADED["steps"], guidance_scale=LOADED["guidance"],
+                           width=gw, height=gh, generator=gen).images[0]
+            if not is_blank(img):
+                break
+        t1 = time.time()
         final = finish(img, width, height)
+        upscaler = UPSCALER.name if UPSCALER is not None and UPSCALER.ok else "lanczos"
+        profile, model, label = LOADED["name"], LOADED["model"], LOADED["label"]
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     final.save(out, "PNG", compress_level=1)
     STATE["count"] += 1
-    log(f"image {STATE['count']}: {gw}x{gh} in {t1 - t0:.1f}s, finished {width}x{height} in {time.time() - t1:.1f}s ({STATE['upscaler']})")
-    return {"ok": True, "file": out, "width": width, "height": height, "seconds": round(time.time() - t0, 1)}
+    total = round(time.time() - t_start, 1)
+    log(f"image {STATE['count']} [{profile}]: {gw}x{gh} in {t1 - t0:.1f}s, finished {width}x{height} in {time.time() - t1:.1f}s ({upscaler})")
+    return {"ok": True, "file": out, "width": width, "height": height, "seconds": total,
+            "draw_seconds": round(t1 - t0, 1), "profile": profile, "label": label, "model": model,
+            "native": f"{gw}x{gh}", "upscaler": upscaler, "prompt": prompt, "seed": seed}
 
 
 # ---------------------------------------------------------------------------
@@ -271,10 +412,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"ok": False, "error": str(err)[:300]})
 
 
-def init_models():
-    global PIPE, UPSCALER
+def init_models(profile=None):
+    global UPSCALER
     try:
-        PIPE = load_pipeline()
+        with LOCK:
+            ensure_profile(profile or DEFAULT_PROFILE)
         UPSCALER = Upscaler()
         STATE["upscaler"] = UPSCALER.name
         log(f"upscaler: {UPSCALER.name}")
@@ -292,21 +434,24 @@ def cmd_serve(args):
 
 
 def cmd_batch(args):
-    init_models()
-    if STATE["error"]:
-        log(STATE["error"])
-        return 1
     with open(args.jobs, "r", encoding="utf-8") as f:
         jobs = json.load(f)
     if isinstance(jobs, dict):
         jobs = [jobs]
+    init_models(jobs[0].get("profile") if jobs else None)
+    if STATE["error"]:
+        log(STATE["error"])
+        return 1
     failed = 0
     for job in jobs:
         try:
-            generate(job)
+            meta = generate(job)
+            with open(os.path.splitext(job["out"])[0] + ".json", "w", encoding="utf-8") as f:
+                json.dump(meta, f)
         except Exception as err:
             failed += 1
-            log(f"job failed: {str(err)[:200]}")
+            log(f"job failed: {str(err)[:300]}")
+            traceback.print_exc()
     return 1 if failed == len(jobs) else 0
 
 
@@ -316,7 +461,7 @@ def main():
     s = sub.add_parser("serve")
     s.add_argument("--port", type=int, default=8012)
     b = sub.add_parser("batch")
-    b.add_argument("--jobs", required=True, help="JSON file: one job or a list of {prompt, style, seed, width, height, out}")
+    b.add_argument("--jobs", required=True, help="JSON file: one job or a list of {prompt, style, mode, profile, seed, width, height, out}")
     args = parser.parse_args()
     if args.cmd == "serve":
         cmd_serve(args)

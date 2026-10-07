@@ -486,6 +486,27 @@ Return ONLY JSON: {"match": true|false, "shows": "what the picture actually show
   return null;
 }
 
+/**
+ * Animation QA for a drawn story frame: are the characters' faces and bodies drawn correctly
+ * (no melted faces, extra / missing / fused limbs, duplicated heads)? null = no vision model answered.
+ */
+export async function visionAnatomy(ctx: ResearchCtx, jpegBase64: string): Promise<{ ok: boolean; problem: string } | null> {
+  if (ctx.offline || !ctx.llm.hasKeys) return null;
+  const user = `This is a frame from an original 3D animated cartoon story (family-film look). Judge ONLY how correctly the characters are drawn:
+- Is any character's face melted, smeared or distorted (extra or missing eyes, eyes or mouth in the wrong place, a face that merges into the hair or background)?
+- Does any character have extra, missing, fused or twisted arms or legs, two heads, or a body that merges into another character or object?
+- Are hands a mangled blob of fingers? (Simple rounded cartoon hands are fine.)
+Stylised cartoon proportions (big head, big eyes, small body) are CORRECT — do not flag them. A frame with no characters (only scenery or objects) is fine.
+Return ONLY JSON: {"ok": true|false, "problem": "what is wrong, 3-8 words, empty if ok"}`;
+  for await (const a of ctx.llm.attempts({ system: 'You are a fair animation quality checker. You answer with one JSON object.', user, images: [{ mime: 'image/jpeg', data: jpegBase64 }], json: true, temperature: 0, maxTokens: 200, timeoutMs: 45000, task: 'vision' })) {
+    try {
+      const d = extractJsonObject(a.text);
+      return { ok: d.ok === true || String(d.ok).toLowerCase() === 'true', problem: String(d.problem || '').slice(0, 80) };
+    } catch { /* ask the next vision model */ }
+  }
+  return null;
+}
+
 const NUM_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, 'forty-five': 45, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100, half: 0.5, quarter: 0.25 };
 
 /** Every number a text states (digits, "1,200", "1/2", "1.2 million" → 1.2, number words). */

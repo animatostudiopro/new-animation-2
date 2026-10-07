@@ -4,13 +4,14 @@
 # Edits made here are overwritten on the next update; change
 # server/bootstrap/image.yml in the app instead.
 #
-# Run it from the Actions tab (or the API) with a prompt; the picture is attached
-# to the run as the "animato-image-<run id>" artifact. It uses the same generator
+# Used by Tools -> Image generation in the app (test a prompt and see the quality) and
+# runnable by hand from the Actions tab. It uses the same generator
 # (animato-cloud/imagegen.py) as the video render, so results look the same.
+# The picture is attached to the run as the "animato-image-<run id>" artifact.
 
 name: Animato Image Generator
 
-run-name: "Animato image · ${{ inputs.prompt }}"
+run-name: "Animato image ${{ inputs.request_id || inputs.prompt }}"
 
 on:
   workflow_dispatch:
@@ -20,10 +21,26 @@ on:
         type: string
         required: true
         default: A cute fox cub and a little girl sharing an umbrella in a rainy village at sunset
+      profile:
+        description: Model (character = default, classic = first version, anime, detail = slower and more detailed)
+        type: choice
+        default: character
+        options:
+          - character
+          - classic
+          - anime
+          - detail
+      story_mode:
+        description: Story mode (calm medium-shot framing + the cartoon story style, exactly like the video render)
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
       style:
-        description: Style prefix (kept in full; the scene text is trimmed to fit)
+        description: Optional style prefix (empty = the story style in story mode)
         type: string
-        default: 3D animated movie still, cute cartoon characters, big expressive eyes, warm cinematic lighting, vibrant colours
+        default: ''
       width:
         description: Output width in pixels
         type: string
@@ -33,9 +50,13 @@ on:
         type: string
         default: '1152'
       seed:
-        description: Seed (same prompt + seed = same picture)
+        description: Seed (same prompt + seed + model = same picture)
         type: string
         default: '1'
+      request_id:
+        description: Set by the app to find this run
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -62,26 +83,28 @@ jobs:
             ~/imagegen-venv
             ~/.cache/huggingface
             ~/.cache/animato-imagegen
-          key: animato-imagegen-v1-${{ runner.os }}
+          key: animato-imagegen-v2-${{ runner.os }}
 
       - name: Set up the image generator
         run: |
           set -e
           VENV="$HOME/imagegen-venv"
-          if [ ! -f "$VENV/.ready-v1" ]; then
+          if [ ! -f "$VENV/.ready-v2" ]; then
             python -m venv "$VENV"
             "$VENV/bin/pip" install --quiet --disable-pip-version-check --upgrade pip
             "$VENV/bin/pip" install --quiet --disable-pip-version-check torch torchvision --index-url https://download.pytorch.org/whl/cpu
-            "$VENV/bin/pip" install --quiet --disable-pip-version-check diffusers transformers accelerate safetensors pillow numpy
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check diffusers transformers accelerate safetensors peft pillow numpy
             "$VENV/bin/pip" install --quiet --disable-pip-version-check spandrel || echo "::warning::spandrel could not be installed - the picture uses the plain resize"
-            "$VENV/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('rupeshs/sdxs-512-0.9-orig-vae')" || echo "::warning::model pre-download failed - it downloads when the picture is drawn"
-            touch "$VENV/.ready-v1"
+            "$VENV/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('IDKiro/sdxs-512-dreamshaper')" || echo "::warning::model pre-download failed - it downloads when the picture is drawn"
+            touch "$VENV/.ready-v2"
           fi
 
       - name: Draw the image
         env:
-          # The prompt is passed as environment data, never pasted into code, so quotes in it are harmless.
+          # Everything is passed as environment data, never pasted into code, so quotes in a prompt are harmless.
           IMG_PROMPT: ${{ inputs.prompt }}
+          IMG_PROFILE: ${{ inputs.profile }}
+          IMG_STORY: ${{ inputs.story_mode }}
           IMG_STYLE: ${{ inputs.style }}
           IMG_WIDTH: ${{ inputs.width }}
           IMG_HEIGHT: ${{ inputs.height }}
@@ -96,8 +119,10 @@ jobs:
               except ValueError:
                   return default
           job = {
-              "prompt": os.environ["IMG_PROMPT"],
-              "style": os.environ.get("IMG_STYLE", ""),
+              "prompt": os.environ["IMG_PROMPT"][:600],
+              "profile": os.environ.get("IMG_PROFILE") or "character",
+              "mode": "story" if os.environ.get("IMG_STORY", "true") == "true" else "",
+              "style": os.environ.get("IMG_STYLE", "")[:300],
               "width": num("IMG_WIDTH", 1152, 256, 2048),
               "height": num("IMG_HEIGHT", 1152, 256, 2048),
               "seed": num("IMG_SEED", 1, 0, 2**32 - 1),
@@ -111,6 +136,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: animato-image-${{ github.run_id }}
-          path: output/image.png
-          retention-days: 7
+          path: |
+            output/image.png
+            output/image.json
+          retention-days: 3
           if-no-files-found: error
