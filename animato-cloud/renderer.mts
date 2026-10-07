@@ -143,7 +143,7 @@ const CFG = {
   // Optional paid last resort: Google Lyria via the Gemini API (needs a billing-enabled Gemini key).
   lyriaModel: pick(ENV.LYRIA_MODEL, 'lyria-3.5'),
   lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
-  characterSpec: parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)),
+  characterSpec: (() => { const s = parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)); return s?.kind === 'ai-rig' ? { ...s, assetBaseUrl: pick(s.assetBaseUrl, pick(CP.app_url, INPUTS.app_url, ENV.APP_URL)).replace(/\/+$/, '') } : s; })(),
   // Podcasts: the hosts designed in the app, and the studio.
   castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); return Array.isArray(v) ? v.slice(0, 3) : []; } catch { return []; } })(),
   studio: (() => { try { return JSON.parse(pick(JOB.studio, ENV.STUDIO) || 'null'); } catch { return null; } })(),
