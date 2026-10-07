@@ -81,6 +81,7 @@ jobs:
           node-version: 22
 
       - name: Set up Python (for the neural voice engine)
+        id: py
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -109,14 +110,21 @@ jobs:
             ~/imagegen-venv
             ~/.cache/huggingface
             ~/.cache/animato-imagegen
-          key: animato-imagegen-v2-${{ runner.os }}
+          key: animato-imagegen-v3-${{ runner.os }}-py${{ steps.py.outputs.python-version }}
 
       - name: Set up the image generator
         if: ${{ contains(fromJSON('["stories","cooking","news"]'), github.event.client_payload.job.category || inputs.category || 'stories') }}
         run: |
           set -e
           VENV="$HOME/imagegen-venv"
-          if [ ! -f "$VENV/.ready-v2" ]; then
+          # A cached venv only works if the Python it was built from still exists on this runner
+          # (bin/python is a symlink into the runner's tool cache). If not, throw it away and rebuild.
+          if [ -d "$VENV" ] && ! "$VENV/bin/python" -c "import torch, diffusers" >/dev/null 2>&1; then
+            echo "::warning::cached image generator environment is stale or broken - rebuilding it"
+            rm -rf "$VENV"
+          fi
+          if [ ! -f "$VENV/.ready-v3" ]; then
+            rm -rf "$VENV"
             python -m venv "$VENV"
             "$VENV/bin/pip" install --quiet --disable-pip-version-check --upgrade pip
             # CPU-only PyTorch: small and fast to install.
@@ -125,7 +133,7 @@ jobs:
             # Optional detail upscaler: if it cannot be installed the pictures simply use a plain high-quality resize.
             "$VENV/bin/pip" install --quiet --disable-pip-version-check spandrel || echo "::warning::spandrel could not be installed - pictures use the plain resize"
             "$VENV/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('IDKiro/sdxs-512-dreamshaper')" || echo "::warning::model pre-download failed - it will download when the first picture is drawn"
-            touch "$VENV/.ready-v2"
+            touch "$VENV/.ready-v3"
           fi
           echo "IMAGEGEN_PYTHON=$VENV/bin/python" >> "$GITHUB_ENV"
           "$VENV/bin/python" -c "import torch, diffusers; print('image generator ready: torch', torch.__version__, 'diffusers', diffusers.__version__)"
