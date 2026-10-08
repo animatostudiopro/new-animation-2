@@ -122,14 +122,12 @@ const CFG = {
   ytChannelId: pick(AUTH.youtube_channel_id, ENV.YOUTUBE_CHANNEL_ID),
   ytClientId: pick(AUTH.youtube_client_id, ENV.YOUTUBE_CLIENT_ID, DEFAULT_YT_CLIENT_ID),
   ytClientSecret: pick(AUTH.youtube_client_secret, ENV.YOUTUBE_CLIENT_SECRET),
-  // Script writer keys the app sent (comma-separated) + repository secrets; rotated with instant failover.
-  geminiKeys: keyList(AUTH.gemini_api_keys, AUTH.gemini_api_key, ENV.GEMINI_API_KEYS, ENV.GEMINI_API_KEY),
-  groqKeys: keyList(AUTH.groq_api_keys, AUTH.groq_api_key, ENV.GROQ_API_KEYS, ENV.GROQ_API_KEY),
-  geminiModels: listOf(pick(JOB.gemini_models, ENV.GEMINI_MODELS)),
-  groqModels: listOf(pick(JOB.groq_models, ENV.GROQ_MODELS)),
-  // Personal/test project fallback. Environment/auth config still takes precedence when provided.
-  airforceKey: pick(AUTH.airforce_api_key, ENV.AIRFORCE_API_KEY, 'sk-air-WbHJLcTArpFku1I1pQZpenjgZJiaoPdR9fK2mbfD6NnbjRVM'),
-  airforceBase: pick(ENV.AIRFORCE_BASE, 'https://api.airforce').replace(/\/+$/, ''),
+  // The script writer is the self-hosted model started by the workflow on this runner (no API keys).
+  localLlmUrl: pick(ENV.LOCAL_LLM_URL, 'http://127.0.0.1:8080/v1'),
+  localVlmUrl: pick(ENV.LOCAL_VLM_URL),
+  geminiKeys: [] as string[],
+  groqKeys: [] as string[],
+  airforceKey: '',
   // Musical: the concert stage (a fixed stage number, or 0 = a new stage every video) and the song language.
   stageId: Math.max(0, parseInt(pick(JOB.stage_id, ENV.STAGE_ID, '0'), 10) || 0),
   musicLanguage: pick(JOB.music_language, ENV.MUSIC_LANGUAGE, 'English'),
@@ -681,12 +679,8 @@ interface Script {
 // An exhausted model is never retried in the same run (see llm.ts).
 // ---------------------------------------------------------------------------
 const LLM = new LlmPool({
-  geminiKeys: CFG.geminiKeys,
-  groqKeys: CFG.groqKeys,
-  geminiModels: CFG.geminiModels,
-  groqModels: CFG.groqModels,
-  geminiBase: CFG.geminiBase,
-  groqBase: CFG.groqBase,
+  localUrl: CFG.localLlmUrl,
+  visionUrl: CFG.localVlmUrl || undefined,
   log: (m) => log(m),
   seed: parseInt(crypto.createHash('md5').update(`${CFG.campaignId}:${CFG.partNumber}:${CFG.runId}`).digest('hex').slice(0, 6), 16)
 });
@@ -1286,7 +1280,7 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
   };
   if (!CFG.offline && !LLM.hasKeys) throw new PipelineError('script_failed', 'No Gemini or Groq API key was provided to the runner.');
   if (!CFG.offline) {
-    log(`Script writer: ${CFG.geminiKeys.length} Gemini key(s) → ${CFG.groqKeys.length} Groq key(s) as fallback.`);
+    log(`Script writer: the self-hosted model on this runner (${CFG.localLlmUrl}).`);
     const t0 = Date.now();
     for await (const a of LLM.attempts({
       system,
@@ -3631,38 +3625,34 @@ async function generateMusicTrack(song: MusicalSong): Promise<{ file: string; du
   throw new PipelineError('music_all_failed', `Music generation failed — ${errors.join(' | ')}. Nothing was posted; the next run will retry.`);
 }
 
-/** Free word-level timing via Groq Whisper (used when the Airforce transcription is unavailable). */
-async function transcribeWithGroq(file: string): Promise<Word[]> {
-  for (const key of CFG.groqKeys) {
-    try {
-      const form = new FormData();
-      form.append('file', new Blob([fs.readFileSync(file)], { type: path.extname(file).toLowerCase() === '.wav' ? 'audio/wav' : 'audio/mpeg' }), path.basename(file));
-      form.append('model', 'whisper-large-v3-turbo'); form.append('response_format', 'verbose_json');
-      form.append('timestamp_granularities[]', 'word'); form.append('language', musicLanguage().code);
-      const r = await fetch(`${CFG.groqBase.replace(/\/+$/, '')}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(180000) });
-      if (!r.ok) continue;
-      const j: any = await r.json().catch(() => ({}));
-      const words = Array.isArray(j?.words) ? j.words.filter((w: any) => Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end))).map((w: any) => ({ text: String(w.word ?? w.text ?? '').trim(), start: Number(w.start), end: Number(w.end) })).filter((w: Word) => w.text) : [];
-      if (words.length) return words;
-    } catch {}
+/**
+ * Word-level lyric timing with Whisper on THIS runner (faster-whisper, CPU int8) — no API keys,
+ * no outside transcription service.
+ */
+async function transcribeLocal(file: string): Promise<Word[]> {
+  const python = ENV.PYTHON || 'python3';
+  const chk = await run(python, ['-c', 'import faster_whisper'], { timeoutMs: 60000 });
+  if (chk.code !== 0) {
+    const ins = await run(python, ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', 'faster-whisper'], { timeoutMs: 10 * 60000 });
+    if (ins.code !== 0) { log(`⚠️ faster-whisper could not be installed (${ins.stderr.slice(-200)}).`); return []; }
   }
-  return [];
-}
-
-async function transcribeMusicAudio(file: string): Promise<Word[]> {
-  if (!CFG.airforceKey) return [];
-  const form = new FormData();
-  const bytes = fs.readFileSync(file);
-  const ext = path.extname(file).toLowerCase();
-  const mime = ext === '.wav' ? 'audio/wav' : 'audio/mpeg';
-  form.append('file', new Blob([bytes], { type: mime }), path.basename(file));
-  form.append('model', 'elevenlabs-scribe'); form.append('language_code', musicLanguage().code); form.append('diarize', 'false');
-  form.append('tag_audio_events', 'true'); form.append('timestamps_granularity', 'word');
-  const r = await fetch(`${CFG.airforceBase}/v1/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${CFG.airforceKey}` }, body: form, signal: AbortSignal.timeout(240000) }).catch(() => null);
-  if (!r) return [];
-  if (!r.ok) { log(`⚠️ Airforce transcription failed (HTTP ${r.status}); trying Groq Whisper.`); return []; }
-  const j: any = await r.json().catch(() => ({}));
-  return Array.isArray(j?.words) ? j.words.filter((w: any) => w?.type === 'word' && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end))).map((w: any) => ({ text: String(w.text), start: Number(w.start), end: Number(w.end) })) : [];
+  const py = path.join(WORK_DIR, 'lyrics_asr.py');
+  fs.writeFileSync(py, `import json,sys,os
+from faster_whisper import WhisperModel
+m=WhisperModel("small",device="cpu",compute_type="int8",cpu_threads=os.cpu_count() or 2)
+lang=sys.argv[2] if len(sys.argv)>2 and sys.argv[2] not in ("","unknown","pcm") else None
+segs,_=m.transcribe(sys.argv[1],word_timestamps=True,vad_filter=False,language=lang)
+out=[]
+for s in segs:
+  for w in (s.words or []): out.append({"text":w.word.strip(),"start":w.start,"end":w.end})
+print(json.dumps(out))
+`);
+  const r = await run(python, [py, file, musicLanguage().code], { timeoutMs: 20 * 60000 });
+  if (r.code !== 0) { log(`⚠️ Local lyric transcription failed (${r.stderr.slice(-200)}).`); return []; }
+  try {
+    const list = JSON.parse(r.stdout.toString().trim().split('\n').pop() || '[]');
+    return (Array.isArray(list) ? list : []).filter((w: any) => w.text && Number.isFinite(w.start) && Number.isFinite(w.end));
+  } catch { return []; }
 }
 
 // ---------------------------------------------------------------------------
@@ -3774,10 +3764,8 @@ function voiceMismatch(f0: number): boolean {
 
 async function transcribeSong(file: string): Promise<Word[]> {
   let words: Word[] = [];
-  try { words = await transcribeMusicAudio(file); } catch (e: any) { log(`⚠️ Airforce transcription error (${e?.message || e}).`); }
-  if (words.length > 5) return words;
-  words = await transcribeWithGroq(file);
-  if (words.length > 5) { log(`Lyric timing from Groq Whisper (${words.length} words).`); return words; }
+  try { words = await transcribeLocal(file); } catch (e: any) { log(`⚠️ Lyric transcription error (${e?.message || e}).`); }
+  if (words.length > 5) { log(`Lyric timing from Whisper on this runner (${words.length} words).`); return words; }
   log('⚠️ No transcription available; using estimated lyric timing.');
   return [];
 }

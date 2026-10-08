@@ -1,313 +1,143 @@
 /**
- * Free LLM pool: Google Gemini (many keys, rotated) → Groq (fallback).
+ * Self-hosted LLM — no API keys, no AI services.
  *
- * - Models are tried best-first. A model that is exhausted (quota/429 on every
- *   key), missing (404) or refused is NEVER retried in the same run.
- * - Keys fail over instantly: rejected keys (401/403/invalid) are retired,
- *   rate-limited / out-of-quota keys are skipped for that model.
- * - Pure fetch: runs on the GitHub runner (Node 22), the Express server and
- *   Cloudflare Workers. Keys are never logged (only their last 4 characters).
+ * Every model runs on a GitHub CPU runner with llama.cpp:
+ *  - in the video / editor runs, a llama-server started by the workflow on the same
+ *    runner (LOCAL_LLM_URL, OpenAI-compatible: http://127.0.0.1:8080/v1), plus an optional
+ *    vision server for picture checks (LOCAL_VLM_URL);
+ *  - in the app (Express server / Cloudflare Worker), the "brain" — a runner session that
+ *    keeps the model loaded and answers queued requests — reached through `relay`.
  *
- * Gemini "AQ." keys must be sent in the x-goog-api-key header.
+ * The class keeps the old interface (attempts(), hasKeys, maxWaitMs, lastErrors) so every
+ * caller works unchanged. Web research: the runner reads public search results itself
+ * (DuckDuckGo's HTML page — no key) and the model answers from those pages, with sources.
  */
-export type Provider = 'gemini' | 'groq';
+export type Provider = 'local' | 'brain';
 export interface LlmConfig {
-  geminiKeys: string[];
-  groqKeys: string[];
-  geminiModels?: string[];
-  groqModels?: string[];
-  geminiBase?: string;
-  groqBase?: string;
+  /** OpenAI-compatible llama-server base URL, e.g. http://127.0.0.1:8080/v1 */
+  localUrl?: string;
+  /** Optional vision llama-server (Qwen2.5-VL + mmproj). */
+  visionUrl?: string;
+  /** App side: send the request to the brain runner and wait for its text. */
+  relay?: (req: LlmRequest) => Promise<string>;
+  model?: string;
   fetchImpl?: typeof fetch;
   log?: (msg: string) => void;
-  /** Start position in each key list (spreads the free quotas across runs). */
   seed?: number;
+  /** Legacy fields (ignored — no external AI providers any more). */
+  geminiKeys?: string[]; groqKeys?: string[]; geminiModels?: string[]; groqModels?: string[]; geminiBase?: string; groqBase?: string;
 }
 export interface LlmRequest {
   system: string;
   user: string;
-  /** Softer wording, used after a safety block. */
   saferUser?: string;
   temperature?: number;
   maxTokens?: number;
   json?: boolean;
   timeoutMs?: number;
-  /**
-   * Live web research: Gemini answers with Google Search grounding, Groq with its
-   * built-in web-search "compound" models. The answer carries the web sources used.
-   */
+  /** Research: the answer is grounded on live search results fetched by the runner. */
   webSearch?: boolean;
-  /** Images to look at (vision check). Gemini models, then Groq's vision model. */
+  /** Pictures to look at (needs the vision server). */
   images?: { mime: string; data: string }[];
-  /** What this call is for (script, research, fact_check, vision, editor_plan…) — used in logs. */
   task?: string;
 }
 export interface WebSource { title: string; uri: string }
 export interface LlmAttempt { provider: Provider; model: string; text: string; ms: number; sources?: WebSource[] }
 
-export const GEMINI_MODELS_DEFAULT = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
-export const GROQ_MODELS_DEFAULT = ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b'];
-/** Groq models that search the web themselves (used for fact research). */
-export const GROQ_SEARCH_MODELS = ['groq/compound', 'groq/compound-mini'];
-/** Groq models that can look at an image (used for image verification). */
-export const GROQ_VISION_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
-
-const tail = (k: string) => `…${String(k).slice(-4)}`;
-type Outcome =
-  | { kind: 'ok'; text: string; sources?: WebSource[] }
-  | { kind: 'dead-key'; why: string }
-  | { kind: 'rate'; why: string; daily: boolean; retryMs?: number }
-  | { kind: 'model-gone'; why: string }
-  | { kind: 'too-large'; why: string }
-  | { kind: 'blocked'; why: string }
-  | { kind: 'bad-request'; why: string; extras: boolean }
-  | { kind: 'server'; why: string };
-
-function errMessage(text: string): string {
-  try {
-    const j = JSON.parse(text);
-    const e = Array.isArray(j) ? j[0]?.error : j?.error;
-    return String(e?.message || j?.message || text).replace(/\s+/g, ' ').slice(0, 240);
-  } catch {
-    return String(text || '').replace(/\s+/g, ' ').slice(0, 240);
-  }
-}
+/** Default models (downloaded by the workflows). */
+export const LOCAL_TEXT_MODEL = 'Qwen3-4B-Instruct-2507 (Q4_K_M, llama.cpp)';
+export const LOCAL_VISION_MODEL = 'Qwen2.5-VL-3B-Instruct (Q4_K_M + mmproj, llama.cpp)';
 
 export class LlmPool {
   cfg: LlmConfig;
-  exhausted = new Set<string>();          // provider:model
-  deadKeys = new Map<string, string>();   // key → reason
-  pairDone = new Set<string>();           // key|model (daily quota used / refused for this run)
-  coolUntil = new Map<string, number>();  // key|model → when a per-minute rate limit lifts
-  /** How long attempts() may wait in total for per-minute limits to lift before giving up (ms). */
   maxWaitMs = 4 * 60 * 1000;
-  cursor: Record<Provider, number> = { gemini: 0, groq: 0 };
   lastErrors: string[] = [];
+  exhausted = new Set<string>();
+  constructor(cfg: LlmConfig) { this.cfg = cfg; }
 
-  constructor(cfg: LlmConfig) {
-    this.cfg = cfg;
-    const seed = Math.abs(Math.floor(cfg.seed || 0));
-    this.cursor.gemini = cfg.geminiKeys.length ? seed % cfg.geminiKeys.length : 0;
-    this.cursor.groq = cfg.groqKeys.length ? seed % cfg.groqKeys.length : 0;
-  }
-
-  get hasKeys() { return this.cfg.geminiKeys.length + this.cfg.groqKeys.length > 0; }
+  get hasKeys() { return !!(this.cfg.localUrl || this.cfg.relay); }
+  get hasVision() { return !!(this.cfg.visionUrl || this.cfg.relay); }
   private log(m: string) { this.cfg.log?.(m); }
-  private keysFor(p: Provider): string[] {
-    const list = p === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys;
-    const out: string[] = [];
-    for (let i = 0; i < list.length; i++) {
-      const k = list[(this.cursor[p] + i) % list.length];
-      if (!this.deadKeys.has(k)) out.push(k);
-    }
-    return out;
-  }
-  models(p: Provider, req?: LlmRequest): string[] {
-    let list = p === 'gemini' ? this.cfg.geminiModels || GEMINI_MODELS_DEFAULT : this.cfg.groqModels || GROQ_MODELS_DEFAULT;
-    // Research and vision need special Groq models (the Gemini ones do both natively).
-    if (p === 'groq' && req?.webSearch) list = GROQ_SEARCH_MODELS;
-    else if (p === 'groq' && req?.images?.length) list = GROQ_VISION_MODELS;
-    const mode = this.modeOf(req);
-    return list.filter((m) => !this.exhausted.has(`${p}:${m}${mode}`));
-  }
-  private modeOf(req?: LlmRequest): string { return req?.webSearch ? '#search' : req?.images?.length ? '#vision' : ''; }
 
-  /** Every usable (provider, model) answer, best first. Stop iterating once an answer is good enough. */
+  /** Up to three answers (the caller stops when one is good): a retry nudges the temperature. */
   async *attempts(req: LlmRequest): AsyncGenerator<LlmAttempt> {
-    // Per-minute rate limits are temporary: when every model is only cooling
-    // down, wait for the first one to come back instead of failing the video.
-    const started = Date.now();
-    let yielded = false;
-    for (let round = 0; round < 6; round++) {
-      for await (const a of this.pass(req)) { yielded = true; yield a; }
-      if (yielded) return;
-      const now = Date.now();
-      const next = Math.min(...[...this.coolUntil.values()].filter((t) => t > now), Infinity);
-      if (!Number.isFinite(next) || now + (next - now) - started > this.maxWaitMs) return;
-      const wait = Math.max(1000, next - now + 1500);
-      this.log(`All models are rate-limited for the moment — waiting ${Math.round(wait / 1000)}s for the limit to lift, then trying again.`);
-      await new Promise((z) => setTimeout(z, wait));
-    }
-  }
-
-  private async *pass(req: LlmRequest): AsyncGenerator<LlmAttempt> {
+    if (!this.hasKeys) return;
+    if (req.images?.length && !this.hasVision) return;   // no vision model here → "could not ask"
+    let sources: WebSource[] = [];
     let user = req.user;
-    for (const provider of ['gemini', 'groq'] as Provider[]) {
-      if (!(provider === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys).length) continue;
-      for (const model of this.models(provider, req)) {
-        let serverErrors = 0;
-        let withExtras = true;
-        let answered = false;
-        let cooling = false;
-        const nowT = Date.now();
-        let keys = this.keysFor(provider).filter((k) => {
-          if (this.pairDone.has(`${k}|${model}`)) return false;
-          const until = this.coolUntil.get(`${k}|${model}`) || 0;
-          if (until > nowT) { cooling = true; return false; }
-          return true;
-        });
-        for (let i = 0; i < keys.length; i++) {
-          const key = keys[i];
-          const t0 = Date.now();
-          const out = await this.call(provider, model, key, { ...req, user }, withExtras);
-          const ms = Date.now() - t0;
-          if (out.kind === 'ok') {
-            this.cursor[provider] = (provider === 'gemini' ? this.cfg.geminiKeys : this.cfg.groqKeys).indexOf(key);
-            answered = true;
-            const attempt: LlmAttempt = { provider, model, text: out.text, ms, sources: out.sources };
-            yield attempt;
-            break; // the caller wants another answer → next MODEL, never the same one again
-          }
-          const note = `${provider}/${model} key ${tail(key)}: ${out.why}`;
-          this.lastErrors.push(note);
-          if (out.kind === 'dead-key') { this.deadKeys.set(key, out.why); this.log(`${note} — key retired, next key.`); continue; }
-          if (out.kind === 'rate') {
-            if (out.daily) this.pairDone.add(`${key}|${model}`);
-            else { this.coolUntil.set(`${key}|${model}`, Date.now() + (out.retryMs || 60000)); cooling = true; }
-            this.log(`${note} — ${out.daily ? 'daily quota used' : 'rate-limited for a minute'}, next key.`);
-            continue;
-          }
-          if (out.kind === 'model-gone') { this.log(`${note} — model unavailable, next model.`); break; }
-          if (out.kind === 'too-large') { this.log(`${note} — request too large for this model's free tier, next model.`); break; }
-          if (out.kind === 'blocked') {
-            if (req.saferUser && user !== req.saferUser) { user = req.saferUser; this.log(`${note} — safety filter; retrying with softer wording.`); i--; continue; }
-            this.log(`${note} — blocked, next model.`);
-            break;
-          }
-          if (out.kind === 'bad-request') {
-            if (out.extras && withExtras) { withExtras = false; i--; continue; } // retry the same key without optional params
-            this.log(`${note} — next model.`);
-            break;
-          }
-          // server / network / timeout: one more key, then next model
-          if (++serverErrors >= 2) { this.log(`${note} — next model.`); break; }
-          this.log(`${note} — trying another key.`);
-        }
-        // It answered and the caller wants a different answer, or the model is gone / its
-        // daily quota is used: never ask it again in this run. A model that is only
-        // rate-limited for a minute stays available for later.
-        if (answered || !cooling) this.exhausted.add(`${provider}:${model}${this.modeOf(req)}`);
-        if (!answered && !this.keysFor(provider).length) break; // no live keys left for this provider
+    if (req.webSearch && this.cfg.localUrl) {
+      try {
+        const found = await webContext(req.user, this.cfg.fetchImpl || fetch);
+        sources = found.sources;
+        if (found.text) user = `LIVE SEARCH RESULTS (use ONLY these for facts; cite the outlet):\n${found.text}\n\n${req.user}`;
+        else this.log('Web research: no search results could be read — answering without sources.');
+      } catch (e: any) { this.log(`Web research failed (${e?.message || e}).`); }
+    }
+    for (let i = 0; i < 3; i++) {
+      const t0 = Date.now();
+      const r = { ...req, user: i > 0 && req.saferUser ? req.saferUser : user, temperature: Math.min(1.1, (req.temperature ?? 0.7) + i * 0.15) };
+      try {
+        const text = this.cfg.relay ? await this.cfg.relay(r) : await this.callLocal(r);
+        const clean = stripThink(text);
+        if (!clean) throw new Error('empty answer');
+        yield { provider: this.cfg.relay ? 'brain' : 'local', model: req.images?.length ? LOCAL_VISION_MODEL : (this.cfg.model || LOCAL_TEXT_MODEL), text: clean, ms: Date.now() - t0, sources };
+      } catch (e: any) {
+        const note = `local model: ${String(e?.message || e).slice(0, 200)}`;
+        this.lastErrors.push(note); this.log(note);
+        if (/not running|offline|starting/i.test(String(e?.message))) return;   // no point retrying
       }
     }
   }
 
-  private async call(p: Provider, model: string, key: string, req: LlmRequest, extras: boolean): Promise<Outcome> {
+  private async callLocal(req: LlmRequest): Promise<string> {
     const f = this.cfg.fetchImpl || fetch;
-    const timeout = req.timeoutMs || 90000;
-    try {
-      if (p === 'gemini') {
-        const base = (this.cfg.geminiBase || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '');
-        const gen: any = { temperature: req.temperature ?? 0.8, maxOutputTokens: req.maxTokens || 8192 };
-        // Grounded (search) answers cannot be forced into JSON mode: the JSON is parsed from the text.
-        if (req.json && !req.webSearch) gen.responseMimeType = 'application/json';
-        if (extras) {
-          if (/2\.5-flash(?!-lite)/.test(model)) gen.thinkingConfig = { thinkingBudget: 512 };
-          else if (/gemini-3/.test(model)) gen.thinkingConfig = { thinkingLevel: 'low' };
-        }
-        const body = {
-          systemInstruction: { parts: [{ text: req.system }] },
-          contents: [{ role: 'user', parts: [
-            ...(req.images || []).map((im) => ({ inline_data: { mime_type: im.mime, data: im.data } })),
-            { text: req.user }
-          ] }],
-          ...(req.webSearch ? { tools: [{ google_search: {} }] } : {}),
-          generationConfig: gen,
-          safetySettings: ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
-            .map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' }))
-        };
-        const res = await f(`${base}/models/${encodeURIComponent(model)}:generateContent`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(timeout)
-        });
-        const text = await res.text();
-        if (!res.ok) return this.classify(p, res.status, text);
-        let data: any;
-        try { data = JSON.parse(text); } catch { return { kind: 'server', why: 'unreadable response' }; }
-        if (data?.promptFeedback?.blockReason) return { kind: 'blocked', why: `prompt blocked (${data.promptFeedback.blockReason})` };
-        const cand = data?.candidates?.[0];
-        const out = (cand?.content?.parts || []).filter((x: any) => !x?.thought).map((x: any) => x?.text || '').join('').trim();
-        if (!out) {
-          const fr = String(cand?.finishReason || 'empty');
-          if (/SAFETY|PROHIBITED|BLOCKLIST|SPII/.test(fr)) return { kind: 'blocked', why: `answer blocked (${fr})` };
-          return { kind: 'server', why: `empty answer (${fr})` };
-        }
-        const chunks = cand?.groundingMetadata?.groundingChunks || [];
-        const sources: WebSource[] = chunks.map((c: any) => ({ title: String(c?.web?.title || c?.web?.domain || ''), uri: String(c?.web?.uri || '') })).filter((x: WebSource) => x.title || x.uri);
-        if (req.webSearch && !sources.length && !/search/i.test(JSON.stringify(cand?.groundingMetadata || {}))) {
-          // The model answered from memory instead of searching: not good enough for research.
-          return { kind: 'model-gone', why: 'answered without searching the web' };
-        }
-        return { kind: 'ok', text: out, sources };
-      }
-      const base = (this.cfg.groqBase || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
-      const body: any = {
-        model,
-        temperature: req.temperature ?? 0.8,
-        max_completion_tokens: req.maxTokens || 8192,
-        messages: [{ role: 'system', content: req.system }, {
-          role: 'user',
-          content: req.images?.length
-            ? [...req.images.map((im) => ({ type: 'image_url', image_url: { url: `data:${im.mime};base64,${im.data}` } })), { type: 'text', text: req.user }]
-            : req.user
-        }]
-      };
-      if (req.json && extras && !req.webSearch) body.response_format = { type: 'json_object' };
-      if (extras && /gpt-oss/.test(model)) body.reasoning_effort = 'low';
-      const res = await f(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeout)
-      });
-      const text = await res.text();
-      if (!res.ok) return this.classify(p, res.status, text);
-      let data: any;
-      try { data = JSON.parse(text); } catch { return { kind: 'server', why: 'unreadable response' }; }
-      const msg = data?.choices?.[0]?.message || {};
-      const out = String(msg.content || '').trim();
-      if (!out) return { kind: 'server', why: `empty answer (${data?.choices?.[0]?.finish_reason || 'none'})` };
-      // Compound models report the searches they ran (executed_tools[].search_results).
-      const sources: WebSource[] = [];
-      for (const t of Array.isArray(msg.executed_tools) ? msg.executed_tools : []) {
-        for (const r of t?.search_results?.results || []) if (r?.url) sources.push({ title: String(r.title || ''), uri: String(r.url) });
-      }
-      if (req.webSearch && !sources.length) {
-        for (const m of out.matchAll(/https?:\/\/[^\s)\]"'<>]+/g)) sources.push({ title: '', uri: m[0] });
-      }
-      return { kind: 'ok', text: out, sources };
-    } catch (err: any) {
-      const m = String(err?.name === 'TimeoutError' ? `timed out after ${Math.round(timeout / 1000)}s` : err?.message || err);
-      return { kind: 'server', why: m.slice(0, 160) };
-    }
+    const vision = !!req.images?.length;
+    const base = String((vision ? this.cfg.visionUrl : this.cfg.localUrl) || '').replace(/\/+$/, '');
+    if (!base) throw new Error('local model not running');
+    const body: any = {
+      model: 'local', temperature: req.temperature ?? 0.7, max_tokens: req.maxTokens || 2048, cache_prompt: true,
+      messages: [{ role: 'system', content: req.system }, {
+        role: 'user',
+        content: vision ? [...req.images!.map((im) => ({ type: 'image_url', image_url: { url: `data:${im.mime};base64,${im.data}` } })), { type: 'text', text: req.user }] : req.user,
+      }],
+    };
+    if (req.json) body.response_format = { type: 'json_object' };
+    const res = await f(`${base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.max(req.timeoutMs || 0, 600000)) });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${text.slice(0, 160)}`);
+    const data = JSON.parse(text);
+    return String(data?.choices?.[0]?.message?.content || '');
   }
+}
 
-  private classify(p: Provider, status: number, text: string): Outcome {
-    const why = `HTTP ${status} ${errMessage(text)}`.trim();
-    const low = text.toLowerCase();
-    if (status === 401) return { kind: 'dead-key', why };
-    if (status === 403) {
-      // Gemini: API disabled / key leaked / no permission → the key is unusable. Groq: org/key blocked.
-      if (/model|not have access to (the )?model|permission.*model/.test(low) && p === 'groq') return { kind: 'model-gone', why };
-      return { kind: 'dead-key', why };
-    }
-    if (status === 400 && /api key not valid|api_key_invalid|invalid api key|expired/.test(low)) return { kind: 'dead-key', why };
-    if (status === 404) return { kind: 'model-gone', why };
-    if (status === 400 && /model.*(not found|not supported|does not exist|decommissioned)|unknown model|is not found for api version/.test(low)) return { kind: 'model-gone', why };
-    if (status === 413 || /request too large|reduce your message size/.test(low)) return { kind: 'too-large', why };
-    if (status === 429 || /resource_exhausted|quota|rate limit/.test(low)) {
-      // "retryDelay": "37s" (Gemini) / "try again in 1m2.5s" (Groq)
-      const m = low.match(/retrydelay"?\s*:\s*"?(\d+(?:\.\d+)?)s/) || low.match(/try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s/);
-      const retryMs = m ? (m.length === 3 ? (Number(m[1] || 0) * 60 + Number(m[2])) : Number(m[1])) * 1000 : undefined;
-      return { kind: 'rate', why, daily: /per ?day|perday|daily|tpd|rpd/.test(low), retryMs: retryMs && retryMs < 10 * 60 * 1000 ? retryMs : undefined };
-    }
-    if (status === 400 && /json_validate_failed|failed to generate json|thinking|reasoning_effort|response_format|responsemimetype|unknown name|invalid json payload/.test(low)) return { kind: 'bad-request', why, extras: true };
-    if (status === 400 && /safety|blocked/.test(low)) return { kind: 'blocked', why };
-    if (status >= 500 || status === 0) return { kind: 'server', why };
-    return { kind: 'bad-request', why, extras: false };
+/** Remove reasoning blocks some models print. */
+export function stripThink(s: string): string { return String(s || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim(); }
+
+/** Public search results + the first readable paragraphs of the top pages (no API, no key). */
+export async function webContext(query: string, f: typeof fetch): Promise<{ text: string; sources: WebSource[] }> {
+  const q = String(query).replace(/\s+/g, ' ').slice(0, 300);
+  const ua = { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36' };
+  const res = await f(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, { headers: ua, signal: AbortSignal.timeout(15000) });
+  const html = await res.text();
+  const strip = (s: string) => s.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  const items: { title: string; uri: string; snippet: string }[] = [];
+  for (const m of html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)) {
+    let uri = m[1];
+    const u = uri.match(/[?&]uddg=([^&]+)/); if (u) uri = decodeURIComponent(u[1]);
+    if (!/^https?:/.test(uri)) continue;
+    items.push({ title: strip(m[2]), uri, snippet: strip(m[3]) });
+    if (items.length >= 6) break;
   }
+  const pages = await Promise.all(items.slice(0, 3).map(async (it) => {
+    try {
+      const r = await f(it.uri, { headers: ua, signal: AbortSignal.timeout(12000) });
+      const h = (await r.text()).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
+      const paras = [...h.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((p) => strip(p[1])).filter((p) => p.length > 60);
+      return paras.join(' ').slice(0, 1800);
+    } catch { return ''; }
+  }));
+  const text = items.map((it, i) => `[${i + 1}] ${it.title} — ${it.uri}\n${it.snippet}${pages[i] ? `\n${pages[i]}` : ''}`).join('\n\n');
+  return { text, sources: items.map((it) => ({ title: it.title, uri: it.uri })) };
 }
 
 /** First JSON object in a model answer (tolerates code fences and <think> blocks). */

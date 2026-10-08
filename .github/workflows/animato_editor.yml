@@ -51,10 +51,17 @@ jobs:
           ffmpeg -hide_banner -version | head -n 1
           nproc
 
+      # The app's own AI model (llama.cpp + Qwen3-4B) runs on this runner: no API keys.
+      - name: Cache the AI model
+        uses: actions/cache@v4
+        with:
+          path: ~/animato-llm
+          key: animato-llm-qwen3-4b-2507-q4km-v1-${{ runner.os }}
+
+      - name: Start the AI model (self-hosted)
+        run: bash animato-cloud/llm_server.sh
+
       - name: Edit the video
-        env:
-          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-          GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
         run: node --experimental-strip-types animato-cloud/editor.mts
 
       - name: Keep the edited video as a run artifact

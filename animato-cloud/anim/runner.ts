@@ -14,7 +14,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { choreograph, vsFighters, planRound, roundHealth, ARCHETYPES, type VsSide, type VsRound } from './stickman.ts';
+import { choreograph, vsFighters, planRound, roundHealth, equipSides, ARCHETYPES, type VsSide, type VsRound } from './stickman.ts';
 import { normalizeStudio } from './studio.ts';
 import { arenaOrder, ARENA_IDS } from './arenas.ts';
 
@@ -233,6 +233,13 @@ function sfxInto(out: Float32Array, at: number, kind: string, seed: number) {
     case 'beam': { let ph = 0; for (let k = 0; k < 0.9 * SR; k++) { const tt = k / SR; ph += (2 * Math.PI * (140 + 8 * Math.sin(tt * 60))) / SR; const env = Math.min(1, tt / 0.05) * Math.max(0, 1 - Math.max(0, tt - 0.6) / 0.3); put(k, (Math.sin(ph) + 0.5 * Math.sin(ph * 3.01)) * 0.18 * env); } noise(0.9, 0.35, 0.8, 0.03, 'swell'); break; }
     case 'bell': for (const [f, g] of [[880, 0.22], [1320, 0.12], [2210, 0.07]] as [number, number][]) { let ph = 0; for (let k = 0; k < 1.2 * SR; k++) { ph += (2 * Math.PI * f) / SR; put(k, Math.sin(ph) * g * Math.exp(-(k / SR) * 3.2)); } } break;
     case 'slide': noise(0.5, 0.3, 0.05, 0.03, 'swell'); break;
+    // Weapons (synthesised): a sharp crack with a body thump and a short room tail.
+    case 'gun': noise(0.018, 1.0, 0.95, 0.0005); thump(180, 55, 0.12, 0.9); noise(0.25, 0.35, 0.18, 0.002); noise(0.6, 0.12, 0.03, 0.01); break;
+    case 'bulletHit': thump(240, 90, 0.05, 0.45); noise(0.06, 0.5, 0.7, 0.001); break;
+    case 'ricochet': { let ph = 0; for (let k = 0; k < 0.32 * SR; k++) { const tt = k / SR, f = 3200 - 2200 * (tt / 0.32); ph += (2 * Math.PI * f) / SR; put(k, Math.sin(ph) * 0.12 * Math.exp(-tt * 9)); } noise(0.04, 0.4, 0.8, 0.001); break; }
+    case 'shell': for (let i = 0; i < 3; i++) { const o = Math.round((0.06 * i + 0.02 * Math.abs(rnd())) * SR), f = 4200 + 900 * i; let ph = 0; for (let k = 0; k < 0.07 * SR; k++) { ph += (2 * Math.PI * f) / SR; put(o + k, Math.sin(ph) * 0.06 * Math.exp(-k / (0.012 * SR)) / (i + 1)); } } break;
+    case 'stab': noise(0.1, 0.55, 0.85, 0.01, 'swell'); thump(150, 70, 0.08, 0.5); break;
+    case 'clang': for (const [f, g] of [[1250, 0.22], [2730, 0.14], [4100, 0.08], [5900, 0.05]] as [number, number][]) { let ph = 0; for (let k = 0; k < 0.7 * SR; k++) { ph += (2 * Math.PI * f) / SR; put(k, Math.sin(ph) * g * Math.exp(-(k / SR) * 7)); } } noise(0.03, 0.6, 0.9, 0.001); break;
   }
 }
 
@@ -644,7 +651,7 @@ Return ONLY JSON: {"title": "max 60 chars", "logline": "one sentence", "descript
 // STICKMAN — "VS" fight edits: two sides clash over rounds (speed vs strength,
 // a king vs an army, an engineer vs AI coding agents…), one side wins.
 // ===========================================================================
-/** 3D fight arenas (anim/arenas.ts): every round of a video in a different one. */
+/** 3D fight arenas (anim/arenas.ts): one per video, used for every stage of it. */
 export const FIGHT_LOCATIONS = ARENA_IDS;
 
 /** Built-in match-ups (offline, and when the writer is unavailable in dry runs). */
@@ -698,7 +705,7 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
   const pick = MATCHUPS[Math.abs(Math.floor(Number(CFG.partNumber) || 0)) % MATCHUPS.length];
   const j = got?.j || { title: pick.title, hook: pick.hook, verdict: pick.verdict, description: `${pick.sides[0].label} vs ${pick.sides[1].label} — who really wins? Tell us in the comments.`, hashtags: ['stickman', 'whowins', 'vs'], sides: pick.sides, rounds: pick.winners.map((w) => ({ winner: w })) };
   const defaults = [{ color: '#2f45b8' }, { color: '#b3150f' }];
-  const sides: VsSide[] = (j.sides as any[]).slice(0, 2).map((sd, i) => ({
+  let sides: VsSide[] = (j.sides as any[]).slice(0, 2).map((sd, i) => ({
     id: i ? 'B' : 'A', name: clean(sd.name, 20) || (i ? 'Strength' : 'Speed'), label: clean(sd.label || sd.name, 18).toUpperCase() || (i ? 'B' : 'A'),
     archetype: ARCHETYPES.includes(sd.archetype) ? sd.archetype : (i ? 'strength' : 'speed'),
     color: inkOn(String(sd.color || ''), defaults[i].color), count: clamp(Math.round(Number(sd.count) || 1), 1, shorts ? 8 : 10),
@@ -706,6 +713,8 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
   }));
   // Two sides in the same colour can't be told apart.
   if (String(sides[0].color || '').toLowerCase() === String(sides[1].color || '').toLowerCase()) { sides[0].color = defaults[0].color; sides[1].color = defaults[1].color; }
+  // Guns, blades and costumes for this video (seeded: every video is equipped differently).
+  sides = equipSides(sides, `${CFG.campaignId}:${CFG.partNumber}:${clean(j.title, 90)}`);
   // Rounds: best of N, the overall winner takes the last one.
   let rounds: VsRound[] = (j.rounds as any[]).slice(0, nRounds).map((r) => ({
     winner: r.winner === 'B' ? 'B' : 'A',
@@ -742,7 +751,8 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
   sfx.push({ t: 0.25, kind: 'boom' });
   const fightLen = shorts ? 12 : 20;
   const fights: any[] = [];
-  const arenaIds = arenaOrder(`${CFG.campaignId}:${CFG.partNumber}:${title}`, rounds.length);
+  // ONE arena for the whole video (every stage, the intro and the outro); the next video gets another.
+  const arenaId = arenaOrder(`${CFG.campaignId}:${CFG.partNumber}:${title}`, 1)[0];
   let t = introEnd;
   rounds.forEach((r, ri) => {
     const start = t;
@@ -753,14 +763,16 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
     const ch = choreograph(fs0, beats, { start: cardEnd + 0.25, lineDur: (text) => (lineClip.get(text)?.duration || 1) });
     ch.lines.forEach((l) => { const c = lineClip.get(l.text); if (c) { placed.push({ at: l.t + 0.05, clip: c, speaker: l.actor, tags: [] }); l.end = l.t + c.duration + 0.2; } });
     sfx.push(...ch.sfx);
+    // Bullet hits and ricochets, brass falling after every shot.
+    for (const p of ch.projectiles || []) if (p.kind === 'bullet') { sfx.push({ t: p.t1, kind: p.miss ? 'ricochet' : 'bulletHit' }); sfx.push({ t: p.t0 + 0.42, kind: 'shell' }); }
     for (const im of ch.impacts) {
       if (im.kind === 'down' || im.kind === 'launchFar') sfx.push({ t: im.t + (im.kind === 'launchFar' ? 0.7 : 0.4), kind: 'thud' });
       if (im.kind === 'land') sfx.push({ t: im.t, kind: im.strength >= 1.5 ? 'heavy' : 'thud' });
-      if (im.kind === 'parry') sfx.push({ t: im.t, kind: 'slash' });
+      if (im.kind === 'parry') sfx.push({ t: im.t, kind: 'clang' });
       if (im.ground) sfx.push({ t: im.t + 0.05, kind: 'crumble' });
     }
     const end = cardEnd + 0.25 + ch.duration;
-    fights.push({ start, cardEnd, end, location: arenaIds[ri], time: 'day', card: '', round: ri + 1, final: ri === rounds.length - 1, winner: r.winner, choreo: ch, health: roundHealth(ch, fighters, r.winner) });
+    fights.push({ start, cardEnd, end, location: arenaId, time: 'day', card: '', round: ri + 1, final: ri === rounds.length - 1, winner: r.winner, choreo: ch, health: roundHealth(ch, fighters, r.winner) });
     t = end;
   });
   const outroStart = t;

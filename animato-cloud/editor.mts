@@ -42,8 +42,8 @@ const JOB_ID = String(CP.job_id || ENV.EDITOR_JOB_ID || 'local');
 const APP = String(CP.app_url || ENV.APP_URL || '').replace(/\/+$/, '');
 const RUN_URL = ENV.GITHUB_RUN_ID ? `${ENV.GITHUB_SERVER_URL || 'https://github.com'}/${ENV.GITHUB_REPOSITORY}/actions/runs/${ENV.GITHUB_RUN_ID}` : '';
 const keys = (v: any) => String(v || '').split(/[\s,;]+/).map((x) => x.trim()).filter((x) => x.length > 8);
-const GEMINI = keys(AUTH.gemini_api_keys || ENV.GEMINI_API_KEYS);
-const GROQ = keys(AUTH.groq_api_keys || ENV.GROQ_API_KEYS);
+const GEMINI: string[] = [];   // no AI API keys: the models run on this runner
+const GROQ: string[] = [];     // speech → text: faster-whisper on this runner (below)
 if (ENV.GITHUB_ACTIONS === 'true') for (const s of [AUTH.runner_key, ...GEMINI, ...GROQ]) if (s && String(s).length > 6) console.log(`::add-mask::${s}`);
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -55,7 +55,8 @@ const FPS = 30;
 const log = (m: string) => console.log(`[${new Date().toISOString().slice(11, 19)}] ${m}`);
 class EditError extends Error {}
 
-const LLM = new LlmPool({ geminiKeys: GEMINI, groqKeys: GROQ, log, seed: Date.now() % 997 });
+// The planner is the self-hosted model started by the workflow on this runner (no API keys).
+const LLM = new LlmPool({ localUrl: ENV.LOCAL_LLM_URL || 'http://127.0.0.1:8080/v1', visionUrl: ENV.LOCAL_VLM_URL || undefined, log });
 
 let lastReport = 0;
 async function report(status: string, step: string, progress: number, logLine = '', extra: any = {}) {

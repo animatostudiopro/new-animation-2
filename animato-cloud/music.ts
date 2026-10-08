@@ -7,7 +7,7 @@
  * channel. No third-party music, no attribution, no Content ID claims.
  *
  * Moods: story (warm), emotional (piano), mystery, horror, news, tech, upbeat,
- * action (fights: driving drums and power chords), comedy (bouncy, playful).
+ * action (fights: a trailer-style score — taikos, string ostinato, braams, risers), comedy (bouncy, playful).
  * A seed (campaign + part) varies the key, tempo, progression and patterns, so
  * no two videos sound identical. Pure TypeScript with no imports, so it runs in
  * Node (the cloud renderer) and in the browser (the app) alike.
@@ -251,17 +251,39 @@ function compose(bus: Bus, mood: MusicMood, seconds: number, r: ReturnType<typeo
         break;
       }
       case 'action': {
-        // Driving 8th-note bass, kick on every beat, snare on 2 and 4, power-chord stabs, a 16th hat.
-        const pc = [ch[0], ch[0] + 7, ch[0] + 12];
-        for (let i = 0; i < 8; i++) note(bus, { table: BASS, hz: midiHz(ch[0] - 12), start: t0 + i * beat / 2, dur: beat * 0.38, gain: 0.06, attack: 0.003, pluck: 0.14, release: 0.04, cutoff: 1000, reverb: 0.03 });
-        if (full) {
-          for (let i = 0; i < 4; i++) kick(bus, t0 + i * beat, 0.2);
-          for (const i of [1, 3]) noiseHit(bus, t0 + i * beat, 0.11, 0.07, 0.55, 0, r.next);
-          for (let i = 0; i < 16; i++) noiseHit(bus, t0 + i * beat / 4, i % 2 ? 0.014 : 0.022, 0.012, 0.98, 0.3, r.next);
-          for (const at of [0, 1.5, 3]) for (const m of pc) note(bus, { table: SAW, hz: midiHz(m + 12), start: t0 + at * beat, dur: beat * 0.45, gain: 0.022, pan: m === pc[1] ? 0.3 : -0.3, attack: 0.004, decay: 0.1, sustain: 0.6, release: 0.08, cutoff: 2400, reverb: 0.15 });
-        } else {
-          for (let i = 0; i < 16; i++) noiseHit(bus, t0 + i * beat / 4, 0.012, 0.012, 0.98, 0.3, r.next);
+        // Modern action / trailer score, building every 8 bars:
+        //  taiko-style toms + a big low hit, a staccato low-string ostinato (3-3-2 accents),
+        //  braams (low brass swells) on each phrase, snare rolls + a rising sweep into the next
+        //  section, power-chord stabs and 16th hats once it is at full intensity.
+        const phrase = Math.floor(b / 8), inPhrase = b % 8;
+        const level = !full ? 0 : Math.min(3, 1 + phrase);                 // 1 → 3
+        const root = ch[0];
+        // Ostinato: 16ths of root / octave / fifth, accented 3-3-2.
+        const ost = [0, 12, 7, 12, 0, 12, 7, 12, 0, 12, 7, 12, 0, 12, 7, 15];
+        for (let i = 0; i < 16; i++) {
+          const acc = [0, 3, 6, 8, 11, 14].includes(i);
+          note(bus, { table: SAW, hz: midiHz(root - 12 + ost[i]), start: t0 + i * beat / 4, dur: beat * 0.16, gain: (acc ? 0.034 : 0.019) * (level ? 1 : 0.7), pan: i % 2 ? 0.25 : -0.25, attack: 0.003, decay: 0.05, sustain: 0.5, release: 0.04, cutoff: acc ? 1800 : 1200, reverb: 0.12 });
         }
+        // Sub bass on the accents.
+        for (const i of [0, 3, 6]) note(bus, { table: BASS, hz: midiHz(root - 24), start: t0 + i * beat / 2, dur: beat * 0.9, gain: 0.07, attack: 0.004, pluck: 0.5, release: 0.08, cutoff: 260, reverb: 0.02 });
+        // Braam at the top of every 4 bars (low brass cluster swelling open).
+        if (b % 4 === 0 && level >= 1) for (const [m, g] of [[root - 12, 0.05], [root - 5, 0.035], [root, 0.03]] as [number, number][]) {
+          note(bus, { table: SAW, hz: midiHz(m), start: t0, dur: bar * 1.5, gain: g, pan: m === root ? 0.2 : -0.2, attack: 0.06, decay: 0.6, sustain: 0.7, release: 0.9, cutoff: 700 + level * 200, detune: 0.006, reverb: 0.4 });
+          note(bus, { table: SAW, hz: midiHz(m), start: t0, dur: bar * 1.5, gain: g * 0.8, pan: m === root ? -0.2 : 0.2, attack: 0.07, decay: 0.6, sustain: 0.7, release: 0.9, cutoff: 650 + level * 200, detune: -0.006, reverb: 0.4 });
+        }
+        // Taikos: a heavy pattern that gets busier with the level.
+        const taiko = level >= 3 ? [0, 0.75, 1.5, 2, 2.5, 3, 3.25, 3.5] : level === 2 ? [0, 0.75, 1.5, 2.5, 3] : level === 1 ? [0, 1.5, 2.5] : [0];
+        for (const at of taiko) { kick(bus, t0 + at * beat, at === 0 ? 0.32 : 0.2); noiseHit(bus, t0 + at * beat, at === 0 ? 0.05 : 0.03, 0.05, 0.25, at % 1 ? 0.3 : -0.3, r.next); }
+        if (level >= 2) for (const i of [1, 3]) noiseHit(bus, t0 + i * beat, 0.1, 0.08, 0.6, 0, r.next);       // snare backbeat
+        if (level >= 3) for (let i = 0; i < 16; i++) noiseHit(bus, t0 + i * beat / 4, i % 2 ? 0.012 : 0.02, 0.012, 0.98, 0.3, r.next);
+        if (level >= 2) for (const at of [0, 1.5, 3]) for (const m of [root, root + 7, root + 12]) note(bus, { table: SAW, hz: midiHz(m + 12), start: t0 + at * beat, dur: beat * 0.4, gain: 0.018, pan: m === root + 7 ? 0.3 : -0.3, attack: 0.004, decay: 0.1, sustain: 0.6, release: 0.08, cutoff: 2600, reverb: 0.15 });
+        // Last bar of a phrase: snare roll crescendo + a rising sweep into the next section.
+        if (inPhrase === 7 && level >= 1) {
+          for (let i = 0; i < 16; i++) noiseHit(bus, t0 + 2 * beat + i * beat / 8, 0.02 + 0.07 * (i / 15), 0.03, 0.7, (i % 2 ? 0.2 : -0.2), r.next);
+          for (let i = 0; i < 6; i++) note(bus, { table: SAW, hz: midiHz(root + 12 + i * 2), start: t0 + i * beat * 0.66, dur: beat * 0.7, gain: 0.008 + i * 0.003, pan: 0, attack: 0.1, decay: 0.2, sustain: 0.8, release: 0.1, cutoff: 1500 + i * 600, reverb: 0.5 });
+        }
+        // Section downbeat: a big impact.
+        if (inPhrase === 0 && b > 0) { kick(bus, t0, 0.45); noiseHit(bus, t0, 0.14, 0.25, 0.3, 0, r.next); note(bus, { table: SINE, hz: midiHz(root - 24), start: t0, dur: bar, gain: 0.12, attack: 0.002, pluck: 1.2, release: 0.6, reverb: 0.3 }); }
         break;
       }
       case 'comedy': {

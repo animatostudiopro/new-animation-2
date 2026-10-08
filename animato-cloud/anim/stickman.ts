@@ -91,6 +91,11 @@ export const POSES: Record<string, Pose> = {
   feint: P(10, -4, 70, 70, 30, 130, 28, 20, -26, 20, -6),
   stalk1: P(10, -4, 64, 112, 42, 120, 30, 22, -16, 18, -6),
   stalk2: P(10, -4, 70, 106, 38, 124, 14, 18, -28, 24, -6),
+  // Weapons
+  aim: P(6, -4, 88, -4, 70, 26, 26, 20, -24, 22, -6),
+  aimKick: P(-2, -2, 96, -12, 78, 22, 26, 20, -24, 22, -6),
+  stabWind: P(-6, 0, 30, 140, 10, 130, 26, 20, -20, 20, -4),
+  stab: P(28, -8, 90, 0, 30, 120, 36, 16, -38, 14, -10),
 };
 
 export interface Key { pose: string; at: number } // at: seconds from action start
@@ -115,7 +120,7 @@ export interface ActionDef {
   /** Everyone of the other side within this distance of the landing point is hit. */
   aoe?: number;
   /** A travelling energy attack. */
-  projectile?: 'orb' | 'beam';
+  projectile?: 'orb' | 'beam' | 'bullet';
   /** Damage (per blow for multi-hit moves). */
   dmg?: number;
   /** Effect size: bigger shake, flash, debris. */
@@ -130,6 +135,11 @@ export interface ActionDef {
 }
 
 export const ACTIONS: Record<string, ActionDef> = {
+  // Guns: a three-round burst (recoil on every shot), knives: quick stabs and slash combos, a combat roll.
+  shoot: { keys: [{ pose: 'guard', at: 0 }, { pose: 'aim', at: 0.14 }, { pose: 'aimKick', at: 0.2 }, { pose: 'aim', at: 0.27 }, { pose: 'aimKick', at: 0.33 }, { pose: 'aim', at: 0.4 }, { pose: 'aimKick', at: 0.46 }, { pose: 'aim', at: 0.62 }, { pose: 'guard', at: 0.85 }], dur: 0.85, impact: 0.46, hits: [0.2, 0.33, 0.46], reach: 1700, projectile: 'bullet', effect: 'hit', dmg: 7, power: 0.9, sfx: 'gun', hitSfx: 'gun' },
+  stab: { keys: [{ pose: 'guard', at: 0 }, { pose: 'stabWind', at: 0.1 }, { pose: 'stab', at: 0.19 }, { pose: 'stab', at: 0.3 }, { pose: 'guard', at: 0.5 }], dur: 0.5, impact: 0.19, travel: 26, reach: 92, effect: 'hit', dmg: 9, sfx: 'stab' },
+  knifeCombo: { keys: [{ pose: 'guard', at: 0 }, { pose: 'stabWind', at: 0.08 }, { pose: 'stab', at: 0.16 }, { pose: 'slashWind', at: 0.3 }, { pose: 'slash', at: 0.4 }, { pose: 'slash', at: 0.5 }, { pose: 'guard', at: 0.7 }], dur: 0.7, impact: 0.4, hits: [0.16, 0.4], travel: 34, reach: 100, effect: 'launch', dmg: 9, power: 1.1, sfx: 'slash', hitSfx: 'stab' },
+  roll: { keys: [{ pose: 'guard', at: 0 }, { pose: 'crouch', at: 0.08 }, { pose: 'flipTuck', at: 0.22 }, { pose: 'flipTuck', at: 0.4 }, { pose: 'crouch', at: 0.52 }, { pose: 'guard', at: 0.68 }], dur: 0.68, travel: -150, spin: -360, sfx: 'whoosh' },
   idle: { keys: [{ pose: 'guard', at: 0 }, { pose: 'guardB', at: 0.28 }, { pose: 'guard', at: 0.56 }], dur: 0.56, loop: true },
   stand: { keys: [{ pose: 'stand', at: 0 }], dur: 1, loop: true },
   run: { keys: [{ pose: 'run1', at: 0 }, { pose: 'run2', at: 0.17 }, { pose: 'run1', at: 0.34 }], dur: 0.34, loop: true },
@@ -195,11 +205,11 @@ export const ACTIONS: Record<string, ActionDef> = {
 };
 
 export const ATTACKS = Object.keys(ACTIONS).filter((k) => ACTIONS[k].impact !== undefined);
-export const MOVES = ['run', 'dash', 'jump', 'dodge', 'duck', 'block', 'parry', 'feint', 'stalk', 'backflip', 'frontflip', 'slide', 'blink', 'taunt', 'flex', 'victory', 'getup', 'idle', ...ATTACKS];
+export const MOVES = ['roll', 'run', 'dash', 'jump', 'dodge', 'duck', 'block', 'parry', 'feint', 'stalk', 'backflip', 'frontflip', 'slide', 'blink', 'taunt', 'flex', 'victory', 'getup', 'idle', ...ATTACKS];
 /** Reactions that end with the fighter on the floor. */
 const FLOORED = new Set(['down', 'launchFar', 'thrown', 'spiked', 'juggled']);
 /** Defensive answers the choreographer resolves against the blow before them. */
-const DEFENCES = ['block', 'dodge', 'duck', 'backflip', 'parry'];
+const DEFENCES = ['block', 'dodge', 'duck', 'backflip', 'parry', 'roll'];
 
 // ---------------------------------------------------------------------------
 // Interpolation
@@ -250,7 +260,7 @@ export function poseOf(action: string, local: number): Pose {
 // ---------------------------------------------------------------------------
 export interface Beat { actor: string; action: string; target?: string; line?: string; /** The blow ends the round for the target: down and out. */ ko?: boolean; /** Slow motion (time stretch) for a finisher. */ slow?: number }
 export interface Fighter {
-  id: string; name: string; color: string; weapon?: 'none' | 'sword' | 'staff'; x: number;
+  id: string; name: string; color: string; weapon?: Weapon; x: number;
   /** Fighters on the same team never hit each other (default: everyone is their own team). */
   team?: string;
   /** How the fighter closes the distance. */
@@ -260,12 +270,13 @@ export interface Clip { start: number; end: number; action: string; x0: number; 
 export interface ImpactFx { t: number; x: number; y: number; kind: string; strength: number; target?: string; attacker?: string; dmg?: number; ko?: boolean; ground?: boolean; move?: string }
 export interface Sfx { t: number; kind: string }
 export interface Line { t: number; end: number; actor: string; text: string }
-export interface Projectile { t0: number; t1: number; x0: number; x1: number; y: number; kind: 'orb' | 'beam'; owner: string }
+export interface Projectile { t0: number; t1: number; x0: number; x1: number; y: number; kind: 'orb' | 'beam' | 'bullet'; owner: string; target?: string; miss?: boolean }
 export interface Focus { t: number; a: string; b?: string }
 export interface Choreo { duration: number; clips: Record<string, Clip[]>; impacts: ImpactFx[]; sfx: Sfx[]; lines: Line[]; projectiles?: Projectile[]; focus?: Focus[]; ko?: string[]; slowmo?: { t0: number; t1: number }[] }
 
 const SPEED: Record<string, number> = { run: 520, dash: 2600, walk: 230 };
 const ORB_SPEED = 1900;
+const BULLET_SPEED = 6000;
 
 /**
  * Lays the beats out in time. `lineDur` gives the spoken length of a beat's
@@ -453,14 +464,23 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
     if (def === 'dashSlash') face[actor.id] = face[actor.id] === 1 ? -1 : 1;
     if (target && A.impact !== undefined) {
       let at = start + A.impact;
-      if (A.projectile) {
+      const nb = beats[bi + 1];
+      const defended = !b.ko && !isAirCombo && nb && nb.actor === target.id && DEFENCES.includes(nb.action) && !A.aoe;
+      if (A.projectile === 'bullet') {
+        // Each shot of the burst is its own tracer; dodged bullets fly past into the arena.
+        const from = clips[actor.id][clips[actor.id].length - 1].x0 + face[actor.id] * 50;
+        const gap = Math.abs(pos[target.id] - from);
+        const miss = !!defended;
+        for (const h of (A.hits && A.hits.length ? A.hits : [A.impact])) {
+          projectiles.push({ t0: start + h, t1: start + h + (miss ? gap + 900 : gap) / BULLET_SPEED, x0: from, x1: miss ? pos[target.id] + face[actor.id] * 900 : pos[target.id], y: 157, kind: 'bullet', owner: actor.id, target: target.id, miss });
+        }
+        at += gap / BULLET_SPEED;
+      } else if (A.projectile) {
         const from = clips[actor.id][clips[actor.id].length - 1].x0 + face[actor.id] * 50;
         const gap = Math.abs(pos[target.id] - from);
         if (A.projectile === 'orb') at += gap / ORB_SPEED;
         projectiles.push({ t0: start + A.impact, t1: at + (A.projectile === 'beam' ? 0.45 : 0), x0: from, x1: pos[target.id], y: 118, kind: A.projectile, owner: actor.id });
       }
-      const nb = beats[bi + 1];
-      const defended = !b.ko && !isAirCombo && nb && nb.actor === target.id && DEFENCES.includes(nb.action) && !A.aoe;
       // Multi-hit: the target staggers through the blows, then takes the last one.
       if (A.hits && A.hits.length > 1 && !defended && isAirCombo) {
         // Air combo: the blows land on the airborne target (no stagger), the last one spikes it down.
@@ -650,9 +670,13 @@ export function joints(p: Pose, facing: 1 | -1): Joints {
   return { hip, neck, head, sF: sh, eF, hF, eB, hB, kF, fF, kB, fB };
 }
 
+export type Weapon = 'none' | 'sword' | 'staff' | 'rifle' | 'pistol' | 'knife' | 'bat';
+export const GUNS = new Set<Weapon>(['rifle', 'pistol']);
+/** Costume pieces drawn over the stick figure (colours). */
+export interface Outfit { vest?: string; belt?: string; scarf?: string; gloves?: string; bandana?: string; mask?: string }
 export type Gear = 'none' | 'headband' | 'crown' | 'cape' | 'visor' | 'glasses' | 'hardhat' | 'helmet' | 'hood' | 'antenna';
 export interface StickStyle {
-  ink: string; accent: string; width: number; weapon?: 'none' | 'sword' | 'staff'; glow?: string;
+  ink: string; accent: string; width: number; weapon?: Weapon; outfit?: Outfit; glow?: string;
   /** Solid-colour body (fight-edit look): the whole figure in `ink`, no headband. */
   solid?: boolean;
   gear?: Gear;
@@ -675,7 +699,7 @@ export const hipHeight = (size = 1) => (BONES.thigh + BONES.shin - 6) * size;
  */
 export function drawFighter(ctx: CanvasRenderingContext2D, p: Pose, facing: 1 | -1, x: number, groundY: number, lift: number, scale: number, st: StickStyle, alpha = 1) {
   if (st.outline) {
-    drawFighter(ctx, p, facing, x, groundY, lift, scale, { ...st, ink: st.outline, accent: st.outline, width: st.width + 5, outline: undefined, glow: undefined, headPad: 2.6, gear: 'none', solid: true }, alpha * 0.9);
+    drawFighter(ctx, p, facing, x, groundY, lift, scale, { ...st, ink: st.outline, accent: st.outline, width: st.width + 5, outline: undefined, glow: undefined, headPad: 2.6, gear: 'none', solid: true, outfit: undefined, weapon: undefined }, alpha * 0.9);
   }
   const J = joints(p, facing);
   const size = st.size || 1;
@@ -713,15 +737,9 @@ export function drawFighter(ctx: CanvasRenderingContext2D, p: Pose, facing: 1 | 
   ctx.globalAlpha = alpha;
   seg([J.hip, J.neck], W * 1.1, ink);
   seg([J.hip, J.kF, J.fF], W, ink);
-  // Weapon in the front hand.
-  if (st.weapon === 'sword' || st.weapon === 'staff') {
-    const ang = Math.atan2(J.hF[1] - J.eF[1], J.hF[0] - J.eF[0]);
-    const len = st.weapon === 'sword' ? 70 : 95;
-    const tip: [number, number] = [J.hF[0] + Math.cos(ang) * len, J.hF[1] + Math.sin(ang) * len];
-    const bk: [number, number] = [J.hF[0] - Math.cos(ang) * (st.weapon === 'staff' ? 40 : 10), J.hF[1] - Math.sin(ang) * (st.weapon === 'staff' ? 40 : 10)];
-    seg([bk, tip], st.weapon === 'sword' ? 4 : 5, st.weapon === 'sword' ? (st.solid ? '#6b7280' : '#e5e7eb') : '#8b5a2b');
-    if (st.weapon === 'sword') seg([[J.hF[0] - Math.sin(ang) * 9, J.hF[1] + Math.cos(ang) * 9], [J.hF[0] + Math.sin(ang) * 9, J.hF[1] - Math.cos(ang) * 9]], 5, st.solid ? '#111827' : st.accent);
-  }
+  if (st.outfit) drawOutfitBody(ctx, J, st, p, facing);
+  // Weapon in the front hand (drawn under the front arm so the hand grips it).
+  if (st.weapon && st.weapon !== 'none') drawWeapon(ctx, J, st);
   seg([J.sF, J.eF, J.hF], W, ink);
   ctx.shadowBlur = 0;
   // Head
@@ -761,8 +779,100 @@ export function drawFighter(ctx: CanvasRenderingContext2D, p: Pose, facing: 1 | 
     const b = up(hr), tip = up(hr + 16);
     seg([b, tip], 3, ink); ctx.beginPath(); ctx.arc(tip[0], tip[1], 4.5, 0, Math.PI * 2); ctx.fillStyle = '#f43f5e'; ctx.fill();
   }
+  if (st.outfit) drawOutfitHead(ctx, J, st, p, facing, hr);
   if (!st.solid) { ctx.beginPath(); ctx.arc(J.hip[0], J.hip[1] - 4, 5, 0, Math.PI * 2); ctx.fillStyle = st.accent; ctx.fill(); }
   ctx.restore();
+}
+
+/** Muzzle / blade tip of the held weapon, in figure units (hip at 0,0). */
+export function weaponTip(J: Joints, w: Weapon | undefined): [number, number] {
+  const ang = Math.atan2(J.hF[1] - J.eF[1], J.hF[0] - J.eF[0]);
+  const len = w === 'rifle' ? 62 : w === 'pistol' ? 24 : w === 'knife' ? 30 : w === 'bat' ? 62 : w === 'staff' ? 95 : 70;
+  return [J.hF[0] + Math.cos(ang) * len, J.hF[1] + Math.sin(ang) * len];
+}
+
+function drawWeapon(ctx: CanvasRenderingContext2D, J: Joints, st: StickStyle) {
+  const w = st.weapon!;
+  const ang = Math.atan2(J.hF[1] - J.eF[1], J.hF[0] - J.eF[0]);
+  const c = Math.cos(ang), sn = Math.sin(ang);
+  const at = (along: number, side = 0): [number, number] => [J.hF[0] + c * along - sn * side, J.hF[1] + sn * along + c * side];
+  const line = (a: [number, number], b: [number, number], wd: number, col: string) => { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.strokeStyle = col; ctx.lineWidth = wd; ctx.stroke(); };
+  const poly = (pts: [number, number][], col: string) => { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (const q of pts.slice(1)) ctx.lineTo(q[0], q[1]); ctx.closePath(); ctx.fillStyle = col; ctx.fill(); };
+  const metal = '#2b2f36', edge = '#9aa3ad', hi = '#d6dbe1';
+  // Which side of the barrel is "down" (grip / magazine): away from the head.
+  const flip = (J.head[1] < J.hF[1] ? 1 : -1) * (c >= 0 ? 1 : -1);
+  if (w === 'rifle') {
+    poly([at(-26, -4), at(40, -4), at(40, 4), at(-26, 5)], metal);              // body
+    line(at(38, -1), at(62, -1), 3.2, metal);                                       // barrel
+    line(at(48, -4.5), at(58, -4.5), 2, edge);                                      // gas tube
+    poly([at(-26, -4), at(-44, -2), at(-46, 9), at(-26, 6)], '#3a3f47');            // stock
+    poly([at(6, 4 * flip), at(15, 4 * flip), at(19, 17 * flip), at(10, 18 * flip)], '#1c1f24'); // magazine
+    poly([at(-6, 4 * flip), at(0, 4 * flip), at(-3, 13 * flip), at(-9, 12 * flip)], '#1c1f24'); // grip
+    line(at(-10, -6.5), at(20, -6.5), 2.4, '#1c1f24');                              // rail / sight
+    line(at(-22, -2), at(36, -2), 1.2, hi);                                         // highlight
+  } else if (w === 'pistol') {
+    poly([at(-4, -4), at(24, -4), at(24, 3), at(-4, 3)], metal);
+    poly([at(-4, 3 * flip), at(4, 3 * flip), at(2, 15 * flip), at(-6, 14 * flip)], '#1c1f24');
+    line(at(-2, -2.5), at(22, -2.5), 1.2, hi);
+  } else if (w === 'knife') {
+    line(at(-8, 0), at(4, 0), 5, '#1c1f24');
+    poly([at(4, -3), at(26, -2), at(31, 0.5), at(4, 3)], edge);
+    line(at(6, -1.4), at(27, -1), 1.2, '#f8fafc');
+    line(at(4, -5), at(4, 5), 3, '#1c1f24');
+  } else if (w === 'bat') {
+    poly([at(-12, -2.2), at(30, -3.2), at(62, -5.5), at(64, 0), at(62, 5.5), at(30, 3.2), at(-12, 2.2)], '#9a6b3f');
+    line(at(-12, 0), at(0, 0), 5.5, '#2d2a26');
+    line(at(10, -2), at(58, -3.8), 1.3, '#c99a63');
+  } else if (w === 'sword') {
+    line(at(-12, 0), at(70, 0), 4, st.solid ? '#cbd5e1' : '#e5e7eb');
+    line(at(4, -0.8), at(66, -0.8), 1.2, '#ffffff');
+    line(at(0, -9), at(0, 9), 5, st.solid ? '#111827' : st.accent);
+  } else if (w === 'staff') {
+    line(at(-40, 0), at(95, 0), 5, '#8b5a2b');
+  }
+}
+
+function drawOutfitBody(ctx: CanvasRenderingContext2D, J: Joints, st: StickStyle, p: Pose, facing: 1 | -1) {
+  const o = st.outfit!; const W = st.width;
+  const tx = J.neck[0] - J.hip[0], ty = J.neck[1] - J.hip[1], len = Math.hypot(tx, ty) || 1, ux = tx / len, uy = ty / len;
+  const pt = (a: number, side = 0): [number, number] => [J.hip[0] + ux * a - uy * side, J.hip[1] + uy * a + ux * side];
+  ctx.lineCap = 'round';
+  if (o.scarf) {
+    // Two tails streaming behind, rippling with the body's lean.
+    const n = pt(len - 6), wv = Math.sin(p.lean * 0.15 + p.aF * 0.05) * 6;
+    ctx.strokeStyle = o.scarf; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(n[0], n[1]); ctx.quadraticCurveTo(n[0] - 22 * facing, n[1] + 4 + wv, n[0] - 44 * facing, n[1] + 12 - wv); ctx.stroke();
+    ctx.lineWidth = 4.5; ctx.beginPath(); ctx.moveTo(n[0], n[1] + 2); ctx.quadraticCurveTo(n[0] - 18 * facing, n[1] + 14 - wv, n[0] - 36 * facing, n[1] + 26 + wv); ctx.stroke();
+    ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(n[0] - 5 * facing, n[1] - 2); ctx.lineTo(n[0] + 5 * facing, n[1] + 1); ctx.stroke();
+  }
+  if (o.vest) {
+    const a = pt(len - 8, -W * 1.05), b = pt(len - 8, W * 1.05), c = pt(14, W * 1.0), d = pt(14, -W * 1.0);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(d[0], d[1]); ctx.closePath(); ctx.fillStyle = o.vest; ctx.fill();
+    for (const k of [0.38, 0.6]) { const q = pt(len * k, W * 0.55 * facing); ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(q[0] - 4, q[1] - 4, 8, 8); }
+    const s1 = pt(len - 8, -W * 0.6), s2 = pt(len * 0.35, W * 0.8); ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
+  }
+  if (o.belt) { const a = pt(6, -W * 0.95), b = pt(6, W * 0.95); ctx.strokeStyle = o.belt; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); const m = pt(6); ctx.fillStyle = '#d4a017'; ctx.fillRect(m[0] - 3, m[1] - 3, 6, 6); }
+}
+
+function drawOutfitHead(ctx: CanvasRenderingContext2D, J: Joints, st: StickStyle, p: Pose, facing: 1 | -1, hr: number) {
+  const o = st.outfit!;
+  if (o.gloves) for (const h of [J.hF, J.hB]) { ctx.beginPath(); ctx.arc(h[0], h[1], st.width * 0.72, 0, Math.PI * 2); ctx.fillStyle = o.gloves; ctx.fill(); }
+  const hb = Math.atan2(J.head[1] - J.neck[1], J.head[0] - J.neck[0]);
+  if (o.bandana) {
+    const bx = J.head[0] - Math.cos(hb) * 4, by = J.head[1] - Math.sin(hb) * 4;
+    ctx.beginPath(); ctx.arc(bx, by, hr * 0.99, hb + Math.PI / 2 - 1.0, hb + Math.PI / 2 + 1.0); ctx.strokeStyle = o.bandana; ctx.lineWidth = 6; ctx.stroke();
+    const k: [number, number] = [J.head[0] - 13 * facing, J.head[1] + 1], wv = Math.sin(p.lean * 0.2 + p.head * 0.3) * 7;
+    ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(k[0], k[1]); ctx.quadraticCurveTo(k[0] - 16 * facing, k[1] + 2 + wv, k[0] - 34 * facing, k[1] + 10 - wv); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(k[0], k[1] + 2); ctx.quadraticCurveTo(k[0] - 14 * facing, k[1] + 12 - wv, k[0] - 28 * facing, k[1] + 20 + wv); ctx.stroke();
+  }
+  if (o.mask) {
+    // Lower-face mask with a bright eye slit above it.
+    ctx.save(); ctx.beginPath(); ctx.arc(J.head[0], J.head[1], hr + 0.5, 0, Math.PI * 2); ctx.clip();
+    const ex = J.head[0] + Math.cos(hb + Math.PI / 2 * facing) * 0, ey = J.head[1];
+    ctx.fillStyle = o.mask; ctx.save(); ctx.translate(J.head[0], J.head[1]); ctx.rotate(hb + Math.PI / 2); ctx.fillRect(-hr - 2, -1, hr * 2 + 4, hr + 3); ctx.restore();
+    ctx.restore();
+    ctx.save(); ctx.translate(ex, ey); ctx.rotate(hb + Math.PI / 2); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(facing > 0 ? 2 : -hr + 1, -4.5, hr - 3, 2.6); ctx.restore();
+  }
 }
 
 function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -775,7 +885,7 @@ function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: num
 export type Archetype = 'speed' | 'strength' | 'tech' | 'magic' | 'sword' | 'brawler' | 'ninja';
 export const ARCHETYPES: Archetype[] = ['speed', 'strength', 'tech', 'magic', 'sword', 'brawler', 'ninja'];
 
-interface MoveSet { approach: 'run' | 'dash' | 'walk'; attacks: [string, number][]; defend: string[]; defendRate: number; finisher: string[]; openers: string[]; size: number; weapon: 'none' | 'sword' | 'staff' }
+interface MoveSet { approach: 'run' | 'dash' | 'walk'; attacks: [string, number][]; defend: string[]; defendRate: number; finisher: string[]; openers: string[]; size: number; weapon: Weapon }
 export const MOVESETS: Record<Archetype, MoveSet> = {
   speed: { approach: 'dash', attacks: [['flurry', 3], ['jab', 2], ['combo', 2], ['kick', 2], ['roundhouse', 1], ['flyingKnee', 1], ['sweep', 1], ['blink', 2]], defend: ['dodge', 'dodge', 'backflip', 'duck', 'parry'], defendRate: 0.5, finisher: ['flurry', 'tornadoKick', 'flyingKick', 'juggle'], openers: ['blink', 'dash'], size: 0.95, weapon: 'none' },
   strength: { approach: 'walk', attacks: [['heavyPunch', 3], ['slam', 2], ['uppercut', 2], ['punch', 2], ['elbow', 1], ['axeKick', 1], ['throw', 1]], defend: ['block', 'block', 'parry'], defendRate: 0.4, finisher: ['heavyPunch', 'slam', 'throw'], openers: ['flex'], size: 1.22, weapon: 'none' },
@@ -800,10 +910,10 @@ const EXCHANGES: Record<Archetype, [string, number][]> = {
   brawler: [['trade', 3], ['string', 2], ['throw', 2], ['blockCounter', 2], ['clash', 1], ['sweep', 1], ['feint', 1]],
   ninja: [['juggle', 2], ['chase', 2], ['sweep', 2], ['string', 2], ['parryPunish', 1], ['blinkStrike', 1], ['standoff', 1]],
 };
-const LAUNCHERS = ['kick', 'roundhouse', 'uppercut', 'tornadoKick', 'flyingKnee', 'heavyPunch', 'axeKick', 'slash'];
-const SHORT_HITS = ['jab', 'punch', 'combo', 'elbow', 'kick', 'slash'];
+const LAUNCHERS = ['knifeCombo', 'kick', 'roundhouse', 'uppercut', 'tornadoKick', 'flyingKnee', 'heavyPunch', 'axeKick', 'slash'];
+const SHORT_HITS = ['jab', 'punch', 'combo', 'elbow', 'kick', 'slash', 'stab'];
 
-export interface VsSide { id: 'A' | 'B'; name: string; label: string; archetype: Archetype; color: string; count: number; gear?: Gear }
+export interface VsSide { id: 'A' | 'B'; name: string; label: string; archetype: Archetype; color: string; count: number; gear?: Gear; weapon?: Weapon; outfit?: Outfit }
 export interface VsRound { winner: 'A' | 'B'; lines?: { side: 'A' | 'B'; when: 'start' | 'end'; text: string }[] }
 
 export function rng(seedText: string) {
@@ -825,8 +935,8 @@ export function vsFighters(sides: VsSide[]): (Fighter & { side: 'A' | 'B'; arche
       const crowd = n > 1;
       out.push({
         id: n === 1 ? s.id : `${s.id}${i + 1}`, name: n === 1 ? s.name : `${s.name} ${i + 1}`, color: s.color, team: s.id, side: s.id, archetype: s.archetype,
-        x: dir * (230 + i * 120), approach: ms.approach, weapon: ms.weapon,
-        style: { ink: s.color, accent: s.color, width: crowd ? 10 : 11.5, solid: true, gear: s.gear || 'none', size: crowd ? ms.size * 0.9 : ms.size, weapon: ms.weapon, squareHead: s.gear === 'antenna' || /\b(ai|bot|robot|agent|android|machine)\b/i.test(s.name) },
+        x: dir * (230 + i * 120), approach: ms.approach, weapon: s.weapon || ms.weapon,
+        style: { ink: s.color, accent: s.color, width: crowd ? 10 : 11.5, solid: true, gear: s.gear || 'none', size: crowd ? ms.size * 0.9 : ms.size, weapon: s.weapon || ms.weapon, outfit: s.outfit, squareHead: s.gear === 'antenna' || /\b(ai|bot|robot|agent|android|machine)\b/i.test(s.name) },
       });
     }
   }
@@ -840,6 +950,67 @@ export function vsFighters(sides: VsSide[]): (Fighter & { side: 'A' | 'B'; arche
  * loser defends and counters, and the round ends with a varied finisher (a
  * knockout in slow motion). Every round is seeded differently, so no two look alike.
  */
+/**
+ * Equipment and costumes for one video (seeded, so every video differs): guns (assault
+ * rifle / pistol), blades (combat knife, sword), bats and staffs, plus outfit pieces —
+ * tactical vest, belt, gloves, scarf, bandana or a mask. Most videos put at least one gun
+ * and one blade in the fight.
+ */
+export function equipSides(sides: VsSide[], seed: string): VsSide[] {
+  const r = rng(`${seed}:loadout`);
+  const pickW = (a: Archetype): Weapon => {
+    const table: Record<Archetype, [string, number][]> = {
+      speed: [['knife', 4], ['pistol', 3], ['none', 2]], strength: [['bat', 3], ['rifle', 3], ['none', 2]],
+      tech: [['rifle', 5], ['pistol', 3]], magic: [['staff', 1]], sword: [['sword', 1]],
+      brawler: [['knife', 3], ['bat', 2], ['pistol', 2], ['none', 2]], ninja: [['knife', 3], ['sword', 3], ['none', 1]],
+    };
+    return r.weighted(table[a] || [['none', 1]]) as Weapon;
+  };
+  const out = sides.map((sd) => ({ ...sd, weapon: sd.weapon || pickW(sd.archetype) }));
+  if (!out.some((x) => GUNS.has(x.weapon!)) && r.next() < 0.75) {
+    const c = out.filter((x) => !['sword', 'staff'].includes(x.weapon!));
+    if (c.length) r.pick(c).weapon = r.next() < 0.6 ? 'rifle' : 'pistol';
+  }
+  if (!out.some((x) => ['knife', 'sword', 'bat'].includes(x.weapon!))) {
+    const c = out.filter((x) => x.weapon === 'none');
+    if (c.length) c[0].weapon = 'knife';
+  }
+  const dark = ['#1f2937', '#111827', '#374151', '#3f3f46', '#292524'], bright = ['#f8fafc', '#fbbf24', '#ef4444', '#22d3ee', '#a3e635', '#f97316', '#e5e7eb'];
+  for (const sd of out) {
+    const o: Outfit = {};
+    if (GUNS.has(sd.weapon!) || r.next() < 0.35) o.vest = r.pick(dark);
+    if (r.next() < 0.7) o.belt = r.pick(dark);
+    if (r.next() < 0.6) o.gloves = r.pick([...dark, ...bright]);
+    const head = r.next();
+    if (!sd.gear || sd.gear === 'none') {
+      if (head < 0.35) o.bandana = r.pick(bright); else if (head < 0.55) o.mask = r.pick(dark);
+    }
+    if (!o.bandana && r.next() < 0.4 && sd.gear !== 'cape') o.scarf = r.pick(bright);   // one set of streamers at most
+    sd.outfit = o;
+  }
+  return out;
+}
+
+const GUN_MS = (ms: MoveSet): MoveSet => ({ ...ms, attacks: [['shoot', 5], ...ms.attacks.filter((x) => !['blast', 'beam', 'slash', 'dashSlash'].includes(x[0]))], defend: [...ms.defend, 'roll', 'roll', 'duck'], finisher: ['shoot', 'shoot', ...ms.finisher.filter((f) => !['beam', 'slash', 'dashSlash'].includes(f))] });
+const KNIFE_MS = (ms: MoveSet): MoveSet => ({ ...ms, attacks: [['stab', 4], ['knifeCombo', 3], ...ms.attacks.filter((x) => !['blast', 'beam', 'slash', 'dashSlash'].includes(x[0]))], defend: [...ms.defend, 'parry'], finisher: ['knifeCombo', ...ms.finisher.filter((f) => !['beam', 'slash', 'dashSlash'].includes(f))] });
+const BAT_MS = (ms: MoveSet): MoveSet => ({ ...ms, attacks: [['slash', 4], ...ms.attacks.filter((x) => !['blast', 'beam'].includes(x[0]))], finisher: ['slash', ...ms.finisher.filter((f) => f !== 'beam')] });
+/** The side's move set, adapted to what it is holding. */
+function moveSetOf(side: VsSide): MoveSet {
+  const ms = MOVESETS[side.archetype] || MOVESETS.brawler;
+  const w = side.weapon || ms.weapon;
+  if (GUNS.has(w)) return GUN_MS(ms);
+  if (w === 'knife') return KNIFE_MS(ms);
+  if (w === 'bat') return BAT_MS(ms);
+  return ms;
+}
+function exchangesOf(side: VsSide): [string, number][] {
+  const base = EXCHANGES[side.archetype] || EXCHANGES.brawler;
+  const w = side.weapon || 'none';
+  if (GUNS.has(w)) return [['gunfight', 5], ['gunKata', 2], ...base.filter((e) => e[0] !== 'zone')];
+  if (w === 'knife') return [['knifeFight', 4], ...base];
+  return base;
+}
+
 export function planRound(sides: VsSide[], round: VsRound, index: number, total: number, seconds: number, seed: string): Beat[] {
   const r = rng(`${seed}:round${index}`);
   const fighters = vsFighters(sides);
@@ -864,7 +1035,7 @@ export function planRound(sides: VsSide[], round: VsRound, index: number, total:
   if (opening === 'standoff' && firstW && firstL) push({ actor: firstW, action: 'standoff', target: firstL, line: line(W, 'start') || line(L, 'start') });
   else {
     for (const sid of index % 2 ? [L, W] : [W, L]) {
-      const ms = MOVESETS[sideOf(sid).archetype];
+      const ms = moveSetOf(sideOf(sid));
       const who = alive(sid)[0];
       const text = line(sid, 'start');
       if (text) push({ actor: who, action: sid === W && ms.openers.includes('flex') ? 'flex' : 'taunt', line: text });
@@ -886,10 +1057,11 @@ export function planRound(sides: VsSide[], round: VsRound, index: number, total:
     const atkList = alive(atkSide), defList = alive(defSide);
     if (!atkList.length || !defList.length) break;
     const a = r.pick(atkList), d = r.pick(defList);
-    const ams = MOVESETS[sideOf(atkSide).archetype], dms = MOVESETS[sideOf(defSide).archetype];
+    const ams = moveSetOf(sideOf(atkSide)), dms = moveSetOf(sideOf(defSide));
+    const aGun = GUNS.has(sideOf(atkSide).weapon || 'none'), dGun = GUNS.has(sideOf(defSide).weapon || 'none');
     // Never the same exchange twice in a row (and rarely within three).
-    let ex = r.weighted(EXCHANGES[sideOf(atkSide).archetype]);
-    for (let k = 0; k < 4 && (ex === lastEx || (ex === prevEx && r.next() < 0.7)); k++) ex = r.weighted(EXCHANGES[sideOf(atkSide).archetype]);
+    let ex = r.weighted(exchangesOf(sideOf(atkSide)));
+    for (let k = 0; k < 4 && (ex === lastEx || (ex === prevEx && r.next() < 0.7)); k++) ex = r.weighted(exchangesOf(sideOf(atkSide)));
     prevEx = lastEx; lastEx = ex;
     // A crowd member that is losing goes down for good on the exchange's last blow.
     const crowdKo = crowdSide === defSide && kos < koBudget && defList.length > 1 && r.next() < (defSide === L ? 0.5 : 0.25);
@@ -945,10 +1117,39 @@ export function planRound(sides: VsSide[], round: VsRound, index: number, total:
       case 'feint': push({ actor: a, action: 'feint' }); finalBlow({ actor: a, action: attackOf(ams), target: d }); break;
       case 'throw': finalBlow({ actor: a, action: 'throw', target: d }); break;
       case 'heavy': finalBlow({ actor: a, action: pickFrom(ams, ['heavyPunch', 'slam', 'axeKick', 'uppercut'], 'heavyPunch'), target: d }); break;
+      case 'gunfight': {
+        // A burst; the target rolls / ducks clear (bullets fly past) and answers — fire back,
+        // or close the distance and take the gun out of play.
+        push({ actor: a, action: 'shoot', target: d });
+        if (r.next() < defRate + 0.25) {
+          push({ actor: d, action: r.pick(['roll', 'roll', 'duck', 'dodge', 'backflip']) });
+          if (dGun) push({ actor: d, action: 'shoot', target: a });
+          else push({ actor: d, action: r.pick(['flyingKick', 'flyingKnee', has(dms, 'dashSlash') ? 'dashSlash' : 'tornadoKick', has(dms, 'knifeCombo') ? 'knifeCombo' : 'kick']), target: a });
+          if (crowdKo) finalBlow({ actor: a, action: 'shoot', target: d });
+        } else finalBlow({ actor: a, action: 'shoot', target: d });
+        break;
+      }
+      case 'gunKata': {
+        // Close-quarters gun fighting: strike, then fire point blank.
+        push({ actor: a, action: pickFrom(ams, ['elbow', 'kick', 'punch', 'jab'], 'kick'), target: d });
+        if (r.next() < defRate * 0.5) push({ actor: d, action: 'parry' });
+        finalBlow({ actor: a, action: 'shoot', target: d });
+        break;
+      }
+      case 'knifeFight': {
+        // Blade work: stab, the parry rings off the knife, the counter, the finishing slash.
+        push({ actor: a, action: 'stab', target: d });
+        if (r.next() < defRate + 0.2) {
+          push({ actor: d, action: 'parry' });
+          push({ actor: d, action: pickFrom(dms, ['knifeCombo', 'stab', 'elbow', 'kick', 'slash'], 'elbow'), target: a });
+          if (crowdKo || r.next() < 0.6) finalBlow({ actor: a, action: 'knifeCombo', target: d });
+        } else finalBlow({ actor: a, action: 'knifeCombo', target: d });
+        break;
+      }
       case 'zone': {
-        push({ actor: a, action: r.next() < 0.75 ? 'blast' : 'beam', target: d });
+        push({ actor: a, action: aGun ? 'shoot' : r.next() < 0.75 ? 'blast' : 'beam', target: d });
         if (r.next() < defRate) push({ actor: d, action: r.pick(['dodge', 'backflip', 'duck']) });
-        else if (r.next() < 0.5) finalBlow({ actor: a, action: 'blast', target: d });
+        else if (r.next() < 0.5) finalBlow({ actor: a, action: aGun ? 'shoot' : 'blast', target: d });
         break;
       }
       case 'blinkStrike': push({ actor: a, action: 'blink', target: d }); finalBlow({ actor: a, action: pickFrom(ams, ['flurry', 'kick', 'combo', 'roundhouse', 'slash'], 'kick'), target: d }); break;
@@ -958,7 +1159,7 @@ export function planRound(sides: VsSide[], round: VsRound, index: number, total:
     }
   }
   // Finisher: varied — a juggle, a throw, a spinning kick, a beam… the last knockout in slow motion.
-  const wms = MOVESETS[sideOf(W).archetype];
+  const wms = moveSetOf(sideOf(W));
   const lefts = alive(L);
   const winners = alive(W);
   lefts.forEach((victim, i) => {
