@@ -6,7 +6,8 @@ export function buildAiRig(input: any, assetBaseUrl = ''): CssRig {
   const rig = input?.rig && input.rig.characters ? input.rig : input;
   const sourceSpec = input?.kind === 'ai-rig' ? input : rig?.spec || {};
   const gender = sourceSpec?.gender === 'male' ? 'male' : 'female';
-  const fullBody = !!sourceSpec?.fullBody;
+  // A portrait image has no legs to show: honour what the pipeline detected.
+  const fullBody = rig?.detected?.fullBody === false ? false : !!sourceSpec?.fullBody;
   let spec: any;
   try {
     spec = normalizeSpec({
@@ -57,6 +58,17 @@ export function buildAiRig(input: any, assetBaseUrl = ''): CssRig {
       opacity: Number(p.opacity ?? 1), rigType: p.rigType || 'raster'
     };
   }
+  // Rigs from the first pipeline (version 1) used raw image-pixel x (0..width) and listed
+  // children back→front, while the engine centres x = 0 and paints the FIRST child on top.
+  // Normalise them here so previously saved characters render correctly too.
+  const legacy = Number(rig?.version || 1) < 2 || rig?.origin !== 'center';
+  const shiftX = legacy && rig?.canvas?.width ? Number(rig.canvas.width) / 2 : 0;
+  if (legacy) {
+    for (const p of Object.values(composition) as any[]) {
+      if (shiftX && p.id !== 'root') p.transform.x -= shiftX;
+      if ((p.id === 'root' || p.id === 'headGroup') && Array.isArray(p.children)) p.children.reverse();
+    }
+  }
   if (!composition.root) composition.root = { id:'root', label:'AI Character', imageUrl:null, transform:{x:0,y:0,rotation:0,scaleX:1,scaleY:1,anchorX:50,anchorY:50}, zIndex:0, tags:[], parentId:null, children:[], isGroup:true, isIndependent:false, isVisible:true };
   if (!composition.headGroup) {
     const face = composition.face || composition.head || Object.values(composition).find((p:any) => p?.tags?.includes('Head')) as any;
@@ -80,7 +92,9 @@ export function buildAiRig(input: any, assetBaseUrl = ''): CssRig {
     tears: Array.isArray(rig?.extras?.tears) ? rig.extras.tears.filter((x:string)=>!!composition[x]) : [],
     glow: typeof rig?.extras?.glow === 'string' && composition[rig.extras.glow] ? rig.extras.glow : ''
   };
-  const arms: ArmMeta[] = Array.isArray(rig?.arms) ? rig.arms as ArmMeta[] : [];
+  const arms: ArmMeta[] = (Array.isArray(rig?.arms) ? rig.arms as ArmMeta[] : [])
+    .filter((a: any) => a && composition[a.upper] && composition[a.fore] && a.hands && Object.values(a.hands).every((id: any) => composition[id]))
+    .map((a: any) => shiftX ? { ...a, shoulder: { x: Number(a.shoulder?.x || 0) - shiftX, y: Number(a.shoulder?.y || 0) } } : a);
   const fallbackGeometry = (() => {
     const all = Object.values(composition).filter((p:any)=>!p.isGroup && p.imageUrl);
     const bbox = (ids: string[]) => {
@@ -112,7 +126,9 @@ export function buildAiRig(input: any, assetBaseUrl = ''): CssRig {
       upperW:Math.max(18,faceW*0.16), foreW:Math.max(16,faceW*0.14), upperLen:Math.max(50,faceH*0.7), foreLen:Math.max(45,faceH*0.62), handLen:Math.max(34,faceH*0.28)
     } as any;
   })();
-  const geometry = { ...(fallbackGeometry as any), ...(rig?.geometry || {}) };
+  const geometry: any = { ...(fallbackGeometry as any), ...(rig?.geometry || {}) };
+  if (shiftX && rig?.geometry?.headC) geometry.headC = { ...rig.geometry.headC, x: Number(rig.geometry.headC.x || 0) - shiftX };
+  if (shiftX && !rig?.geometry?.headC) geometry.headC = { ...fallbackGeometry.headC };
   return {
     kind: 'css', spec,
     characters: [{ id:first.id || 'presenter', name:first.name || spec.name || 'AI Character', composition }],
