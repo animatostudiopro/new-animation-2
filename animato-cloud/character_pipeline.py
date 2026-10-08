@@ -368,40 +368,93 @@ class FaceParser:
         return Image.fromarray(labels, "L").resize(img.size, Image.Resampling.NEAREST)
 
 
+# 68 face landmarks (iBUG order) of the main person, filled by detect_pose when the
+# whole-body model is available: {"face": [(x, y, score) * 68]}.
+LANDMARKS = {}
+
+
 def _pose_from_arrays(kps, scores):
-    """Pick the biggest person from (N,17,2) keypoints + (N,17) scores."""
+    """Pick the biggest person from (N,K,2) keypoints + (N,K) scores → (pose17, index)."""
     import numpy as np
     kps, scores = np.asarray(kps, np.float32), np.asarray(scores, np.float32)
     if kps.ndim != 3 or kps.shape[0] == 0 or kps.shape[1] < 17: return None
     best, area = 0, -1.0
     for i in range(kps.shape[0]):
-        good = scores[i] > 0.3
+        good = scores[i, :17] > 0.3
         if good.sum() < 3: continue
-        pts = kps[i][good]
+        pts = kps[i, :17][good]
         a = float((pts[:, 0].max() - pts[:, 0].min()) * (pts[:, 1].max() - pts[:, 1].min()))
         if a > area: best, area = i, a
     if area < 0: return None
-    return {POSE_NAMES[j]: (float(kps[best, j, 0]), float(kps[best, j, 1]), float(min(1.0, scores[best, j]))) for j in range(17)}
+    return {POSE_NAMES[j]: (float(kps[best, j, 0]), float(kps[best, j, 1]), float(min(1.0, scores[best, j]))) for j in range(17)}, best
+
+
+def _face_points(kps, scores, idx):
+    """Face landmarks (COCO-WholeBody points 23..90) of person `idx`, or None."""
+    import numpy as np
+    k, s = np.asarray(kps, np.float32), np.asarray(scores, np.float32)
+    if k.ndim != 3 or k.shape[1] < 91: return None
+    return [(float(x), float(y), float(c)) for (x, y), c in zip(k[idx, 23:91], s[idx, 23:91])]
+
+
+def _face_quality(face):
+    import numpy as np
+    if not face: return 0.0
+    sc = np.array([c for _, _, c in face], np.float32)
+    # eyes (36-47) and mouth (48-67) matter most for the rig
+    return float(np.median(np.concatenate([sc[36:48], sc[48:68]])))
 
 
 def detect_pose(img):
     """17 COCO keypoints of the main person: {name: (x, y, conf)} or None.
-    RTMPose via rtmlib (onnxruntime, no PyTorch — fast to install and load);
-    YOLOv8-pose (ultralytics) is used only if rtmlib is missing."""
+    RTMW whole-body via rtmlib (onnxruntime, no PyTorch): the same body keypoints plus
+    68 face landmarks (stored in LANDMARKS["face"]) that locate the eyes, brows and lips
+    on illustrated, 3D and anime faces where a photo-trained face parser finds nothing.
+    Falls back to the body-only model, then YOLOv8-pose."""
+    LANDMARKS.clear()
     if os.environ.get("CHARACTER_ENABLE_POSE", "1") == "0": return None
     import numpy as np
     t = time.time()
+    bgr = np.array(img.convert("RGB"))[:, :, ::-1].copy()
     try:
-        from rtmlib import Body
-        body = Body(mode=os.environ.get("CHARACTER_POSE_MODE", "balanced"), to_openpose=False, backend="onnxruntime", device="cpu")
-        bgr = np.array(img.convert("RGB"))[:, :, ::-1].copy()
-        kps, scores = body(bgr)
-        pts = _pose_from_arrays(kps, scores)
-        if pts:
-            log(f"pose (rtmpose, {time.time() - t:.1f}s): " + ", ".join(f"{k}={v[2]:.2f}" for k, v in pts.items()))
-            return pts
-        log("pose: no person found")
-        return None
+        import rtmlib
+        model, kind = None, "body"
+        if os.environ.get("CHARACTER_POSE_KIND", "wholebody") == "wholebody":
+            try:
+                model = rtmlib.Wholebody(mode=os.environ.get("CHARACTER_WHOLEBODY_MODE", "balanced"), to_openpose=False, backend="onnxruntime", device="cpu")
+                kind = "wholebody"
+            except Exception as e:
+                log(f"whole-body model unavailable ({str(e)[:120]}) — body keypoints only")
+        if model is None:
+            model = rtmlib.Body(mode=os.environ.get("CHARACTER_POSE_MODE", "balanced"), to_openpose=False, backend="onnxruntime", device="cpu")
+        kps, scores = model(bgr)
+        res = _pose_from_arrays(kps, scores)
+        if not res:
+            log("pose: no person found")
+            return None
+        pts, idx = res
+        if kind == "wholebody":
+            face = _face_points(kps, scores, idx)
+            try:
+                # Small face (full-body shot): run the landmark model again on a head-and-
+                # shoulders crop so the face fills more of its input.
+                if face:
+                    fx = [p[0] for p in face]; fy = [p[1] for p in face]
+                    fwid = max(fx) - min(fx)
+                    if fwid > 4 and fwid < min(img.size) * 0.3:
+                        cx, cy = (max(fx) + min(fx)) / 2, (max(fy) + min(fy)) / 2
+                        half = fwid * 1.6
+                        box = [max(0, cx - half), max(0, cy - half * 1.2), min(img.width, cx + half), min(img.height, cy + half * 1.5)]
+                        k2, s2 = model.pose_model(bgr, bboxes=[box])
+                        face2 = _face_points(k2, s2, 0)
+                        if face2 and _face_quality(face2) >= _face_quality(face) * 0.9: face = face2
+            except Exception as e:
+                log(f"zoomed landmark pass skipped ({str(e)[:100]})")
+            if face:
+                LANDMARKS["face"] = face
+                log(f"face landmarks: quality {_face_quality(face):.2f}")
+        log(f"pose ({kind}, {time.time() - t:.1f}s): " + ", ".join(f"{k}={v[2]:.2f}" for k, v in pts.items()))
+        return pts
     except ImportError:
         pass
     except Exception as e:
@@ -413,9 +466,9 @@ def detect_pose(img):
         res = model.predict(img.convert("RGB"), verbose=False, device="cpu", imgsz=640, conf=0.2)
         if not res or res[0].keypoints is None: return None
         kp = res[0].keypoints.data.cpu().numpy()
-        pts = _pose_from_arrays(kp[..., :2], kp[..., 2] if kp.shape[-1] > 2 else np.ones(kp.shape[:2]))
-        if pts: log(f"pose (yolov8, {time.time() - t:.1f}s)")
-        return pts
+        r = _pose_from_arrays(kp[..., :2], kp[..., 2] if kp.shape[-1] > 2 else np.ones(kp.shape[:2]))
+        if r: log(f"pose (yolov8, {time.time() - t:.1f}s)")
+        return r[0] if r else None
     except Exception as e:
         log(f"pose model unavailable ({str(e)[:120]}) — using silhouette geometry")
         return None
@@ -789,11 +842,18 @@ def build_visemes(img, face_clean, u_lip, l_lip, inner, region, teeth_hint=None)
     if not (has(u_lip) and has(l_lip)):
         top = shape_mask(img.size, "rect", [0, 0, W, seam]); u_lip = intersect(lips, top); l_lip = subtract(lips, top)
     seam_c = seam - y0
+    # A mouth that is already open in the picture (a grin with teeth): shapes are measured
+    # from that opening, so "closed" shapes really close it and open ones open it further.
+    open0 = float(inner.getbbox()[3] - inner.getbbox()[1]) if has(inner) else 0.0
+    lt = max(3.0, lh - open0)
+    src_open = open0 > lt * 0.2
     def lip_rgba(mask):
         m = dilate(mask, 1).filter(ImageFilter.GaussianBlur(0.7))
         a = np.array(m)[y0:y1, x0:x1]
         out = src.copy(); out[..., 3] = np.minimum(out[..., 3], a); return out
-    up_rgba, lo_rgba = lip_rgba(union(u_lip, intersect(inner, shape_mask(img.size, "rect", [0, 0, W, seam])) if has(inner) else u_lip)), lip_rgba(l_lip)
+    up_rgba, lo_rgba = lip_rgba(union(u_lip, intersect(inner, shape_mask(img.size, "rect", [0, 0, W, seam])) if has(inner) and not src_open else u_lip)), lip_rgba(l_lip)
+    both_rgba = lip_rgba(union(u_lip, l_lip))
+    inner_w = float(inner.getbbox()[2] - inner.getbbox()[0]) if has(inner) else lw * 0.6
     # Colours from the character itself.
     rgb = np.array(img.convert("RGB")).astype(np.float32)
     lipc = np.median(rgb[np.array(lips) > 127], axis=0)
@@ -817,17 +877,18 @@ def build_visemes(img, face_clean, u_lip, l_lip, inner, region, teeth_hint=None)
             if shape == "REST" and mood == "neutral":
                 base = src.copy()                                     # pixel-exact original
             else:
-                g = gap * lh
+                g = gap * lt
                 sx = lsx * moodsx
-                up_dy, lo_dy = -0.22 * g, 0.78 * g
-                if shape == "MBP": up_dy, lo_dy = 0.05 * lh, -0.06 * lh
-                if shape == "FV": lo_dy = -0.06 * lh
+                delta = g - open0
+                up_dy, lo_dy = -0.22 * delta, 0.78 * delta
+                if shape == "MBP": up_dy, lo_dy = 0.22 * open0 + 0.05 * lt, -0.78 * open0 - 0.06 * lt
+                if shape == "FV": lo_dy = -0.78 * open0 - 0.06 * lt
                 base = clean.copy()
                 if g > 0.5 or shape == "FV":
                     # Opening between the lips (drawn first; lips overlap its edges).
                     canvas = np.zeros((hh, ww, 4), np.uint8)
-                    ew, eh = max(2.0, lw * iw * moodsx), max(2.0, g + lh * 0.30)
-                    ecy = seam_c + (lo_dy + up_dy) / 2 - curve * lh * 0.15
+                    ew, eh = max(2.0, lw * iw * moodsx), max(2.0, g + lt * 0.30)
+                    ecy = seam_c if src_open else seam_c + (lo_dy + up_dy) / 2 - curve * lh * 0.15
                     ell = np.zeros((hh, ww), np.uint8)
                     cv2.ellipse(ell, (int(cx), int(ecy)), (int(ew / 2), int(eh / 2)), 0, 0, 360, 255, -1)
                     canvas[ell > 0, :3] = innerc; canvas[ell > 0, 3] = 245
@@ -845,6 +906,26 @@ def build_visemes(img, face_clean, u_lip, l_lip, inner, region, teeth_hint=None)
                         canvas = np.zeros((hh, ww, 4), np.uint8)
                     canvas = cv2.GaussianBlur(canvas, (0, 0), max(0.6, lh * 0.03))
                     base = _over(base, canvas)
+                if src_open:
+                    # A grin: the lips form a ring round the teeth. Sliding the two halves
+                    # together crosses their curves, so the whole ring is flattened towards the
+                    # seam instead (keeps the smile's curve, closes or opens the gap).
+                    k = (lt + g) / (lt + open0)
+                    ring = _warp_lip(both_rgba, cx, seam_c, sx, max(0.15, k) * lsy, 0, 0, lw / 2, lh)
+                    if shape in ("MBP", "FV") or g <= 0.5:
+                        line = np.zeros((hh, ww, 4), np.uint8)
+                        cv2.ellipse(line, (int(cx), int(seam_c)), (int(max(2, inner_w * sx * 0.45)), max(1, int(open0 * k * 0.5))), 0, 0, 360,
+                                    (*[int(v) for v in innerc], 235), -1)
+                        base = _over(base, cv2.GaussianBlur(line, (0, 0), max(0.6, lt * 0.04)))
+                    base = _over(base, ring)
+                    if shape == "FV":
+                        tm = np.zeros((hh, ww, 4), np.uint8)
+                        cv2.ellipse(tm, (int(cx), int(seam_c)), (int(lw * 0.22), int(max(2, lt * 0.12))), 0, 0, 180, (*[int(v) for v in teethc], 235), -1)
+                        base = _over(base, cv2.GaussianBlur(tm, (0, 0), 0.6))
+                    full = Image.new("RGBA", img.size, (0, 0, 0, 0))
+                    full.paste(Image.fromarray(base, "RGBA"), (x0, y0))
+                    shapes[shape] = full
+                    continue
                 lower = _warp_lip(lo_rgba, cx, seam_c, sx, lsy, lo_dy, curve * 0.6, lw / 2, lh)
                 base = _over(base, lower)
                 if shape == "FV":
@@ -1037,6 +1118,337 @@ def skin_like(img, region, ref_mask, tol=26.0):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Feature locator: every face gets eyes, brows and a mouth.
+#
+# The face parser was trained on photos and often finds nothing on 3D, cartoon or anime
+# faces — and no mouth meant no mouth layer, so no visemes and a character that cannot
+# talk. Each feature is now resolved through a chain of independent sources:
+#   1. the face parser (best edges when it works),
+#   2. 68 face landmarks from the whole-body pose model,
+#   3. colour: lips / eyes / brows differ from the character's own skin colour,
+#      searched where the landmarks or the face proportions say they must be,
+#   4. fixed face proportions anchored to the located head (the Live2D slicing
+#      approach) — so a talking mouth layer always exists.
+# ---------------------------------------------------------------------------
+def _poly_mask(size, pts):
+    from PIL import Image, ImageDraw
+    m = Image.new("L", size, 0)
+    if len(pts) >= 3: ImageDraw.Draw(m).polygon([(float(x), float(y)) for x, y in pts], fill=255)
+    return m
+
+
+def landmark_regions(face, size, alpha=None):
+    """68 face points → {"box", "l_eye", "r_eye", "l_brow", "r_brow", "nose", "u_lip",
+    "l_lip", "mouth", "eye_c": {l, r}, "mouth_c", "mouth_w", "eye_dist"} or None if the
+    points do not look like a face."""
+    import numpy as np
+    if not face or len(face) < 68: return None
+    P = np.array([(x, y) for x, y, _ in face], np.float32); S = np.array([c for _, _, c in face], np.float32)
+    W, H = size
+    if float(np.median(S[36:68])) < float(os.environ.get("CHARACTER_LANDMARK_MIN", "0.3")): return None
+    re, le = P[36:42].mean(0), P[42:48].mean(0)          # image-left eye = subject's right
+    mo, mi = P[48:60], P[60:68]
+    mc = mo.mean(0)
+    ed = float(np.hypot(*(le - re)))
+    if ed < 6 or le[0] <= re[0]: return None
+    if not (mc[1] > (re[1] + le[1]) / 2 + ed * 0.35): return None   # mouth well below the eyes
+    if abs(mc[0] - (re[0] + le[0]) / 2) > ed * 0.8: return None
+    if not (0 <= mc[0] < W and 0 <= mc[1] < H): return None
+    if alpha is not None:
+        try:
+            if alpha.getpixel((int(mc[0]), int(mc[1]))) < 128: return None
+        except Exception: pass
+    jaw = P[0:17]; brows = P[17:27]
+    x0, x1 = float(min(jaw[:, 0].min(), brows[:, 0].min())), float(max(jaw[:, 0].max(), brows[:, 0].max()))
+    btop, chin = float(brows[:, 1].min()), float(jaw[:, 1].max())
+    box = (x0, btop - (chin - btop) * 0.45, x1, chin)
+    out = {"box": box, "eye_c": {"l": tuple(le), "r": tuple(re)}, "mouth_c": tuple(mc),
+           "mouth_w": float(mo[:, 0].max() - mo[:, 0].min()), "eye_dist": ed}
+    out["r_eye"], out["l_eye"] = _poly_mask(size, P[36:42]), _poly_mask(size, P[42:48])
+    for key, rng in (("r_brow", P[17:22]), ("l_brow", P[22:27])):
+        th = max(2.0, ed * 0.06)
+        out[key] = _poly_mask(size, list(rng + [0, -th]) + list((rng + [0, th])[::-1]))
+    out["nose"] = _poly_mask(size, list(P[31:36]) + [P[30]])
+    upper = list(P[48:55]) + list(P[60:65][::-1])
+    lower = list(P[54:60]) + [P[48], P[60]] + list(P[64:68][::-1])
+    out["u_lip"], out["l_lip"] = _poly_mask(size, upper), _poly_mask(size, lower)
+    out["mouth"] = _poly_mask(size, mi)
+    return out
+
+
+def _lab(rgb):
+    import cv2, numpy as np
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+
+def _fill_holes(m):
+    import cv2, numpy as np
+    cs, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = np.zeros(m.shape, np.uint8)
+    if cs: cv2.drawContours(out, cs, -1, 1, -1)
+    return out
+
+
+def _colour_blob(img, zone, skin_lab, centre, want_w, thr, exclude=None, darker_only=False, merge_gap=0.8, accept=None):
+    """Pixels inside `zone` whose colour differs from the skin, grouped around `centre`.
+    Returns (mask uint8 full size, Lab image crop info) or None."""
+    import numpy as np, cv2
+    from PIL import Image
+    if not has(zone): return None
+    W, H = img.size
+    x0, y0, x1, y1 = zone.getbbox()
+    rgb = np.array(img.convert("RGB").crop((x0, y0, x1, y1)))
+    lab = _lab(rgb)
+    z = np.array(zone.crop((x0, y0, x1, y1))) > 127
+    if exclude is not None and has(exclude): z &= ~(np.array(exclude.crop((x0, y0, x1, y1))) > 127)
+    d = np.sqrt(((lab - skin_lab) ** 2).sum(2))
+    cand = (d > thr) & z
+    if darker_only: cand &= lab[..., 0] < skin_lab[0] - thr * 0.8
+    cand = cv2.morphologyEx(cand.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    k = max(3, int(want_w * 0.06)) | 1
+    cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    n, lab_m, st, ce = cv2.connectedComponentsWithStats(cand, 8)
+    cx, cy = centre[0] - x0, centre[1] - y0
+    best, bs = 0, None
+    for i in range(1, n):
+        a = st[i, cv2.CC_STAT_AREA]
+        if a < max(6, (want_w ** 2) * 0.006): continue
+        dist = np.hypot((ce[i][0] - cx) / max(1, want_w), (ce[i][1] - cy) / max(1, want_w * 0.6))
+        if dist > 1.1: continue
+        if accept is not None and not accept(st[i, 2], st[i, 3]): continue
+        sc = a * (1.2 - min(1.0, dist))
+        if bs is None or sc > bs: best, bs = i, sc
+    if not best: return None
+    bx, by, bw, bh = st[best, 0], st[best, 1], st[best, 2], st[best, 3]
+    keep = lab_m == best
+    # Parts split by a gap (upper / lower lip around teeth, lashes above an eye white).
+    for i in range(1, n):
+        if i == best: continue
+        ix, iy, iw, ih = st[i, 0], st[i, 1], st[i, 2], st[i, 3]
+        if st[i, cv2.CC_STAT_AREA] < max(4, st[best, cv2.CC_STAT_AREA] * 0.08): continue
+        overlap = min(bx + bw, ix + iw) - max(bx, ix)
+        gap = max(iy - (by + bh), by - (iy + ih))
+        if overlap > min(bw, iw) * 0.5 and gap <= merge_gap * max(bh, ih) and iw >= bw * 0.45 and bw >= iw * 0.45:
+            keep |= lab_m == i
+    keep = _fill_holes(keep)
+    full = np.zeros((H, W), np.uint8); full[y0:y1, x0:x1] = keep
+    return full, (x0, y0, lab, d)
+
+
+def find_mouth(img, zone, skin_lab, centre, want_w, exclude=None):
+    """Lips / mouth from colour → (u_lip, l_lip, inner) PIL masks or None."""
+    import numpy as np, cv2
+    from PIL import Image
+    r = _colour_blob(img, zone, skin_lab, centre, want_w, 16.0, exclude, merge_gap=0.6,
+                     accept=lambda w, h: w >= want_w * 0.25 and h <= w * 1.25)
+    if r is None: return None
+    core, (x0, y0, lab, d) = r
+    ys, xs = np.where(core > 0)
+    if len(xs) < 8: return None
+    w, h = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+    if not (want_w * 0.3 <= w <= want_w * 2.2) or h > w * 1.25 or h < 2: return None
+    Hc, Wc = lab.shape[:2]
+    c = core[y0:y0 + Hc, x0:x0 + Wc] > 0
+    L = lab[..., 0]
+    lipish = c & (d > 16)
+    lip_lab = np.median(lab[lipish], axis=0) if lipish.sum() > 4 else np.median(lab[c], axis=0)
+    dl = np.sqrt(((lab - lip_lab) ** 2).sum(2))
+    teeth = c & (L > max(skin_lab[0], lip_lab[0]) + 8) & (np.abs(lab[..., 1] - 128) < 14) & (np.abs(lab[..., 2] - 128) < 18)
+    dark = c & (L < lip_lab[0] - 22) & (dl > 26)
+    inner = (teeth | dark).astype(np.uint8)
+    inner = cv2.morphologyEx(inner, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) & c
+    if inner.sum() < c.sum() * 0.04: inner[:] = 0
+    lips = c & (inner == 0)
+    # Seam: middle of the opening, else the darkest row of the closed lips.
+    if inner.sum():
+        iy = np.where(inner)[0]; seam = int((iy.min() + iy.max()) / 2)
+    else:
+        rows = [(L[yy][c[yy]].mean() if c[yy].sum() > 2 else 255) for yy in range(Hc)]
+        seam = int(np.argmin(rows))
+    top = np.zeros_like(c); top[:seam] = True
+    def full(a):
+        out = np.zeros((img.height, img.width), np.uint8); out[y0:y0 + Hc, x0:x0 + Wc] = a.astype(np.uint8) * 255
+        return Image.fromarray(out, "L")
+    u, l = full(lips & top), full(lips & ~top)
+    if not has(u) or not has(l):
+        # One-piece lips (a line mouth): split at the middle.
+        ly = np.where(lips)[0]
+        if len(ly):
+            mid = int((ly.min() + ly.max()) / 2); top[:] = False; top[:mid + 1] = True
+            u, l = full(lips & top), full(lips & ~top)
+    return u, l, (full(inner > 0) if inner.sum() else None)
+
+
+def find_eye(img, zone, skin_lab, centre, want_w, exclude=None):
+    import numpy as np
+    from PIL import Image
+    r = _colour_blob(img, zone, skin_lab, centre, want_w, 22.0, exclude, merge_gap=0.12,
+                     accept=lambda w, h: h >= w * 0.22 and want_w * 0.3 <= w <= want_w * 2.0)
+    if r is None: return None
+    core = r[0]
+    ys, xs = np.where(core > 0)
+    if len(xs) < 8: return None
+    w, h = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+    if not (want_w * 0.35 <= w <= want_w * 2.0): return None
+    if h < w * 0.22: return None          # a lash line: the eye is closed in the picture
+    return Image.fromarray(core * 255, "L")
+
+
+def find_brow(img, zone, skin_lab, centre, want_w, exclude=None):
+    import numpy as np
+    from PIL import Image
+    r = _colour_blob(img, zone, skin_lab, centre, want_w, 20.0, exclude, darker_only=True, merge_gap=0.3,
+                     accept=lambda w, h: w >= want_w * 0.35 and h <= w * 0.7)
+    if r is None: return None
+    core = r[0]
+    ys, xs = np.where(core > 0)
+    if len(xs) < 6: return None
+    w, h = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+    if w < want_w * 0.4 or h > w * 0.7: return None
+    return Image.fromarray(core * 255, "L")
+
+
+def locate_features(img, m, alpha, pose, face):
+    """Complete the parser's eye / brow / mouth masks in place. Returns (face_box or None,
+    {feature: source}) — the box is the located head (forehead to chin)."""
+    import numpy as np
+    W, H = img.size
+    src = {}
+    feats = union(m["l_brow"], m["r_brow"], m["l_eye"], m["r_eye"], m["nose"], m["mouth"], m["u_lip"], m["l_lip"])
+    lm = landmark_regions(face, (W, H), alpha)
+    # --- the head box -------------------------------------------------------------
+    box = None
+    pf = bbox(union(m["skin"], feats)) if has(m["skin"]) or has(feats) else None
+    if lm: box = lm["box"]
+    elif pose and ok(pose, "l_eye", 0.3, (W, H)) and ok(pose, "r_eye", 0.3, (W, H)):
+        le, re = pose["l_eye"][:2], pose["r_eye"][:2]
+        ed = math.hypot(le[0] - re[0], le[1] - re[1])
+        if ed > 6:
+            fwid = ed * 2.4; ex, ey = (le[0] + re[0]) / 2, (le[1] + re[1]) / 2
+            box = (ex - fwid / 2, ey - fwid * 0.62, ex + fwid / 2, ey + fwid * 0.78)
+    if box is None and pf is not None and has(m["skin"]):
+        box = pf
+    guess = False
+    if box is None:
+        # Nothing found a face: the head is the top of the silhouette (the slicing-template
+        # approach). Only skin-coloured spots get a mouth here.
+        ab = alpha.getbbox() if has(alpha) else None
+        if not ab: return None, src
+        fw0 = (ab[2] - ab[0]) * 0.45
+        box = ((ab[0] + ab[2]) / 2 - fw0 / 2, ab[1] + fw0 * 0.15, (ab[0] + ab[2]) / 2 + fw0 / 2, ab[1] + fw0 * 1.4)
+        guess = True
+    bx0, by0, bx1, by1 = box
+    fw, fh = max(8.0, bx1 - bx0), max(8.0, by1 - by0)
+    cx = (bx0 + bx1) / 2
+    # --- anchors ----------------------------------------------------------------------
+    nose_tip = None
+    if lm:
+        eye_c, ed = lm["eye_c"], lm["eye_dist"]
+        nose_tip = float(face[33][1])
+        mouth_c, mouth_w = lm["mouth_c"], max(lm["mouth_w"], ed * 0.45)
+    else:
+        if pose and ok(pose, "l_eye", 0.3, (W, H)) and ok(pose, "r_eye", 0.3, (W, H)):
+            eye_c = {"l": pose["l_eye"][:2], "r": pose["r_eye"][:2]}
+        else:
+            eye_c = {"l": (cx + fw * .2, by0 + fh * .47), "r": (cx - fw * .2, by0 + fh * .47)}
+        for s, k in (("l", "l_eye"), ("r", "r_eye")):
+            if has(m[k]): b = m[k].getbbox(); eye_c[s] = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+        ed = max(6.0, math.hypot(eye_c["l"][0] - eye_c["r"][0], eye_c["l"][1] - eye_c["r"][1]))
+        ey = (eye_c["l"][1] + eye_c["r"][1]) / 2; ex = (eye_c["l"][0] + eye_c["r"][0]) / 2
+        if has(m["nose"]):
+            nb = m["nose"].getbbox(); ny = nb[3]; nx = (nb[0] + nb[2]) / 2
+            mouth_c = (nx, ny + (ny - ey) * 0.45); nose_tip = ny
+        elif pose and ok(pose, "nose", 0.3, (W, H)) and pose["nose"][1] - ey > ed * 0.25:
+            nx, ny = pose["nose"][:2]; mouth_c = (nx, ny + (ny - ey) * 0.75); nose_tip = ny + (ny - ey) * 0.2
+        else:
+            mouth_c = (ex, ey + ed * 0.95)
+        mouth_w = ed * 0.75
+    # Skin colour of THIS character: the face minus everything that is not skin.
+    rgb = np.array(img.convert("RGB"))
+    facez = intersect(shape_mask((W, H), "ellipse", [bx0 + fw * .1, by0 + fh * .25, bx1 - fw * .1, by1 - fh * .05]), alpha)
+    not_skin = union(m["hair"], dilate(feats, 3), m["eyeglass"], m["hat"],
+                     *[shape_mask((W, H), "ellipse", [x - ed * .35, y - ed * .25, x + ed * .35, y + ed * .25]) for x, y in eye_c.values()],
+                     shape_mask((W, H), "ellipse", [mouth_c[0] - mouth_w * .8, mouth_c[1] - mouth_w * .4, mouth_c[0] + mouth_w * .8, mouth_c[1] + mouth_w * .4]))
+    sk = subtract(intersect(facez, m["skin"]) if has(intersect(facez, m["skin"])) else facez, not_skin)
+    px = rgb[np.array(sk) > 127] if has(sk) else rgb[np.array(facez) > 127] if has(facez) else None
+    if px is None or len(px) < 20:
+        return box, src
+    lab_px = _lab(px.reshape(-1, 1, 3)).reshape(-1, 3)
+    L = lab_px[:, 0]
+    mid = (L >= np.percentile(L, 25)) & (L <= np.percentile(L, 85))
+    skin_lab = np.median(lab_px[mid] if mid.sum() > 10 else lab_px, axis=0)
+    hair_ex = m["hair"]
+    # --- mouth ------------------------------------------------------------------------
+    pm = union(m["mouth"], m["u_lip"], m["l_lip"])
+    parser_ok = False
+    if has(pm):
+        b = pm.getbbox(); pc = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2); pw = b[2] - b[0]
+        parser_ok = pw >= mouth_w * 0.35 and math.hypot(pc[0] - mouth_c[0], pc[1] - mouth_c[1]) < max(mouth_w, ed) * 0.9
+        if not lm: parser_ok = parser_ok or pw >= ed * 0.25
+    if parser_ok:
+        src["mouth"] = "face parser"
+    else:
+        zone = shape_mask((W, H), "ellipse", [mouth_c[0] - mouth_w * 1.0, mouth_c[1] - mouth_w * .55, mouth_c[0] + mouth_w * 1.0, mouth_c[1] + mouth_w * .6])
+        zone = subtract(intersect(zone, alpha), dilate(m["nose"], 2))
+        if nose_tip is not None:   # never above the tip of the nose
+            zone = subtract(zone, shape_mask((W, H), "rect", [0, 0, W, nose_tip]))
+        found = find_mouth(img, zone, skin_lab, mouth_c, mouth_w, hair_ex)
+        if found is None and lm and has(lm["u_lip"]):
+            found = (lm["u_lip"], lm["l_lip"], lm["mouth"] if (np.array(lm["mouth"]) > 127).sum() > 12 else None)
+            src["mouth"] = "face landmarks"
+        elif found is not None:
+            src["mouth"] = "colour (landmarks)" if lm else "colour (face proportions)"
+        skin_at_mouth = True
+        if found is None and guess:
+            win = rgb[int(max(0, mouth_c[1] - 3)):int(mouth_c[1] + 4), int(max(0, mouth_c[0] - 3)):int(mouth_c[0] + 4)]
+            skin_at_mouth = win.size > 0 and float(np.sqrt(((np.median(_lab(win).reshape(-1, 3), 0) - skin_lab) ** 2).sum())) < 22
+        if found is None and skin_at_mouth:
+            # Proportional fallback: a closed mouth where the face says it is.
+            mw, mh = mouth_w * 0.9, max(4.0, mouth_w * 0.16)
+            u = shape_mask((W, H), "ellipse", [mouth_c[0] - mw / 2, mouth_c[1] - mh, mouth_c[0] + mw / 2, mouth_c[1] + mh * 0.15])
+            l = shape_mask((W, H), "ellipse", [mouth_c[0] - mw * .45, mouth_c[1] - mh * 0.1, mouth_c[0] + mw * .45, mouth_c[1] + mh * 1.1])
+            found = (intersect(u, alpha), subtract(intersect(l, alpha), u), None)
+            src["mouth"] = "face proportions"
+        if found is not None:
+            u, l, inner = found
+            m["u_lip"], m["l_lip"] = u, l
+            m["mouth"] = inner if inner is not None else empty_mask((W, H))
+    # --- eyes and brows ------------------------------------------------------------------
+    for s in ("l", "r"):
+        k, bk = f"{s}_eye", f"{s}_brow"
+        ex, ey = eye_c[s]
+        want = ed * 0.55
+        if has(m[k]):
+            src[k] = "face parser"
+        else:
+            vy = 0.7 if lm else 1.0
+            zone = intersect(shape_mask((W, H), "ellipse", [ex - want * .95, ey - want * vy, ex + want * .95, ey + want * vy]), alpha)
+            e = find_eye(img, zone, skin_lab, (ex, ey), want, union(hair_ex, m[bk]))
+            if e is None and lm and has(lm[k]):
+                le = lm[k]; lb = le.getbbox()
+                e = dilate(le, max(1, int((lb[3] - lb[1]) * 0.25)))
+                src[k] = "face landmarks"
+            elif e is not None:
+                src[k] = "colour"
+            if e is not None: m[k] = e
+        if not has(m[bk]):
+            eb = m[k].getbbox() if has(m[k]) else (ex - want / 2, ey - want * .3, ex + want / 2, ey + want * .3)
+            bw = (eb[2] - eb[0]) * 1.15; byc = eb[1] - ed * 0.18
+            zone = intersect(shape_mask((W, H), "ellipse", [ex - bw * .75, byc - ed * .2, ex + bw * .75, byc + ed * .12]), alpha)
+            zone = subtract(zone, dilate(m[k], 2))
+            b = find_brow(img, zone, skin_lab, (ex, byc), bw, hair_ex)
+            if b is None and lm and has(lm[bk]):
+                b = subtract(intersect(lm[bk], alpha), hair_ex); src[bk] = "face landmarks"
+            elif b is not None: src[bk] = "colour"
+            if b is not None and has(b): m[bk] = b
+    if not has(m["nose"]) and lm and has(lm["nose"]):
+        m["nose"] = lm["nose"]; src["nose"] = "face landmarks"
+    if guess and not any(has(m[k]) for k in ("u_lip", "l_lip", "l_eye", "r_eye")):
+        return None, src
+    return box, src
+
+
 def set_anchor(info_bbox, world_x, world_y):
     x0, y0, x1, y1 = info_bbox; w = max(1, x1 - x0); h = max(1, y1 - y0)
     return {"anchorX": max(0, min(100, ((world_x - x0) / w) * 100)), "anchorY": max(0, min(100, ((world_y - y0) / h) * 100))}
@@ -1084,9 +1496,28 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     soft = intersect(soft, dilate(alpha, 2)) if soft is not None else alpha
     for k in m: m[k] = intersect(m[k], dilate(alpha, 2))
 
+    # 3b) Make sure every face has eyes, brows and a mouth (parser → landmarks → colour →
+    # face proportions). Without a mouth there are no visemes and the character cannot talk.
+    try:
+        loc_box, feature_src = locate_features(img, m, alpha, pose, LANDMARKS.get("face"))
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        log(f"feature locator failed ({str(e)[:160]})"); loc_box, feature_src = None, {}
+    for k in m: m[k] = intersect(m[k], dilate(alpha, 2)) if m[k] is not None else empty_mask((W, H))
+    log(f"features: {feature_src or 'all from the face parser'}; landmarks={'yes' if LANDMARKS.get('face') else 'no'}")
+
     features = union(m["l_brow"], m["r_brow"], m["l_eye"], m["r_eye"], m["nose"], m["mouth"], m["u_lip"], m["l_lip"])
     face_all = union(m["skin"], features, m["l_ear"], m["r_ear"])
     hb = bbox(face_all) if has(features) else None
+    if loc_box is not None:
+        # The parser's skin may cover only part of a stylised face: the located head
+        # (forehead to chin) keeps the head layer whole.
+        lb = [int(max(0, loc_box[0])), int(max(0, loc_box[1])), int(min(W, loc_box[2])), int(min(H, loc_box[3]))]
+        if hb is None: hb = tuple(lb)
+        else:
+            sk_area = (np.array(m["skin"]) > 127).sum()
+            if sk_area < (lb[2] - lb[0]) * (lb[3] - lb[1]) * 0.45:
+                hb = (min(hb[0], lb[0]), min(hb[1], lb[1]), max(hb[2], lb[2]), max(hb[3], lb[3]))
     face_found = hb is not None
     if not face_found:
         if pose and ok(pose, "nose", 0.3, (W, H)):
@@ -1201,6 +1632,11 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     inner = subtract(m["mouth"], lips) if has(m["mouth"]) else None
     mouth_core = union(m["mouth"], lips)
     mouth_mask = None
+    # Open in the picture (teeth showing)? Then the image model also paints a closed mouth.
+    src_mouth_open = has(inner) and has(lips) and (inner.getbbox()[3] - inner.getbbox()[1]) > max(2, (lips.getbbox()[3] - lips.getbbox()[1]) * 0.18)
+    viseme_prompts = dict(VISEME_PROMPTS)
+    if src_mouth_open:
+        viseme_prompts["MBP"] = ("mouth closed, lips gently pressed together, no teeth visible", 0.92)
     if has(mouth_core):
         mb = mouth_core.getbbox()
         lw0, lh0 = mb[2] - mb[0], max(3, mb[3] - mb[1])
@@ -1219,7 +1655,7 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
         mbox = [mcx - mside / 2, mcy - mside / 2, mcx + mside / 2, mcy + mside / 2]
         mreg = binarize(mouth_mask, 40)
         lips_change = dilate(mouth_core, 2)
-        for shape, (desc, strength) in VISEME_PROMPTS.items():
+        for shape, (desc, strength) in viseme_prompts.items():
             edits.add(f"mouth_{shape}", mbox, f"{style}close-up of a {who}'s face, {desc}, same lips, same skin and lighting, natural detailed teeth, seamless",
                       mreg, strength, min_change=0.0 if shape in ("CONS", "FV") else 5.0, change_mask=lips_change)
     if face_found and has(eyes_union):
@@ -1403,7 +1839,7 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
         # Lifelike shapes repainted by the image model win. A rejected shape borrows the
         # closest good one; the lip-warp set is used only if the model could not run at all.
         real = {}
-        for shape in VISEME_PROMPTS:
+        for shape in viseme_prompts:
             im = edits.get(f"mouth_{shape}")
             if im is not None: real[shape] = im
         neutral = {"REST": rel_mouth}
@@ -1419,7 +1855,11 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
                     if alt in files or alt == "REST":
                         neutral[shape] = files.get(alt, rel_mouth); break
                 neutral.setdefault(shape, files.get("AI") or rel_mouth)
-            viseme_source = f"painted {len(files)}/{len(VISEME_PROMPTS)}"
+            # A grin can't close by borrowing REST: use the lip-warp closed mouth instead.
+            if src_mouth_open and "MBP" not in files and built.get("neutral", {}).get("MBP") is not None:
+                info = extract(built["neutral"]["MBP"], soft_edge(mouth_mask), parts_dir / "mouth_mbp.png")
+                if info: neutral["MBP"] = str(Path(info["file"]).relative_to(out).as_posix())
+            viseme_source = f"painted {len(files)}/{len(viseme_prompts)}"
             log(f"mouth shapes: painted {sorted(files)}; borrowed {sorted(k for k in VISEME_SHAPES if k not in files and k != 'REST')}")
         elif built.get("neutral"):
             for shape, im in built["neutral"].items():
@@ -1572,8 +2012,8 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
         "detected": {"fullBody": bool(is_full), "handsVisible": hands_visible, "pose": bool(pose), "faceFound": face_found,
                      "zoomedFaceParse": zoomed, "handPoses": sorted({k for (_, k) in hand_variants}),
                      "blink": "painted" if eye_closed is not None else ("synthetic" if blink_ids else "none"),
-                     "visemes": viseme_source},
-        "notes": {"faceParser": "BiSeNet/CelebAMask-HQ 19-class", "pose": "YOLOv8-pose (COCO 17)", "inpaint": "DreamShaper-8 inpainting with CPU fallbacks"},
+                     "visemes": viseme_source, "features": feature_src, "landmarks": bool(LANDMARKS.get("face"))},
+        "notes": {"faceParser": "BiSeNet/CelebAMask-HQ 19-class", "pose": "RTMW whole-body (rtmlib) with 68 face landmarks", "inpaint": "DreamShaper-8 inpainting with CPU fallbacks"},
     }
     if background is not None:
         bg = background.convert("RGB")
@@ -1594,6 +2034,21 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     if max(preview.size) > 768:
         r = 768.0 / max(preview.size); preview = preview.resize((max(1, int(preview.width * r)), max(1, int(preview.height * r))), Image.Resampling.LANCZOS)
     preview.save(out / "preview.png", "PNG", optimize=True, compress_level=9)
+    try:
+        # What was found where (opens from the run's artifact): eyes cyan, brows yellow,
+        # lips magenta, mouth inside red, hair green, face box white.
+        dbg = img.convert("RGB").copy()
+        tint = [(m["hair"], (40, 220, 90)), (union(m["l_eye"], m["r_eye"]), (0, 220, 255)), (union(m["l_brow"], m["r_brow"]), (255, 220, 0)),
+                (union(m["u_lip"], m["l_lip"]), (255, 0, 200)), (m["mouth"], (255, 40, 40)), (m["nose"], (255, 140, 0))]
+        for mk, col in tint:
+            if has(mk): dbg.paste(Image.blend(dbg, Image.new("RGB", dbg.size, col), 0.55), (0, 0), mk)
+        from PIL import ImageDraw as _ID
+        _ID.Draw(dbg).rectangle(list(hb), outline=(255, 255, 255), width=max(2, W // 300))
+        r = 640.0 / max(dbg.size)
+        if r < 1: dbg = dbg.resize((int(dbg.width * r), int(dbg.height * r)), Image.Resampling.LANCZOS)
+        dbg.save(out / "debug_features.png", "PNG", optimize=True)
+    except Exception as e:
+        log(f"debug sheet skipped ({str(e)[:80]})")
     log(f"rig ready: {len([p for p in comp.values() if not p.get('isGroup')])} layers, arms={len(arms_meta)}, blink={manifest['detected']['blink']}, visemes={manifest['detected']['visemes']}, fullBody={is_full}")
     return manifest
 
