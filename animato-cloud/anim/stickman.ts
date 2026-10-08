@@ -75,6 +75,22 @@ export const POSES: Record<string, Pose> = {
   victory: P(-4, -12, 170, 10, 165, 10, 8, 6, -8, 6, 2),
   slide: P(-30, 10, 60, 40, -20, 40, 90, 0, 40, 120, -40),
   flipTuck: P(30, -10, 90, 140, 80, 140, 110, 140, 100, 140, 30),
+  // New moves
+  sweepLow: P(34, -14, 40, 60, -60, 40, 88, 0, 110, 150, -52),
+  elbowWind: P(-8, 2, 40, 150, 10, 130, 26, 20, -22, 20, -4),
+  elbow: P(26, -8, 100, 150, 30, 120, 32, 18, -34, 14, -8),
+  knee: P(-6, -10, 30, 120, -30, 120, 125, 150, -10, 20, 0),
+  axeUp: P(-24, 8, 60, 90, -40, 60, 172, 0, -6, 6, 6),
+  axeDown: P(22, -8, 40, 90, -40, 60, 72, 0, -8, 10, -6),
+  tornado: P(-20, 6, 120, 40, -90, 40, 115, 0, -30, 50, 0),
+  parry: P(6, 4, 130, 40, 40, 120, 26, 20, -24, 22, -4),
+  grab: P(18, -6, 92, 20, 84, 30, 34, 26, -30, 20, -8),
+  throwOver: P(-30, 10, 175, 30, 165, 40, 20, 20, -40, 40, -6),
+  recoil: P(-30, 16, 40, 60, -40, 60, 16, 24, -34, 30),
+  airSpike: P(34, -14, 140, 0, 30, 120, 70, 110, -20, 100),
+  feint: P(10, -4, 70, 70, 30, 130, 28, 20, -26, 20, -6),
+  stalk1: P(10, -4, 64, 112, 42, 120, 30, 22, -16, 18, -6),
+  stalk2: P(10, -4, 70, 106, 38, 124, 14, 18, -28, 24, -6),
 };
 
 export interface Key { pose: string; at: number } // at: seconds from action start
@@ -95,7 +111,7 @@ export interface ActionDef {
   /** How far an attacker must be from its target. */
   reach?: number;
   /** Target's reaction. */
-  effect?: 'hit' | 'launch' | 'launchFar' | 'down';
+  effect?: 'hit' | 'launch' | 'launchFar' | 'down' | 'thrown' | 'juggle' | 'spiked';
   /** Everyone of the other side within this distance of the landing point is hit. */
   aoe?: number;
   /** A travelling energy attack. */
@@ -147,6 +163,22 @@ export const ACTIONS: Record<string, ActionDef> = {
   taunt: { keys: [{ pose: 'taunt', at: 0 }, { pose: 'taunt2', at: 0.25 }, { pose: 'taunt', at: 0.5 }, { pose: 'taunt2', at: 0.75 }, { pose: 'guard', at: 1.1 }], dur: 1.1 },
   flex: { keys: [{ pose: 'guard', at: 0 }, { pose: 'flex', at: 0.25 }, { pose: 'flex', at: 1.0 }, { pose: 'guard', at: 1.25 }], dur: 1.25 },
   victory: { keys: [{ pose: 'guard', at: 0 }, { pose: 'victory', at: 0.3 }, { pose: 'victory', at: 1.6 }], dur: 1.6 },
+  // ---- Extended move list (more variety, less predictable fights)
+  sweep: { keys: [{ pose: 'guard', at: 0 }, { pose: 'crouch', at: 0.12 }, { pose: 'sweepLow', at: 0.24 }, { pose: 'sweepLow', at: 0.42 }, { pose: 'crouch', at: 0.56 }, { pose: 'guard', at: 0.76 }], dur: 0.76, impact: 0.24, travel: 20, reach: 118, effect: 'down', dmg: 11, power: 1.15, sfx: 'kick' },
+  elbow: { keys: [{ pose: 'guard', at: 0 }, { pose: 'elbowWind', at: 0.1 }, { pose: 'elbow', at: 0.18 }, { pose: 'elbow', at: 0.3 }, { pose: 'guard', at: 0.5 }], dur: 0.5, impact: 0.18, travel: 22, reach: 70, effect: 'hit', dmg: 9, sfx: 'punch' },
+  flyingKnee: { keys: [{ pose: 'crouch', at: 0 }, { pose: 'knee', at: 0.2 }, { pose: 'knee', at: 0.42 }, { pose: 'crouch', at: 0.62 }, { pose: 'guard', at: 0.8 }], dur: 0.8, impact: 0.3, travel: 120, arc: 75, reach: 150, effect: 'launch', dmg: 15, power: 1.3, sfx: 'kick' },
+  axeKick: { keys: [{ pose: 'guard', at: 0 }, { pose: 'kickChamber', at: 0.12 }, { pose: 'axeUp', at: 0.3 }, { pose: 'axeDown', at: 0.42 }, { pose: 'axeDown', at: 0.56 }, { pose: 'guard', at: 0.8 }], dur: 0.8, impact: 0.42, travel: 16, reach: 112, effect: 'down', dmg: 17, power: 1.4, sfx: 'kick' },
+  tornadoKick: { keys: [{ pose: 'crouch', at: 0 }, { pose: 'tornado', at: 0.22 }, { pose: 'highKick', at: 0.44 }, { pose: 'highKick', at: 0.58 }, { pose: 'crouch', at: 0.78 }, { pose: 'guard', at: 0.95 }], dur: 0.95, impact: 0.46, travel: 70, arc: 85, spin: 360, reach: 126, effect: 'launchFar', dmg: 18, power: 1.5, sfx: 'kick' },
+  parry: { keys: [{ pose: 'guard', at: 0 }, { pose: 'parry', at: 0.07 }, { pose: 'parry', at: 0.2 }, { pose: 'guard', at: 0.36 }], dur: 0.36, sfx: 'block' },
+  throw: { keys: [{ pose: 'guard', at: 0 }, { pose: 'grab', at: 0.16 }, { pose: 'grab', at: 0.3 }, { pose: 'throwOver', at: 0.6 }, { pose: 'throwOver', at: 0.8 }, { pose: 'guard', at: 1.05 }], dur: 1.05, impact: 0.26, travel: 10, reach: 70, effect: 'thrown', dmg: 18, power: 1.3, sfx: 'whoosh' },
+  launcher: { keys: [{ pose: 'guard', at: 0 }, { pose: 'uppercutLow', at: 0.14 }, { pose: 'uppercut', at: 0.24 }, { pose: 'uppercut', at: 0.4 }, { pose: 'crouch', at: 0.52 }], dur: 0.52, impact: 0.24, travel: 20, reach: 82, effect: 'juggle', dmg: 10, power: 1.25, sfx: 'punch' },
+  airCombo: {
+    keys: [{ pose: 'crouch', at: 0 }, { pose: 'air', at: 0.16 }, { pose: 'kick', at: 0.3 }, { pose: 'jab', at: 0.4 }, { pose: 'punch', at: 0.5 }, { pose: 'slamAir', at: 0.6 }, { pose: 'airSpike', at: 0.7 }, { pose: 'crouch', at: 0.95 }, { pose: 'guard', at: 1.15 }],
+    dur: 1.15, hits: [0.3, 0.4, 0.5, 0.7], impact: 0.7, travel: 30, arc: 210, reach: 1200, effect: 'spiked', dmg: 6, power: 1.6, sfx: 'heavy', hitSfx: 'jab',
+  },
+  feint: { keys: [{ pose: 'guard', at: 0 }, { pose: 'feint', at: 0.14 }, { pose: 'guardB', at: 0.32 }, { pose: 'guard', at: 0.5 }], dur: 0.5, travel: -18, sfx: 'whoosh' },
+  stalk: { keys: [{ pose: 'stalk1', at: 0 }, { pose: 'stalk2', at: 0.32 }, { pose: 'stalk1', at: 0.64 }], dur: 0.64, loop: true },
+  recoil: { keys: [{ pose: 'recoil', at: 0 }, { pose: 'recoil', at: 0.16 }, { pose: 'guard', at: 0.42 }], dur: 0.42, travel: -70, sfx: '' },
   // Reactions (started by the choreographer at the moment of impact).
   hit: { keys: [{ pose: 'hit', at: 0 }, { pose: 'hit', at: 0.16 }, { pose: 'guard', at: 0.45 }], dur: 0.45, travel: -34, sfx: '' },
   stagger: { keys: [{ pose: 'hit', at: 0 }, { pose: 'hitHard', at: 0.08 }, { pose: 'hit', at: 0.16 }], dur: 0.16, loop: true },
@@ -154,12 +186,20 @@ export const ACTIONS: Record<string, ActionDef> = {
   launchFar: { keys: [{ pose: 'hitHard', at: 0 }, { pose: 'hitHard', at: 0.5 }, { pose: 'down', at: 0.75 }, { pose: 'down', at: 1.1 }], dur: 1.1, travel: -520, arc: 110, spin: -200, sfx: 'thud' },
   down: { keys: [{ pose: 'hitHard', at: 0 }, { pose: 'down', at: 0.35 }, { pose: 'down', at: 0.9 }], dur: 0.9, travel: -150, arc: 40, sfx: 'thud' },
   getup: { keys: [{ pose: 'down', at: 0 }, { pose: 'getup', at: 0.35 }, { pose: 'guard', at: 0.8 }], dur: 0.8 },
+  /** Thrown over the attacker's head: a flip in the air, then flat on the floor. */
+  thrown: { keys: [{ pose: 'hitHard', at: 0 }, { pose: 'flipTuck', at: 0.3 }, { pose: 'flipTuck', at: 0.5 }, { pose: 'down', at: 0.72 }, { pose: 'down', at: 1.0 }], dur: 1.0, arc: 150, spin: 300, sfx: '' },
+  /** Knocked high into the air (a launcher): tumbling, waiting for the air combo. */
+  juggled: { keys: [{ pose: 'hitHard', at: 0 }, { pose: 'hitHard', at: 0.5 }, { pose: 'hit', at: 0.9 }, { pose: 'down', at: 1.25 }, { pose: 'down', at: 1.45 }], dur: 1.45, travel: -40, arc: 230, spin: -160, sfx: '' },
+  /** Spiked out of the air: straight down into the floor. */
+  spiked: { keys: [{ pose: 'hitHard', at: 0 }, { pose: 'down', at: 0.3 }, { pose: 'down', at: 0.7 }], dur: 0.7, travel: -60, sfx: '' },
 };
 
 export const ATTACKS = Object.keys(ACTIONS).filter((k) => ACTIONS[k].impact !== undefined);
-export const MOVES = ['run', 'dash', 'jump', 'dodge', 'duck', 'block', 'backflip', 'frontflip', 'slide', 'blink', 'taunt', 'flex', 'victory', 'getup', 'idle', ...ATTACKS];
+export const MOVES = ['run', 'dash', 'jump', 'dodge', 'duck', 'block', 'parry', 'feint', 'stalk', 'backflip', 'frontflip', 'slide', 'blink', 'taunt', 'flex', 'victory', 'getup', 'idle', ...ATTACKS];
 /** Reactions that end with the fighter on the floor. */
-const FLOORED = new Set(['down', 'launchFar']);
+const FLOORED = new Set(['down', 'launchFar', 'thrown', 'spiked', 'juggled']);
+/** Defensive answers the choreographer resolves against the blow before them. */
+const DEFENCES = ['block', 'dodge', 'duck', 'backflip', 'parry'];
 
 // ---------------------------------------------------------------------------
 // Interpolation
@@ -216,7 +256,7 @@ export interface Fighter {
   /** How the fighter closes the distance. */
   approach?: 'run' | 'dash' | 'walk';
 }
-export interface Clip { start: number; end: number; action: string; x0: number; x1: number; facing: 1 | -1; arc: number; spin: number }
+export interface Clip { start: number; end: number; action: string; x0: number; x1: number; facing: 1 | -1; arc: number; spin: number; /** Starting height (a fighter spiked out of the air). */ y0?: number }
 export interface ImpactFx { t: number; x: number; y: number; kind: string; strength: number; target?: string; attacker?: string; dmg?: number; ko?: boolean; ground?: boolean; move?: string }
 export interface Sfx { t: number; kind: string }
 export interface Line { t: number; end: number; actor: string; text: string }
@@ -239,6 +279,7 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
   const busyUntil: Record<string, number> = {};
   const downed: Record<string, boolean> = {};
   const out: Record<string, boolean> = {};
+  const juggledUntil: Record<string, number> = {};
   for (const f of fighters) { clips[f.id] = []; pos[f.id] = f.x; busyUntil[f.id] = t0; downed[f.id] = false; out[f.id] = false; }
   const teamOf = (id: string) => fighters.find((f) => f.id === id)?.team || id;
   const enemies = (id: string) => fighters.filter((f) => f.id !== id && teamOf(f.id) !== teamOf(id) && !out[f.id]);
@@ -248,12 +289,12 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
   const impacts: ImpactFx[] = [], sfx: Sfx[] = [], lines: Line[] = [], projectiles: Projectile[] = [], focus: Focus[] = [];
   let slowK = 1; // time stretch of the beat being laid out (slow-motion finishers)
   const slowmo: { t0: number; t1: number }[] = [];
-  const add = (id: string, action: string, start: number, dur: number, x1?: number) => {
+  const add = (id: string, action: string, start: number, dur: number, x1?: number, y0?: number) => {
     const k = slowK;
     const def = ACTIONS[action] || ACTIONS.idle;
     const x0 = pos[id];
     const to = x1 ?? x0 + (def.travel || 0) * face[id];
-    clips[id].push({ start, end: start + dur, action, x0, x1: to, facing: face[id], arc: def.arc || 0, spin: (def.spin || 0) * face[id] });
+    clips[id].push({ start, end: start + dur, action, x0, x1: to, facing: face[id], arc: def.arc || 0, spin: (def.spin || 0) * face[id], ...(y0 ? { y0 } : {}) });
     pos[id] = to;
     busyUntil[id] = start + dur;
     if (def.hits && def.hits.length > 1) {
@@ -280,15 +321,31 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
   };
   /** A target takes a blow at `at`. */
   const takeHit = (actorId: string, targetId: string, at: number, A: ActionDef, move: string, ko: boolean, dmgScale = 1) => {
+    // Height of the target when the blow lands (a fighter juggled in the air).
+    const cur = clips[targetId].find((c) => at >= c.start && at < c.end);
+    const airY = cur && (cur.action === 'juggled' || cur.action === 'thrown') ? Math.max(0, rawState(cur, at).y) : 0;
     interrupt(targetId, at);
     face[targetId] = pos[actorId] < pos[targetId] ? -1 : 1;
-    let r: string = ko ? (A.effect === 'launchFar' ? 'launchFar' : 'down') : A.effect || 'hit';
+    let r: string = A.effect === 'thrown' ? 'thrown' : A.effect === 'spiked' ? 'spiked' : A.effect === 'juggle' ? 'juggled'
+      : ko ? (A.effect === 'launchFar' ? 'launchFar' : 'down') : A.effect || 'hit';
     const hitX = pos[targetId];
-    add(targetId, r, at, ACTIONS[r].dur * slowK);
+    if (r === 'thrown') {
+      // Over the attacker's head to the other side; a hard landing.
+      const land = pos[actorId] - face[actorId] * 150;
+      add(targetId, 'thrown', at, ACTIONS.thrown.dur * slowK, land);
+      impacts.push({ t: at + ACTIONS.thrown.dur * 0.72 * slowK, x: land, y: 0, kind: 'land', strength: 1.25, target: targetId, attacker: actorId, dmg: 0, move: 'throw' });
+      face[actorId] = face[actorId] === 1 ? -1 : 1;
+    } else if (r === 'spiked') {
+      add(targetId, 'spiked', at, ACTIONS.spiked.dur * slowK, undefined, Math.max(40, airY));
+      impacts.push({ t: at + 0.3 * slowK, x: pos[targetId], y: 0, kind: 'land', strength: 1.6, target: targetId, attacker: actorId, dmg: 0, ground: true, move: 'spike' });
+    } else {
+      add(targetId, r, at, ACTIONS[r].dur * slowK);
+      if (r === 'juggled') juggledUntil[targetId] = at + ACTIONS.juggled.dur * slowK;
+    }
     if (FLOORED.has(r)) downed[targetId] = true;
     if (ko) out[targetId] = true;
     const high = move === 'uppercut' || move === 'roundhouse' ? 150 : move === 'kick' || move === 'flyingKick' ? 105 : A.ground ? 20 : 128;
-    impacts.push({ t: at, x: hitX, y: high, kind: r, strength: (r === 'hit' ? 0.6 : 1) * (A.power || 1), target: targetId, attacker: actorId, dmg: (A.dmg || 8) * dmgScale, ko, ground: !!A.ground, move });
+    impacts.push({ t: at, x: hitX, y: high + airY, kind: r, strength: (r === 'hit' ? 0.6 : 1) * (A.power || 1), target: targetId, attacker: actorId, dmg: (A.dmg || 8) * dmgScale, ko, ground: !!A.ground, move });
   };
   const skip = new Set<number>();
   let t = t0;
@@ -296,9 +353,52 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
     if (skip.has(bi)) return;
     const actor = fighters.find((f) => f.id === b.actor);
     if (!actor || out[actor.id]) return;
-    const def = ACTIONS[b.action] ? b.action : 'idle';
+    // ---- Two-fighter set pieces: a clash of blows, a tense standoff.
+    if ((b.action === 'clash' || b.action === 'standoff') && b.target) {
+      const foe = fighters.find((f) => f.id === b.target && !out[f.id]);
+      if (!foe) return;
+      slowK = 1;
+      let s0 = Math.max(t, busyUntil[actor.id], busyUntil[foe.id]);
+      for (const id of [actor.id, foe.id]) if (downed[id]) { add(id, 'getup', s0, ACTIONS.getup.dur); downed[id] = false; }
+      s0 = Math.max(s0, busyUntil[actor.id], busyUntil[foe.id]);
+      face[actor.id] = pos[foe.id] < pos[actor.id] ? -1 : 1; face[foe.id] = face[actor.id] === 1 ? -1 : 1;
+      focus.push({ t: s0, a: actor.id, b: foe.id });
+      const mid = (pos[actor.id] + pos[foe.id]) / 2;
+      if (b.action === 'standoff') {
+        // Both circle in slowly, eyes locked, then hold.
+        const gap = Math.abs(pos[foe.id] - pos[actor.id]);
+        const want = 300;
+        const d = gap > want + 20 ? Math.min(1.3, 0.5 + (gap - want) / 260) : 0;
+        if (d) for (const id of [actor.id, foe.id]) add(id, 'stalk', s0, d, mid - face[id] * want / 2);
+        const hold = 0.55;
+        for (const id of [actor.id, foe.id]) add(id, 'idle', s0 + d, hold);
+        if (b.line) lines.push({ t: s0 + d * 0.3, end: s0 + d + hold + 0.6, actor: actor.id, text: b.line });
+        t = s0 + d + hold;
+        return;
+      }
+      // Clash: both rush in and their blows meet in the middle.
+      const run = Math.max(0.16, Math.abs(pos[foe.id] - pos[actor.id]) / 2 / 1400);
+      for (const id of [actor.id, foe.id]) add(id, 'dash', s0, run, mid - face[id] * 62);
+      const blow = (id: string) => (fighters.find((f) => f.id === id)?.weapon === 'sword' ? 'slash' : 'punch');
+      const s1 = s0 + run;
+      const at = s1 + Math.max(ACTIONS[blow(actor.id)].impact!, ACTIONS[blow(foe.id)].impact!);
+      add(actor.id, blow(actor.id), s1 + (at - s1 - ACTIONS[blow(actor.id)].impact!), ACTIONS[blow(actor.id)].impact! + 0.04, pos[actor.id]);
+      add(foe.id, blow(foe.id), s1 + (at - s1 - ACTIONS[blow(foe.id)].impact!), ACTIONS[blow(foe.id)].impact! + 0.04, pos[foe.id]);
+      for (const id of [actor.id, foe.id]) { interrupt(id, at); add(id, 'recoil', at, ACTIONS.recoil.dur * 1.15, pos[id] - face[id] * 95); }
+      impacts.push({ t: at, x: mid, y: 128, kind: 'clash', strength: 1.7, attacker: actor.id, dmg: 0, move: 'clash' });
+      sfx.push({ t: at, kind: 'heavy' }, { t: at + 0.02, kind: 'boom' });
+      t = busyUntil[actor.id] + 0.05;
+      return;
+    }
+    let def = ACTIONS[b.action] ? b.action : 'idle';
+    // An air combo needs someone in the air to hit; otherwise it becomes a flying kick.
+    if (def === 'airCombo') {
+      const tg = b.target || nearest(actor.id)?.id;
+      if (!tg || !(juggledUntil[tg] > Math.max(t, busyUntil[actor.id]) + 0.15)) def = 'flyingKick';
+    }
     slowK = b.slow && b.slow > 1 ? b.slow : 1;
     const A0 = ACTIONS[def];
+    const isAirCombo = def === 'airCombo';
     const A: ActionDef = slowK === 1 ? A0 : { ...A0, dur: A0.dur * slowK, impact: A0.impact !== undefined ? A0.impact * slowK : undefined, hits: A0.hits?.map((h) => h * slowK) };
     let start = Math.max(t, busyUntil[actor.id]);
     // A fighter who is down gets up first.
@@ -360,9 +460,16 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
         projectiles.push({ t0: start + A.impact, t1: at + (A.projectile === 'beam' ? 0.45 : 0), x0: from, x1: pos[target.id], y: 118, kind: A.projectile, owner: actor.id });
       }
       const nb = beats[bi + 1];
-      const defended = !b.ko && nb && nb.actor === target.id && ['block', 'dodge', 'duck', 'backflip'].includes(nb.action) && !A.aoe;
+      const defended = !b.ko && !isAirCombo && nb && nb.actor === target.id && DEFENCES.includes(nb.action) && !A.aoe;
       // Multi-hit: the target staggers through the blows, then takes the last one.
-      if (A.hits && A.hits.length > 1 && !defended) {
+      if (A.hits && A.hits.length > 1 && !defended && isAirCombo) {
+        // Air combo: the blows land on the airborne target (no stagger), the last one spikes it down.
+        for (const h of A.hits.slice(0, -1)) {
+          const cur = clips[target.id].find((c) => start + h >= c.start && start + h < c.end);
+          const hy = cur ? Math.max(0, rawState(cur, start + h).y) : 0;
+          impacts.push({ t: start + h, x: pos[target.id], y: 120 + hy, kind: 'hit', strength: 0.6, target: target.id, attacker: actor.id, dmg: A.dmg || 5, move: def });
+        }
+      } else if (A.hits && A.hits.length > 1 && !defended) {
         const first = start + A.hits[0];
         interrupt(target.id, first);
         face[target.id] = pos[actor.id] < pos[target.id] ? -1 : 1;
@@ -375,11 +482,18 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
         face[target.id] = pos[actor.id] < pos[target.id] ? -1 : 1;
         add(target.id, nb.action, at - 0.12, ACTIONS[nb.action].dur);
         if (nb.action === 'block') impacts.push({ t: at, x: (pos[actor.id] + pos[target.id]) / 2, y: 130, kind: 'block', strength: 0.5 * (A.power || 1), target: target.id, attacker: actor.id, dmg: (A.dmg || 8) * 0.2, move: def });
+        if (nb.action === 'parry') {
+          // Deflected: sparks, and the attacker is thrown off balance — wide open for the counter.
+          impacts.push({ t: at, x: (pos[actor.id] + pos[target.id]) / 2, y: 135, kind: 'parry', strength: 0.95, target: target.id, attacker: actor.id, dmg: 0, move: def });
+          interrupt(actor.id, at);
+          add(actor.id, 'recoil', at, ACTIONS.recoil.dur, pos[actor.id] - face[actor.id] * 45);
+        }
       } else if (A.aoe) {
         const land = pos[actor.id];
         const hitList = enemies(actor.id).filter((f) => Math.abs(pos[f.id] - land) <= A.aoe!);
         if (!hitList.some((f) => f.id === target!.id)) hitList.push(target);
-        for (const f of hitList) takeHit(actor.id, f.id, at, A, def, !!b.ko, f.id === target.id ? 1 : 0.8);
+        // Only the targeted fighter can be knocked out; the rest of the blast area just takes the hit.
+        for (const f of hitList) takeHit(actor.id, f.id, at, A, def, !!b.ko && f.id === target.id, f.id === target.id ? 1 : 0.8);
         if (A.ground) impacts.push({ t: at, x: land, y: 0, kind: 'ground', strength: A.power || 1.5, attacker: actor.id, ground: true, move: def });
       } else {
         takeHit(actor.id, target.id, at, A, def, !!b.ko);
@@ -409,9 +523,10 @@ export function choreograph(fighters: Fighter[], beats: Beat[], opts: { start?: 
 
 
 /** Actions with the body off the ground (no foot planting). */
-const AIRBORNE = new Set(['jump', 'backflip', 'frontflip', 'flyingKick', 'launch', 'launchFar', 'down', 'downLie', 'getup', 'slide', 'slam', 'blink', 'stagger']);
-const LOCOMOTION = new Set(['run', 'dash', 'walk']);
-const REACTIONS = new Set(['hit', 'stagger', 'launch', 'launchFar', 'down']);
+const AIRBORNE = new Set(['jump', 'backflip', 'frontflip', 'flyingKick', 'launch', 'launchFar', 'down', 'downLie', 'getup', 'slide', 'slam', 'blink', 'stagger',
+  'thrown', 'juggled', 'spiked', 'airCombo', 'flyingKnee', 'tornadoKick', 'sweep', 'recoil']);
+const LOCOMOTION = new Set(['run', 'dash', 'walk', 'stalk']);
+const REACTIONS = new Set(['hit', 'stagger', 'launch', 'launchFar', 'down', 'thrown', 'juggled', 'spiked', 'recoil']);
 type FState = { pose: Pose; x: number; y: number; facing: 1 | -1; action: string; local: number };
 
 /** One clip on its own: pose, root motion (with physics for knock-backs). */
@@ -420,6 +535,24 @@ function rawState(c: Clip, t: number): FState {
   const def = ACTIONS[c.action];
   let pose = c.action === 'downLie' ? POSES.down : poseOf(c.action, def?.loop || c.action === 'idle' ? local : local * (def ? def.dur / dur : 1));
   let x: number, y: number;
+  if (c.action === 'spiked') {
+    // Falls straight out of the air, hits the floor, a small bounce.
+    const y0 = c.y0 || 120;
+    x = c.x0 + (c.x1 - c.x0) * ease(k);
+    const fall = 0.43;
+    y = k < fall ? y0 * (1 - (k / fall) ** 2) : k < fall + 0.2 ? 18 * 4 * ((k - fall) / 0.2) * (1 - (k - fall) / 0.2) : 0;
+    y += pose.y * Math.min(1, k / fall);
+    return { pose, x, y, facing: c.facing, action: c.action, local };
+  }
+  if (c.action === 'juggled') {
+    // Popped high and tumbling, then a fall flat on the floor (unless an air combo catches it).
+    x = c.x0 + (c.x1 - c.x0) * (1 - Math.pow(1 - k, 2));
+    const up = 0.8;
+    y = k < up ? c.arc * Math.sin(Math.PI * (k / up)) : 0;
+    y += pose.y * clamp((k - 0.7) / 0.3, 0, 1);
+    if (c.spin) pose = { ...pose, rot: pose.rot + c.spin * ease(Math.min(1, k / up)) };
+    return { pose, x, y, facing: c.facing, action: c.action, local };
+  }
   if (c.action === 'launch' || c.action === 'launchFar' || c.action === 'down') {
     // Ballistic: thrown back fast, slowing down; a short flight, a bounce, then a slide to a stop.
     const fe = c.action === 'launch' ? 0.5 : 0.6;
@@ -428,7 +561,7 @@ function rawState(c: Clip, t: number): FState {
     y = pose.y + c.arc * air;
     if (c.spin) pose = { ...pose, rot: pose.rot + c.spin * ease(Math.min(1, k / fe)) };
   } else {
-    const move = LOCOMOTION.has(c.action) || c.action === 'stagger' ? k : c.action === 'blink' ? (k < 0.5 ? 0 : 1) : def?.impact !== undefined ? snap(k * 1.6) : ease(k);
+    const move = LOCOMOTION.has(c.action) || c.action === 'stagger' || c.action === 'thrown' ? k : c.action === 'blink' ? (k < 0.5 ? 0 : 1) : def?.impact !== undefined ? snap(k * 1.6) : ease(k);
     x = c.x0 + (c.x1 - c.x0) * move;
     y = pose.y + (c.arc ? Math.sin(Math.PI * k) * c.arc : 0);
     if (c.spin) pose = { ...pose, rot: pose.rot + c.spin * ease(k) };
@@ -527,6 +660,10 @@ export interface StickStyle {
   size?: number;
   /** Square robot head. */
   squareHead?: boolean;
+  /** Rim light: a light outline around the whole figure (reads on dark / busy arenas). */
+  outline?: string;
+  /** Extra head radius (used by the outline pass). */
+  headPad?: number;
 }
 
 /** Height of the hip above the ground for a fighter (units, before lift). */
@@ -537,6 +674,9 @@ export const hipHeight = (size = 1) => (BONES.thigh + BONES.shin - 6) * size;
  * `scale` screen pixels per unit.
  */
 export function drawFighter(ctx: CanvasRenderingContext2D, p: Pose, facing: 1 | -1, x: number, groundY: number, lift: number, scale: number, st: StickStyle, alpha = 1) {
+  if (st.outline) {
+    drawFighter(ctx, p, facing, x, groundY, lift, scale, { ...st, ink: st.outline, accent: st.outline, width: st.width + 5, outline: undefined, glow: undefined, headPad: 2.6, gear: 'none', solid: true }, alpha * 0.9);
+  }
   const J = joints(p, facing);
   const size = st.size || 1;
   const sc = scale * size;
@@ -585,7 +725,7 @@ export function drawFighter(ctx: CanvasRenderingContext2D, p: Pose, facing: 1 | 
   seg([J.sF, J.eF, J.hF], W, ink);
   ctx.shadowBlur = 0;
   // Head
-  const hr = BONES.head;
+  const hr = BONES.head + (st.headPad || 0);
   if (st.squareHead) { ctx.fillStyle = ink; roundedRect(ctx, J.head[0] - hr, J.head[1] - hr, hr * 2, hr * 2, 4); ctx.fill(); }
   else { ctx.beginPath(); ctx.arc(J.head[0], J.head[1], hr, 0, Math.PI * 2); ctx.fillStyle = ink; ctx.fill(); }
   const hb = Math.atan2(J.head[1] - J.neck[1], J.head[0] - J.neck[0]);
@@ -637,14 +777,31 @@ export const ARCHETYPES: Archetype[] = ['speed', 'strength', 'tech', 'magic', 's
 
 interface MoveSet { approach: 'run' | 'dash' | 'walk'; attacks: [string, number][]; defend: string[]; defendRate: number; finisher: string[]; openers: string[]; size: number; weapon: 'none' | 'sword' | 'staff' }
 export const MOVESETS: Record<Archetype, MoveSet> = {
-  speed: { approach: 'dash', attacks: [['flurry', 3], ['jab', 2], ['combo', 2], ['kick', 2], ['roundhouse', 1], ['blink', 2]], defend: ['dodge', 'dodge', 'backflip', 'duck'], defendRate: 0.5, finisher: ['flurry', 'roundhouse', 'flyingKick'], openers: ['blink', 'dash'], size: 0.95, weapon: 'none' },
-  strength: { approach: 'walk', attacks: [['heavyPunch', 3], ['slam', 2], ['uppercut', 2], ['punch', 2]], defend: ['block', 'block'], defendRate: 0.4, finisher: ['heavyPunch', 'slam'], openers: ['flex'], size: 1.22, weapon: 'none' },
-  tech: { approach: 'run', attacks: [['blast', 3], ['beam', 1], ['punch', 2], ['kick', 1]], defend: ['block', 'dodge'], defendRate: 0.35, finisher: ['beam'], openers: ['taunt'], size: 1, weapon: 'none' },
-  magic: { approach: 'run', attacks: [['blast', 3], ['beam', 2], ['kick', 1]], defend: ['dodge', 'backflip'], defendRate: 0.35, finisher: ['beam'], openers: ['taunt'], size: 1, weapon: 'staff' },
-  sword: { approach: 'run', attacks: [['slash', 3], ['dashSlash', 2], ['kick', 1]], defend: ['block', 'dodge'], defendRate: 0.4, finisher: ['dashSlash', 'slash'], openers: ['taunt'], size: 1, weapon: 'sword' },
-  brawler: { approach: 'run', attacks: [['punch', 3], ['combo', 3], ['kick', 2], ['uppercut', 2], ['roundhouse', 1]], defend: ['block', 'duck'], defendRate: 0.35, finisher: ['uppercut', 'roundhouse'], openers: ['taunt'], size: 1.05, weapon: 'none' },
-  ninja: { approach: 'dash', attacks: [['flyingKick', 2], ['kick', 2], ['roundhouse', 2], ['combo', 2], ['blink', 1]], defend: ['backflip', 'dodge', 'duck'], defendRate: 0.45, finisher: ['flyingKick', 'roundhouse'], openers: ['frontflip'], size: 0.95, weapon: 'none' },
+  speed: { approach: 'dash', attacks: [['flurry', 3], ['jab', 2], ['combo', 2], ['kick', 2], ['roundhouse', 1], ['flyingKnee', 1], ['sweep', 1], ['blink', 2]], defend: ['dodge', 'dodge', 'backflip', 'duck', 'parry'], defendRate: 0.5, finisher: ['flurry', 'tornadoKick', 'flyingKick', 'juggle'], openers: ['blink', 'dash'], size: 0.95, weapon: 'none' },
+  strength: { approach: 'walk', attacks: [['heavyPunch', 3], ['slam', 2], ['uppercut', 2], ['punch', 2], ['elbow', 1], ['axeKick', 1], ['throw', 1]], defend: ['block', 'block', 'parry'], defendRate: 0.4, finisher: ['heavyPunch', 'slam', 'throw'], openers: ['flex'], size: 1.22, weapon: 'none' },
+  tech: { approach: 'run', attacks: [['blast', 3], ['beam', 1], ['punch', 2], ['kick', 1], ['sweep', 1]], defend: ['block', 'dodge', 'backflip'], defendRate: 0.35, finisher: ['beam', 'juggle'], openers: ['taunt'], size: 1, weapon: 'none' },
+  magic: { approach: 'run', attacks: [['blast', 3], ['beam', 2], ['kick', 1], ['axeKick', 1]], defend: ['dodge', 'backflip', 'parry'], defendRate: 0.35, finisher: ['beam', 'tornadoKick'], openers: ['taunt'], size: 1, weapon: 'staff' },
+  sword: { approach: 'run', attacks: [['slash', 3], ['dashSlash', 2], ['kick', 1], ['elbow', 1], ['sweep', 1]], defend: ['block', 'dodge', 'parry', 'parry'], defendRate: 0.45, finisher: ['dashSlash', 'slash', 'juggle'], openers: ['taunt'], size: 1, weapon: 'sword' },
+  brawler: { approach: 'run', attacks: [['punch', 3], ['combo', 3], ['kick', 2], ['uppercut', 2], ['elbow', 2], ['flyingKnee', 1], ['roundhouse', 1], ['throw', 1]], defend: ['block', 'duck', 'parry'], defendRate: 0.35, finisher: ['uppercut', 'roundhouse', 'throw', 'juggle'], openers: ['taunt'], size: 1.05, weapon: 'none' },
+  ninja: { approach: 'dash', attacks: [['flyingKick', 2], ['kick', 2], ['roundhouse', 2], ['combo', 2], ['tornadoKick', 1], ['sweep', 2], ['axeKick', 1], ['blink', 1]], defend: ['backflip', 'dodge', 'duck', 'parry'], defendRate: 0.45, finisher: ['flyingKick', 'tornadoKick', 'juggle', 'axeKick'], openers: ['frontflip'], size: 0.95, weapon: 'none' },
 };
+
+/**
+ * Exchanges a fighter of this archetype likes to start. An exchange is a short
+ * phrase of several beats (a combo string, a trade, a parry and punish…), so
+ * rounds read like real fight choreography instead of single random blows.
+ */
+const EXCHANGES: Record<Archetype, [string, number][]> = {
+  speed: [['string', 3], ['trade', 2], ['chase', 2], ['juggle', 2], ['dodgeCounter', 2], ['blinkStrike', 2], ['sweep', 1], ['standoff', 1], ['feint', 1]],
+  strength: [['heavy', 3], ['clash', 2], ['throw', 2], ['trade', 2], ['blockCounter', 2], ['standoff', 1]],
+  tech: [['zone', 3], ['dodgeCounter', 2], ['trade', 1], ['string', 1], ['standoff', 1], ['feint', 1]],
+  magic: [['zone', 3], ['dodgeCounter', 2], ['blinkStrike', 1], ['trade', 1], ['standoff', 1]],
+  sword: [['clash', 2], ['parryPunish', 3], ['string', 2], ['dashThrough', 2], ['standoff', 2], ['feint', 1]],
+  brawler: [['trade', 3], ['string', 2], ['throw', 2], ['blockCounter', 2], ['clash', 1], ['sweep', 1], ['feint', 1]],
+  ninja: [['juggle', 2], ['chase', 2], ['sweep', 2], ['string', 2], ['parryPunish', 1], ['blinkStrike', 1], ['standoff', 1]],
+};
+const LAUNCHERS = ['kick', 'roundhouse', 'uppercut', 'tornadoKick', 'flyingKnee', 'heavyPunch', 'axeKick', 'slash'];
+const SHORT_HITS = ['jab', 'punch', 'combo', 'elbow', 'kick', 'slash'];
 
 export interface VsSide { id: 'A' | 'B'; name: string; label: string; archetype: Archetype; color: string; count: number; gear?: Gear }
 export interface VsRound { winner: 'A' | 'B'; lines?: { side: 'A' | 'B'; when: 'start' | 'end'; text: string }[] }
@@ -678,8 +835,10 @@ export function vsFighters(sides: VsSide[]): (Fighter & { side: 'A' | 'B'; arche
 
 /**
  * Beats for one round. The script decides who wins the round; the planner
- * makes it a real fight: both sides land blows, the loser defends and
- * counters, the round ends with the winner's finisher (a knockout).
+ * makes it a real fight: exchanges of several beats (strings, trades, clashes,
+ * parries, throws, air juggles, chases, standoffs), both sides land blows, the
+ * loser defends and counters, and the round ends with a varied finisher (a
+ * knockout in slow motion). Every round is seeded differently, so no two look alike.
  */
 export function planRound(sides: VsSide[], round: VsRound, index: number, total: number, seconds: number, seed: string): Beat[] {
   const r = rng(`${seed}:round${index}`);
@@ -692,60 +851,126 @@ export function planRound(sides: VsSide[], round: VsRound, index: number, total:
   const alive = (id: 'A' | 'B') => members(id).filter((m) => standing[m]);
   const beats: Beat[] = [];
   let est = 0;
-  const cost = (a: string) => (ACTIONS[a]?.dur || 0.6) * 0.85 + 0.25;
+  const cost = (a: string) => a === 'clash' ? 1.5 : a === 'standoff' ? 1.6 : (ACTIONS[a]?.dur || 0.6) * 0.85 + 0.25;
   const push = (b: Beat) => { beats.push(b); est += cost(b.action); };
   const line = (side: 'A' | 'B', when: 'start' | 'end') => (round.lines || []).find((l) => l.side === side && l.when === when)?.text;
-  // Opening: each side shows off (and may talk).
-  for (const sid of index % 2 ? [L, W] : [W, L]) {
-    const ms = MOVESETS[sideOf(sid).archetype];
-    const who = alive(sid)[0];
-    const text = line(sid, 'start');
-    if (text) push({ actor: who, action: sid === W && ms.openers.includes('flex') ? 'flex' : 'taunt', line: text });
-    else if (r.next() < 0.5) push({ actor: who, action: r.pick(ms.openers.filter((o) => !['dash', 'blink'].includes(o)).concat(['taunt'])) });
+  const has = (ms: MoveSet, a: string) => ms.attacks.some((x) => x[0] === a);
+  const pickFrom = (ms: MoveSet, pool: string[], fallback: string) => { const ok = ms.attacks.filter((x) => pool.includes(x[0])); return ok.length ? r.weighted(ok) : fallback; };
+  const attackOf = (ms: MoveSet) => { const a = r.weighted(ms.attacks.filter((x) => x[0] !== 'blink')); return a; };
+
+  // Opening: a different opening each round — a standoff, a show-off, or straight in.
+  const opening = r.pick(['standoff', 'showoff', 'showoff', 'rush']);
+  const firstW = alive(W)[0], firstL = alive(L)[0];
+  if (opening === 'standoff' && firstW && firstL) push({ actor: firstW, action: 'standoff', target: firstL, line: line(W, 'start') || line(L, 'start') });
+  else {
+    for (const sid of index % 2 ? [L, W] : [W, L]) {
+      const ms = MOVESETS[sideOf(sid).archetype];
+      const who = alive(sid)[0];
+      const text = line(sid, 'start');
+      if (text) push({ actor: who, action: sid === W && ms.openers.includes('flex') ? 'flex' : 'taunt', line: text });
+      else if (opening === 'showoff' && r.next() < 0.6) push({ actor: who, action: r.pick(ms.openers.filter((o) => !['dash', 'blink'].includes(o)).concat(['taunt'])) });
+    }
   }
+
   const crowdSide = (['A', 'B'] as const).find((s) => members(s).length > 1);
-  // The crowd loses members along the way when it loses the round; when it wins, it wears the hero down.
   const koBudget = crowdSide ? (crowdSide === L ? members(crowdSide).length - 1 : Math.min(members(crowdSide).length - 1, Math.floor(members(crowdSide).length / 2))) : 0;
   let kos = 0;
-  const target = seconds - 2.2; // leave room for the finisher + victory
-  let n = 0;
-  while (est < target && n < 60) {
+  const target = seconds - 2.6; // room for the finisher + victory
+  let n = 0, lastEx = '', prevEx = '';
+  while (est < target && n < 40) {
     n++;
     const late = est / target;
-    const winnerTurn = r.next() < 0.52 + late * 0.25;
+    const winnerTurn = r.next() < 0.5 + late * 0.28;
     const atkSide: 'A' | 'B' = winnerTurn ? W : L;
     const defSide: 'A' | 'B' = atkSide === 'A' ? 'B' : 'A';
     const atkList = alive(atkSide), defList = alive(defSide);
     if (!atkList.length || !defList.length) break;
-    const actor = r.pick(atkList);
-    const tgt = r.pick(defList);
-    const ms = MOVESETS[sideOf(atkSide).archetype];
-    let action = r.weighted(ms.attacks);
-    if (action === 'blink') { push({ actor, action: 'blink', target: tgt }); action = r.pick(['flurry', 'kick', 'combo']); }
-    const defMs = MOVESETS[sideOf(defSide).archetype];
-    // Crowd members: one or two good hits and they're out (when the crowd is losing).
-    const crowdKo = crowdSide === defSide && kos < koBudget && defList.length > 1 && r.next() < (defSide === L ? 0.55 : 0.3);
-    push({ actor, action, target: tgt, ko: crowdKo || undefined });
-    if (crowdKo) { standing[tgt] = false; kos++; continue; }
-    // Defend (the round's loser defends less as the round goes on).
-    const rate = defMs.defendRate * (defSide === L ? 1 - late * 0.5 : 1);
-    if (r.next() < rate && !ACTIONS[action].aoe) push({ actor: tgt, action: r.pick(defMs.defend) });
-    // Counter-attack after a defence sometimes.
-    else if (r.next() < 0.18 && ACTIONS[action].effect !== 'launchFar') {
-      const cms = MOVESETS[sideOf(defSide).archetype];
-      push({ actor: tgt, action: r.weighted(cms.attacks.filter((a) => a[0] !== 'blink')), target: actor });
+    const a = r.pick(atkList), d = r.pick(defList);
+    const ams = MOVESETS[sideOf(atkSide).archetype], dms = MOVESETS[sideOf(defSide).archetype];
+    // Never the same exchange twice in a row (and rarely within three).
+    let ex = r.weighted(EXCHANGES[sideOf(atkSide).archetype]);
+    for (let k = 0; k < 4 && (ex === lastEx || (ex === prevEx && r.next() < 0.7)); k++) ex = r.weighted(EXCHANGES[sideOf(atkSide).archetype]);
+    prevEx = lastEx; lastEx = ex;
+    // A crowd member that is losing goes down for good on the exchange's last blow.
+    const crowdKo = crowdSide === defSide && kos < koBudget && defList.length > 1 && r.next() < (defSide === L ? 0.5 : 0.25);
+    const finalBlow = (b: Beat) => { if (crowdKo) { b.ko = true; standing[d] = false; kos++; } push(b); };
+    // The round's loser defends less as the round goes on.
+    const defRate = dms.defendRate * (defSide === L ? 1 - late * 0.5 : 1);
+    switch (ex) {
+      case 'string': {
+        const k = 2 + (r.next() < 0.45 ? 1 : 0);
+        for (let i = 0; i < k - 1; i++) {
+          push({ actor: a, action: pickFrom(ams, SHORT_HITS, 'punch'), target: d });
+          if (i === 0 && r.next() < defRate * 0.6) { push({ actor: d, action: r.pick(dms.defend) }); break; }
+        }
+        finalBlow({ actor: a, action: pickFrom(ams, LAUNCHERS, 'kick'), target: d });
+        break;
+      }
+      case 'trade': {
+        push({ actor: a, action: pickFrom(ams, SHORT_HITS, 'punch'), target: d });
+        if (!crowdKo) push({ actor: d, action: pickFrom(dms, SHORT_HITS, 'punch'), target: a });
+        finalBlow({ actor: a, action: attackOf(ams), target: d });
+        break;
+      }
+      case 'chase': {
+        push({ actor: d, action: r.pick(['backflip', 'dodge', 'backflip']) });
+        finalBlow({ actor: a, action: r.pick(['flyingKick', 'flyingKnee', has(ams, 'dashSlash') ? 'dashSlash' : 'flyingKick']), target: d });
+        break;
+      }
+      case 'juggle': {
+        push({ actor: a, action: 'launcher', target: d });
+        finalBlow({ actor: a, action: 'airCombo', target: d });
+        break;
+      }
+      case 'dodgeCounter': {
+        push({ actor: a, action: attackOf(ams), target: d });
+        push({ actor: d, action: r.pick(dms.defend.filter((x) => x !== 'block').concat(['dodge'])) });
+        push({ actor: d, action: attackOf(dms), target: a });
+        break;
+      }
+      case 'blockCounter': {
+        push({ actor: a, action: attackOf(ams), target: d });
+        push({ actor: d, action: 'block' });
+        push({ actor: d, action: pickFrom(dms, ['elbow', 'punch', 'sweep', 'uppercut', 'kick', 'slash'], 'punch'), target: a });
+        break;
+      }
+      case 'parryPunish': {
+        push({ actor: a, action: pickFrom(ams, SHORT_HITS, 'punch'), target: d });
+        push({ actor: d, action: 'parry' });
+        push({ actor: d, action: pickFrom(dms, ['heavyPunch', 'slash', 'axeKick', 'roundhouse', 'uppercut', 'tornadoKick'], 'kick'), target: a });
+        break;
+      }
+      case 'clash': push({ actor: a, action: 'clash', target: d }); break;
+      case 'standoff': push({ actor: a, action: 'standoff', target: d }); if (r.next() < 0.6) push({ actor: a, action: 'feint' }); break;
+      case 'feint': push({ actor: a, action: 'feint' }); finalBlow({ actor: a, action: attackOf(ams), target: d }); break;
+      case 'throw': finalBlow({ actor: a, action: 'throw', target: d }); break;
+      case 'heavy': finalBlow({ actor: a, action: pickFrom(ams, ['heavyPunch', 'slam', 'axeKick', 'uppercut'], 'heavyPunch'), target: d }); break;
+      case 'zone': {
+        push({ actor: a, action: r.next() < 0.75 ? 'blast' : 'beam', target: d });
+        if (r.next() < defRate) push({ actor: d, action: r.pick(['dodge', 'backflip', 'duck']) });
+        else if (r.next() < 0.5) finalBlow({ actor: a, action: 'blast', target: d });
+        break;
+      }
+      case 'blinkStrike': push({ actor: a, action: 'blink', target: d }); finalBlow({ actor: a, action: pickFrom(ams, ['flurry', 'kick', 'combo', 'roundhouse', 'slash'], 'kick'), target: d }); break;
+      case 'dashThrough': finalBlow({ actor: a, action: has(ams, 'dashSlash') ? 'dashSlash' : 'flyingKick', target: d }); break;
+      case 'sweep': finalBlow({ actor: a, action: 'sweep', target: d }); break;
+      default: finalBlow({ actor: a, action: attackOf(ams), target: d });
     }
   }
-  // Finisher: the winner knocks out whoever is left (a crowd winning piles on).
+  // Finisher: varied — a juggle, a throw, a spinning kick, a beam… the last knockout in slow motion.
   const wms = MOVESETS[sideOf(W).archetype];
   const lefts = alive(L);
   const winners = alive(W);
   lefts.forEach((victim, i) => {
     const actor = winners[i % winners.length];
+    const lastOne = i === lefts.length - 1;
     const fin = r.pick(wms.finisher);
-    if (wms.approach === 'dash' && r.next() < 0.5) push({ actor, action: 'blink', target: victim });
-    // The last knockout of the round plays in slow motion.
-    push({ actor, action: fin, target: victim, ko: true, slow: i === lefts.length - 1 ? 2.3 : undefined });
+    if (wms.approach === 'dash' && r.next() < 0.4) push({ actor, action: 'blink', target: victim });
+    if (fin === 'juggle') {
+      // Launcher and air combo share the slow motion so the target is still in the air for every hit.
+      push({ actor, action: 'launcher', target: victim, slow: lastOne ? 2.1 : undefined });
+      push({ actor, action: 'airCombo', target: victim, ko: true, slow: lastOne ? 2.1 : undefined });
+    } else push({ actor, action: fin, target: victim, ko: true, slow: lastOne ? 2.3 : undefined });
   });
   const endLine = line(W, 'end');
   push({ actor: winners[0], action: endLine && wms.openers.includes('flex') ? 'flex' : 'victory', line: endLine });

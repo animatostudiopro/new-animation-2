@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { choreograph, vsFighters, planRound, roundHealth, ARCHETYPES, type VsSide, type VsRound } from './stickman.ts';
 import { normalizeStudio } from './studio.ts';
+import { arenaOrder, ARENA_IDS } from './arenas.ts';
 
 export interface Word { text: string; start: number; end: number; speaker?: string }
 export interface Kit {
@@ -643,7 +644,8 @@ Return ONLY JSON: {"title": "max 60 chars", "logline": "one sentence", "descript
 // STICKMAN — "VS" fight edits: two sides clash over rounds (speed vs strength,
 // a king vs an army, an engineer vs AI coding agents…), one side wins.
 // ===========================================================================
-export const FIGHT_LOCATIONS = ['white'];
+/** 3D fight arenas (anim/arenas.ts): every round of a video in a different one. */
+export const FIGHT_LOCATIONS = ARENA_IDS;
 
 /** Built-in match-ups (offline, and when the writer is unavailable in dry runs). */
 const MATCHUPS: { sides: VsSide[]; title: string; hook: string; verdict: string; winners: ('A' | 'B')[] }[] = [
@@ -740,6 +742,7 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
   sfx.push({ t: 0.25, kind: 'boom' });
   const fightLen = shorts ? 12 : 20;
   const fights: any[] = [];
+  const arenaIds = arenaOrder(`${CFG.campaignId}:${CFG.partNumber}:${title}`, rounds.length);
   let t = introEnd;
   rounds.forEach((r, ri) => {
     const start = t;
@@ -752,10 +755,12 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
     sfx.push(...ch.sfx);
     for (const im of ch.impacts) {
       if (im.kind === 'down' || im.kind === 'launchFar') sfx.push({ t: im.t + (im.kind === 'launchFar' ? 0.7 : 0.4), kind: 'thud' });
+      if (im.kind === 'land') sfx.push({ t: im.t, kind: im.strength >= 1.5 ? 'heavy' : 'thud' });
+      if (im.kind === 'parry') sfx.push({ t: im.t, kind: 'slash' });
       if (im.ground) sfx.push({ t: im.t + 0.05, kind: 'crumble' });
     }
     const end = cardEnd + 0.25 + ch.duration;
-    fights.push({ start, cardEnd, end, location: 'white', time: 'day', card: '', round: ri + 1, final: ri === rounds.length - 1, winner: r.winner, choreo: ch, health: roundHealth(ch, fighters, r.winner) });
+    fights.push({ start, cardEnd, end, location: arenaIds[ri], time: 'day', card: '', round: ri + 1, final: ri === rounds.length - 1, winner: r.winner, choreo: ch, health: roundHealth(ch, fighters, r.winner) });
     t = end;
   });
   const outroStart = t;
@@ -775,7 +780,7 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
   const score = `${champSide.label} wins ${Math.max(wins.A, wins.B)}-${Math.min(wins.A, wins.B)}`;
   return {
     // The VS face-off card and the big hits.
-    highlights: [{ t: Math.max(0.6, introEnd - 0.9), w: 0.5 }, ...fights.flatMap((f: any) => (f.choreo?.impacts || []).filter((im: any) => im.ko || im.ground || ['down', 'launchFar'].includes(im.kind) || (im.kind !== 'block' && im.strength >= 0.9)).map((im: any) => ({ t: im.t - 0.1, w: im.ko ? 0.8 : 0.5 })))],
+    highlights: [{ t: Math.max(0.6, introEnd - 0.9), w: 0.5 }, ...fights.flatMap((f: any) => (f.choreo?.impacts || []).filter((im: any) => im.ko || im.ground || ['down', 'launchFar', 'clash', 'spiked', 'thrown'].includes(im.kind) || (!['block', 'parry', 'land'].includes(im.kind) && im.strength >= 0.9)).map((im: any) => ({ t: im.t - 0.1, w: im.ko ? 0.8 : im.kind === 'clash' ? 0.7 : 0.5 })))],
     title,
     description: `${clean(j.description, 700)}\n\n${rounds.map((r, i) => `Round ${i + 1}: ${sides.find((x) => x.id === r.winner)!.label}`).join('\n')}\n🏆 ${score}.\n\nWho should fight next? Tell us in the comments.\nAn original stickman animation, just for fun — not a real-world test.`,
     hashtags: [...cleanTags(j.hashtags), 'stickman', 'stickfight', 'whowins'], tags: ['stickman', 'stick fight', 'vs', 'who wins', 'animation', ...sides.map((x) => String(x.label || '').toLowerCase())],

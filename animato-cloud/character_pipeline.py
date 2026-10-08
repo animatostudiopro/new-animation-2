@@ -557,57 +557,77 @@ def mask_for(labels, *names):
 # Eyes, blinks and mouths
 # ---------------------------------------------------------------------------
 def split_eye_details(eye_mask, image):
-    """eye mask -> (eye, iris, pupil). The parser has no iris/pupil classes, so the darkest
-    compact blob near the eye centre is the pupil and a ring around it is the iris."""
+    """eye mask -> (eye, iris, pupil, iris_src).
+
+    Works for photos and for illustrated / anime eyes (large bright irises): the iris is
+    the part of the eye whose colour differs from the eye white, completed into a full
+    circle (the lids hide part of it in the picture); the pupil is the darkest blob in it.
+    `iris_src` is the image with the hidden part of the iris painted in, so the iris can
+    move under the eyelid frame without showing a flat, clipped edge."""
     import numpy as np
     from PIL import Image
     try: import cv2
     except Exception: cv2 = None
-    if not has(eye_mask): return None, None, None
+    if not has(eye_mask): return None, None, None, None
     x0, y0, x1, y1 = eye_mask.getbbox()
     w, h = max(1, x1 - x0), max(1, y1 - y0)
-    if w < 4 or h < 3: return eye_mask, None, None
-    eye = (np.array(eye_mask.crop((x0, y0, x1, y1))) > 127).astype(np.uint8) * 255
-    pupil = None
-    if cv2 is not None:
-        gray = cv2.cvtColor(np.array(image.convert("RGB").crop((x0, y0, x1, y1))), cv2.COLOR_RGB2GRAY)
-        cx0, cx1, cy0, cy1 = int(w * .15), int(w * .85), int(h * .15), int(h * .9)
-        roi = gray[cy0:cy1, cx0:cx1][eye[cy0:cy1, cx0:cx1] > 0]
-        if roi.size >= 4:
-            thr = float(np.percentile(roi, 25))
-            dark = ((gray <= thr).astype(np.uint8) * 255)
-            dark[:cy0] = 0; dark[cy1:] = 0; dark[:, :cx0] = 0; dark[:, cx1:] = 0
-            dark = cv2.bitwise_and(dark, eye)
-            n, lab, stats, cent = cv2.connectedComponentsWithStats(dark, 8)
-            cands = []
-            for i in range(1, n):
-                area = int(stats[i, cv2.CC_STAT_AREA])
-                if 2 <= area <= max(12, int(w * h * .3)):
-                    cx, cy = cent[i]
-                    cands.append((abs(cx - w / 2) + abs(cy - h / 2) * 0.5 - math.sqrt(area) * 0.3, i))
-            if cands:
-                pupil = (lab == sorted(cands)[0][1]).astype(np.uint8) * 255
-    if pupil is None:
-        pupil = np.zeros((h, w), np.uint8)
-        r = max(1, int(min(w, h) * .18))
-        if cv2 is not None: cv2.circle(pupil, (w // 2, h // 2), r, 255, -1)
-        else: pupil[h // 2 - r:h // 2 + r, w // 2 - r:w // 2 + r] = 255
-    if cv2 is not None:
-        # Iris: about 40% of the eye width, centred on the pupil blob, clipped to the eye.
-        ys, xs = np.where(pupil > 0)
-        pcx, pcy = (float(xs.mean()), float(ys.mean())) if len(xs) else (w / 2, h / 2)
-        ir = max(2, int(min(h * 0.55, w * 0.22)))
-        iris = np.zeros((h, w), np.uint8); cv2.circle(iris, (int(pcx), int(pcy)), ir, 255, -1)
-        iris = np.maximum(iris, pupil)
-        pr = max(1, int(ir * 0.45))
-        pupil = np.zeros((h, w), np.uint8); cv2.circle(pupil, (int(pcx), int(pcy)), pr, 255, -1)
+    if w < 6 or h < 4 or cv2 is None: return eye_mask, None, None, None
+    pad = int(max(w, h) * 0.6)
+    X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(image.width, x1 + pad), min(image.height, y1 + pad)
+    rgb = np.array(image.convert("RGB").crop((X0, Y0, X1, Y1)))
+    eye = (np.array(eye_mask.crop((X0, Y0, X1, Y1))) > 127).astype(np.uint8)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L = lab[..., 0]
+    inner = cv2.erode(eye, np.ones((3, 3), np.uint8), iterations=max(1, int(h * 0.1)))
+    if inner.sum() < 6: inner = eye
+    px = lab[inner > 0]
+    sclera = np.median(px[px[:, 0] >= np.percentile(px[:, 0], 65)], axis=0)
+    dist = np.sqrt(((lab - sclera) ** 2).sum(axis=2))
+    cand = ((dist > 26) | (L < sclera[0] * 0.72)).astype(np.uint8) & inner
+    cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, labm, stats, cent = cv2.connectedComponentsWithStats(cand, 8)
+    ecx, ecy = (x0 + x1) / 2 - X0, (y0 + y1) / 2 - Y0
+    best, bscore = 0, None
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < max(4, w * h * 0.02): continue
+        sc = -area + (abs(cent[i][0] - ecx) / w + abs(cent[i][1] - ecy) / h) * w * h * 0.3
+        if bscore is None or sc < bscore: best, bscore = i, sc
+    if best:
+        bx, by, bw, bh = stats[best, 0], stats[best, 1], stats[best, 2], stats[best, 3]
+        r = float(np.clip(max(bw, bh * 1.05) / 2, h * 0.32, w * 0.4))
+        cx = bx + bw / 2
+        # The lids clip the iris: its visible bottom edge locates the centre.
+        cy = (by + bh - r) if bh < 2 * r * 0.95 and (by + bh) >= (y1 - Y0) - h * 0.25 else by + bh / 2
+        cy = float(np.clip(cy, ecy - h * 0.45, ecy + h * 0.45))
     else:
-        iris = pupil.copy()
-    iris = np.minimum(iris, eye); pupil = np.minimum(pupil, iris)
+        r, cx, cy = float(min(h * 0.5, w * 0.24)), ecx, ecy
+    iris = np.zeros(eye.shape, np.uint8); cv2.circle(iris, (int(round(cx)), int(round(cy))), max(2, int(round(r))), 1, -1)
+    vis = iris & eye
+    pupil = np.zeros_like(iris)
+    if vis.sum() > 8:
+        thr = np.percentile(L[vis > 0], 22)
+        dk = ((L <= thr).astype(np.uint8) & vis)
+        n2, lab2, st2, ce2 = cv2.connectedComponentsWithStats(dk, 8)
+        if n2 > 1:
+            j = 1 + int(np.argmax(st2[1:, cv2.CC_STAT_AREA]))
+            pcx, pcy = ce2[j]
+            pr = float(np.clip(np.sqrt(st2[j, cv2.CC_STAT_AREA] / np.pi) * 1.15, r * 0.25, r * 0.55))
+            cv2.circle(pupil, (int(round(pcx)), int(round(pcy))), max(1, int(round(pr))), 1, -1)
+    if pupil.sum() == 0: cv2.circle(pupil, (int(round(cx)), int(round(cy))), max(1, int(round(r * 0.42))), 1, -1)
+    pupil &= iris
+    src = rgb.copy()
+    hidden = (iris > 0) & (eye == 0)
+    if hidden.any() and vis.sum() > 4:
+        fill = cv2.inpaint(rgb, (hidden * 255).astype(np.uint8), max(2, int(r * 0.4)), cv2.INPAINT_TELEA)
+        med = np.median(rgb[vis > 0], axis=0)
+        src[hidden] = (fill[hidden] * 0.5 + med * 0.5).astype(np.uint8)
     def full(local):
-        m = Image.new("L", eye_mask.size, 0); m.paste(Image.fromarray(local, "L"), (x0, y0)); return m
+        mm = Image.new("L", eye_mask.size, 0); mm.paste(Image.fromarray((local > 0).astype(np.uint8) * 255, "L"), (X0, Y0)); return mm
+    srcimg = image.convert("RGBA").copy()
+    srcimg.paste(Image.fromarray(src).convert("RGBA"), (X0, Y0))
     iris_m, pupil_m = full(iris), full(pupil)
-    return eye_mask, (iris_m if has(iris_m) else None), (pupil_m if has(pupil_m) else None)
+    return eye_mask, (iris_m if has(iris_m) else None), (pupil_m if has(pupil_m) else None), srcimg
 
 
 def sclera_fill(img, eye, iris):
@@ -1117,6 +1137,8 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     # 5) Hair: the part over the skull moves with the head (front); long lengths stay behind.
     skull = shape_mask((W, H), "ellipse", [hb[0] - fw * .28, hb[1] - fh * .65, hb[2] + fw * .28, hb[3] + fh * .05])
     hair_front = intersect(hair, skull)
+    # Strands that fall past the skull (over the ears, neck, shoulders, chest) hang from the
+    # head: they move with the head and are drawn in front of the body.
     hair_back = subtract(hair, hair_front)
     scalp_region = shape_mask((W, H), "ellipse", [hb[0] - fw * .10, hb[1] - fh * .38, hb[2] + fw * .10, hb[1] + fh * .62])
     hair_reveal = intersect(dilate(hair, 4), scalp_region)
@@ -1125,7 +1147,10 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     arm_specs = []
     hands_visible = {"left": False, "right": False}
     head_block = dilate(union(face_all, hair_front, hat, neck), 3)
-    if pose:
+    # Limbs are rigged only on full-body pictures. In a portrait the "arms" are sleeves or
+    # cropped shoulders: cutting them out leaves floating chunks, so they stay with the body
+    # (which breathes and sways as one piece).
+    if pose and is_full and os.environ.get("CHARACTER_RIG_ARMS", "1") != "0":
         for side_name, side, pre in (("left", 1, "l"), ("right", -1, "r")):
             S, E, Wr = pose.get(f"{pre}_shoulder"), pose.get(f"{pre}_elbow"), pose.get(f"{pre}_wrist")
             if not (ok(pose, f"{pre}_shoulder", 0.3, (W, H)) and ok(pose, f"{pre}_elbow", 0.3, (W, H)) and ok(pose, f"{pre}_wrist", 0.3, (W, H))):
@@ -1162,7 +1187,7 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     hair_fill_prompt = str((plan or {}).get("hair_fill_prompt") or "natural scalp and forehead skin, same skin tone and lighting")
     eye_parts = {}
     for side, key in (("l", "l_eye"), ("r", "r_eye")):
-        eye_parts[side] = split_eye_details(m[key], img) if has(m[key]) else (None, None, None)
+        eye_parts[side] = split_eye_details(m[key], img) if has(m[key]) else (None, None, None, None)
     # Eyes the parser missed (closed in the source, stylised art, sunglasses) still get a
     # blink layer, placed from the pose eye keypoints or the face proportions.
     blink_only = {}
@@ -1255,8 +1280,23 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     if not face_found:
         head_base = subtract(intersect(alpha, shape_mask((W, H), "ellipse", list(hb))), hair_back)
     head_base = subtract(head_base, arms_all)
-    body_mask = subtract(subtract(alpha, union(head_base, hair, hat, neck, m["eyeglass"])), arms_all)
-    body_mask = union(body_mask, arms_over_torso)
+    body_core = subtract(subtract(alpha, union(head_base, hair, hat, neck, m["eyeglass"])), arms_all)
+    # Hair hanging over the body leaves holes in it; when the hair moves those holes would
+    # show the background (the dark jagged strip). Keep the body solid behind the hair:
+    # every hair pixel enclosed left-and-right by body on its row belongs to the body too,
+    # painted from the clothes / skin around it.
+    behind_hair = None
+    if has(body_core) and has(hair_back):
+        bc = np.array(body_core) > 127; hb_arr = np.array(dilate(hair_back, 2)) > 127
+        cols = np.arange(W)[None, :]
+        anyb = bc.any(axis=1)
+        left = np.where(anyb, np.argmax(bc, axis=1), W); right = np.where(anyb, W - 1 - np.argmax(bc[:, ::-1], axis=1), -1)
+        inside = (cols >= left[:, None]) & (cols <= right[:, None])
+        enclosed = hb_arr & inside & (np.array(alpha) > 127)
+        if enclosed.any(): behind_hair = Image.fromarray((enclosed * 255).astype(np.uint8), "L")
+    body_mask = union(body_core, behind_hair, arms_over_torso)
+    if has(behind_hair):
+        body_src = cv_inpaint(body_src, dilate(behind_hair, 2), 9)
     if not has(body_mask): body_mask = m["cloth"] if has(m["cloth"]) else None
 
     assets = {}
@@ -1286,6 +1326,12 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
         save("torso", "Torso", body_mask, body_src, "root", ["Body", "Torso"])
     # The neck continues up under the chin (hidden at rest) so a head tilt never opens a gap.
     neck_src, neck_full = filled, neck
+    if has(neck) and has(hair_back):
+        # Strands across the neck: the neck stays whole behind them.
+        nbx = neck.getbbox()
+        col = intersect(dilate(hair_back, 2), shape_mask((W, H), "rect", [nbx[0], nbx[1], nbx[2], nbx[3]]))
+        if has(col):
+            neck = union(neck, col); filled = cv_inpaint(filled, dilate(col, 2), 7)
     if has(neck):
         nb = neck.getbbox(); nw = nb[2] - nb[0]
         under_chin = intersect(shape_mask((W, H), "rect", [nb[0] + nw * .08, max(0, nb[1] - fh * .3), nb[2] - nw * .08, nb[1] + 2]), dilate(face_zone, 4))
@@ -1293,7 +1339,7 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
             neck_full = union(neck, under_chin)
             neck_src = cv_inpaint(filled, subtract(under_chin, neck), 7)
     save("neck", "Neck", neck_full, neck_src, "root", ["Neck", "Body"])
-    save("hair_back", "Back Hair", hair_back, img, "root", ["Hair", "BackHair"])
+    save("hair_locks", "Hair Locks", hair_back, img, "headGroup", ["Hair"])
     save("head", "Head", head_base, face_clean, "headGroup", ["Head", "Skin"])
     save("hair_front", "Front Hair", hair_front, img, "headGroup", ["Hair"])
     save("hat", "Hat", hat, img, "headGroup", ["Accessory", "Hat"])
@@ -1303,13 +1349,28 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     blink_ids = []
     if eye_closed is None:
         eye_closed = edits.get("eyes")
+    gaze = []
+    frame_ids = []
     for side in ("l", "r"):
-        eye, iris, pupil = eye_parts[side]
+        eye, iris, pupil, iris_src = eye_parts[side]
         if not has(eye): continue
-        eye_src = sclera_fill(img, eye, iris)
-        if save(f"eye_{side}", f"{side.upper()} Eyeball", dilate(eye, 1), eye_src, "headGroup", ["Eyeball"]): eyes_open.append(f"eye_{side}")
-        if save(f"iris_{side}", f"{side.upper()} Iris", iris, img, "headGroup", ["Iris"]): eyes_open.append(f"iris_{side}")
-        if save(f"pupil_{side}", f"{side.upper()} Pupil", pupil, img, "headGroup", ["Pupil"]): eyes_open.append(f"pupil_{side}")
+        eye_src = sclera_fill(img, eye, intersect(iris, eye) if iris is not None else None)
+        # Eye white: the whole opening (and a little under the lids for the moving iris).
+        if save(f"eye_{side}", f"{side.upper()} Eyeball", dilate(eye, 2), eye_src, "headGroup", ["Eyeball"]): eyes_open.append(f"eye_{side}")
+        if save(f"iris_{side}", f"{side.upper()} Iris", iris, iris_src or img, "headGroup", ["Iris"]): eyes_open.append(f"iris_{side}")
+        if save(f"pupil_{side}", f"{side.upper()} Pupil", pupil, iris_src or img, "headGroup", ["Pupil"]): eyes_open.append(f"pupil_{side}")
+        # Eyelid frame: lids, lashes and skin around the opening, drawn OVER the iris, so the
+        # moving iris slides under the lids like a real eye instead of floating on the skin.
+        eb = eye.getbbox(); ew, eh = eb[2] - eb[0], max(3, eb[3] - eb[1])
+        ib = iris.getbbox() if iris is not None else None
+        ir = ((ib[2] - ib[0]) / 2) if ib else eh * 0.5
+        from PIL import ImageFilter as _IF
+        # Soft outer edge (blends into the face when the head turns), hard inner edge (hides the iris).
+        outer = dilate(eye, max(4, int(ir * 1.05))).filter(_IF.GaussianBlur(max(1.0, ir * 0.12)))
+        ring = subtract(outer, eye)
+        ring = subtract(ring, dilate(union(m["l_brow"], m["r_brow"]), 1))
+        if save(f"lid_{side}", f"{side.upper()} Lid Frame", ring, img, "headGroup", ["Eyeball"]): frame_ids.append(f"lid_{side}")
+        gaze.append(ew * 0.16)
         closed_src = eye_closed if eye_closed is not None else synth_blink(face_clean, img, eye)
         if closed_src is not None and save(f"blink_{side}", f"{side.upper()} Closed Eye", dilate(eye, 2), closed_src, "headGroup", ["Blink", "Eyelid"]):
             blink_ids.append(f"blink_{side}")
@@ -1327,7 +1388,7 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
     if has(mouth_mask) and save("mouth", "Mouth", mouth_mask, img, "headGroup", ["Mouth"]):
         teeth_hint = None
         for side in ("l", "r"):
-            eye, iris, _ = eye_parts[side]
+            eye, iris, _, _ = eye_parts[side]
             if has(eye):
                 try:
                     px = np.array(img.convert("RGB")).astype(np.float32)[(np.array(subtract(eye, dilate(iris, 1))) > 127)]
@@ -1472,8 +1533,8 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
                           "hands": hand_ids, "anchors": anchors, "upperLen": up["length"], "foreLen": fo["length"]})
 
     # Draw order: the engine paints the FIRST child on top. Front → back.
-    head_order = ["glasses", "hat", "hair_front", "brow_l", "brow_r", *blink_ids, "pupil_l", "pupil_r", "iris_l", "iris_r",
-                  "eye_l", "eye_r", "nose", "mouth", "head"]
+    head_order = ["glasses", "hat", "hair_front", "brow_l", "brow_r", *blink_ids, *frame_ids, "pupil_l", "pupil_r", "iris_l", "iris_r",
+                  "eye_l", "eye_r", "nose", "mouth", "head", "hair_locks"]
     comp["headGroup"]["children"] = [p for p in head_order if p in comp]
     root_order = arm_ids + ["headGroup", "neck", "torso", "legs", "hair_back"]
     comp["root"]["children"] = [p for p in root_order if p in comp]
@@ -1495,6 +1556,7 @@ def build(input_path, out_dir, mode, plan, gender, full_body, seed):
         "mouthY": fcy + fh * .24, "earY": fcy, "faceW": float(fw), "faceH": float(fh),
         "eyeDX": fw * .21, "eyeW": fw * .18, "eyeH": fh * .13, "irisR": max(3.0, fw * .04),
         "shoulderY": float(shoulder_y), "shoulderX": float(sd / 2), "torsoW": float(sd * 1.05), "torsoH": float(max(fh, pelvis - shoulder_y)),
+        "gazeRange": float(sum(gaze) / len(gaze)) if gaze else float(fw * .03),
         "upperW": sd * .13, "foreW": sd * .11, "upperLen": float(up_len), "foreLen": float(fo_len), "handLen": float(sd * .34),
     }
     name = str((plan or {}).get("name") or ("Generated Presenter" if mode == "generate" else "Imported Character"))[:80]
