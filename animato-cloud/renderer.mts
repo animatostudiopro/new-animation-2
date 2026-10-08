@@ -145,7 +145,7 @@ const CFG = {
   lyriaEnabled: pick(ENV.LYRIA_ENABLED, 'false').toLowerCase() === 'true',
   characterSpec: (() => { const s = parseSpec(pick(JOB.character_spec, ENV.CHARACTER_SPEC)); return s?.kind === 'ai-rig' ? { ...s, assetBaseUrl: pick(s.assetBaseUrl, pick(CP.app_url, INPUTS.app_url, ENV.APP_URL)).replace(/\/+$/, '') } : s; })(),
   // Podcasts: the hosts designed in the app, and the studio.
-  castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); return Array.isArray(v) ? v.slice(0, 3) : []; } catch { return []; } })(),
+  castSpecs: (() => { try { const v = JSON.parse(pick(JOB.cast_specs, ENV.CAST_SPECS) || '[]'); const base = pick(CP.app_url, INPUTS.app_url, ENV.APP_URL).replace(/\/+$/, ''); return Array.isArray(v) ? v.slice(0, 3).map((s: any) => s?.kind === 'ai-rig' ? { ...s, assetBaseUrl: s.assetBaseUrl || base } : s) : []; } catch { return []; } })(),
   studio: (() => { try { return JSON.parse(pick(JOB.studio, ENV.STUDIO) || 'null'); } catch { return null; } })(),
   storyGenre: pick(JOB.story_genre, ENV.STORY_GENRE),
   animStyle: pick(JOB.anim_style, ENV.ANIM_STYLE),
