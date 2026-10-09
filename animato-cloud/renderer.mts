@@ -1278,7 +1278,7 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
     else if (sc.sourceHeadline) sc.sourceStory = { title: sc.sourceHeadline, source: '', link: '' };
     return sc;
   };
-  if (!CFG.offline && !LLM.hasKeys) throw new PipelineError('script_failed', 'No Gemini or Groq API key was provided to the runner.');
+  if (!CFG.offline && !LLM.hasKeys) throw new PipelineError('script_failed', 'The AI model on the runner did not start.');
   if (!CFG.offline) {
     log(`Script writer: the self-hosted model on this runner (${CFG.localLlmUrl}).`);
     const t0 = Date.now();
@@ -1294,8 +1294,21 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
     })) {
       const label = `${a.provider}/${a.model}`;
       try {
-        const parsed = extractJson(a.text);
+        let parsed = extractJson(a.text);
         let script: Script;
+        // A small local model often writes too little: hand it its own script back and ask it
+        // to extend it to the target length (up to two rounds) before giving up on the answer.
+        for (let round = 0; round < 2; round++) {
+          try { normaliseScript(parsed, label); break; } catch (v: any) {
+            if (!/too short|only \d+ scenes/.test(String(v?.message))) break;
+            const L = lengthSpec();
+            const have = (Array.isArray(parsed?.scenes) ? parsed.scenes : []).reduce((n: number, sc: any) => n + String(sc?.narration || '').split(/\s+/).filter(Boolean).length, 0);
+            log(`${label}: the script has ${have} words — asking it to extend it to ${L.words} words (${L.scenes} scenes).`);
+            const more = await expandScript(system, prompt, parsed, have);
+            if (!more) break;
+            parsed = more;
+          }
+        }
         try {
           script = normaliseScript(parsed, label);
         } catch (validation: any) {
@@ -1326,6 +1339,20 @@ async function generateScript(pastStory: string, pastTitles: string[], pastSourc
   }
   log(`⚠️ AI script generation failed (${lastError}).`);
   return { ...templateScript(), aiError: lastError };
+}
+
+/** Ask the local model to lengthen a script it wrote (same JSON shape, more scenes and narration). */
+async function expandScript(system: string, prompt: string, parsed: any, have: number): Promise<any | null> {
+  const L = lengthSpec();
+  const user = `${prompt}\n\nYOUR DRAFT (JSON) IS TOO SHORT: it has ${have} words of narration, but the video needs ${L.words} words in ${L.scenes} scenes (${L.seconds}).\nRewrite it LONGER: keep the title, style and every good line, deepen each beat, and add new scenes (more detail, examples, context, a stronger ending). Every scene's "narration" should be 1-3 full sentences.\nReturn the COMPLETE script as ONE JSON object with exactly the same fields as the draft.\n\nDRAFT:\n${JSON.stringify(parsed).slice(0, 12000)}`;
+  for await (const a of LLM.attempts({ system, user, temperature: 0.7, maxTokens: IS_SHORTS ? 6000 : 10000, json: true, timeoutMs: 100000, task: 'script_expand' })) {
+    try {
+      const j = extractJson(a.text);
+      const words = (Array.isArray(j?.scenes) ? j.scenes : []).reduce((n: number, sc: any) => n + String(sc?.narration || '').split(/\s+/).filter(Boolean).length, 0);
+      if (words > have) return j;
+    } catch {}
+  }
+  return null;
 }
 
 function templateScript(): Script {
@@ -1452,7 +1479,16 @@ async function synthesizeNarration(script: string): Promise<Narration> {
   }
   LAST_TTS_ERROR = lastTtsError;
 
-  // Offline fallback: ffmpeg's built-in flite voice.
+  // Fallback that runs entirely on this runner: Piper neural voices (open source, no service).
+  try {
+    const piper = await piperNarration(textFile);
+    if (piper) {
+      log(`Narration: Piper ${piper.voice} on the runner, ${piper.duration.toFixed(1)}s (word times estimated).`);
+      return { audioPath: piper.file, duration: piper.duration, words: estimateWordTimes(text, piper.duration), wordsReliable: false, engine: `piper:${piper.voice}`, neural: true };
+    }
+  } catch (e: any) { log(`Piper voice unavailable (${String(e?.message || e).slice(0, 200)}).`); }
+
+  // Last resort: ffmpeg's built-in flite voice.
   const wav = path.join(WORK_DIR, 'narration_flite.wav');
   const voice = CFG.gender === 'male' ? 'kal16' : 'slt';
   const r = await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `flite=textfile=${textFile}:voice=${voice}`, '-ar', '44100', '-ac', '1', wav], { timeoutMs: 120000 });
@@ -1460,6 +1496,39 @@ async function synthesizeNarration(script: string): Promise<Narration> {
   if (r.code !== 0 || duration < 1) throw new PipelineError('tts_failed', `Voice synthesis failed with every engine. ${r.stderr.slice(-300)}`);
   log(`⚠️ Neural voice unavailable — used the offline flite voice (${duration.toFixed(1)}s).`);
   return { audioPath: wav, duration, words: estimateWordTimes(text, duration), wordsReliable: false, engine: `flite:${voice}`, neural: false };
+}
+
+/** Piper (rhasspy) neural text-to-speech, installed on the runner on first use. */
+async function piperNarration(textFile: string): Promise<{ file: string; duration: number; voice: string } | null> {
+  const root = path.join(os.homedir(), 'animato-piper'), venv = path.join(root, 'venv'), py = path.join(venv, 'bin', 'python');
+  const voice = CFG.gender === 'male' ? 'en_US-ryan-medium' : 'en_US-hfc_female-medium';
+  const vpath = CFG.gender === 'male' ? 'ryan/medium' : 'hfc_female/medium';
+  const model = path.join(root, `${voice}.onnx`);
+  fs.mkdirSync(root, { recursive: true });
+  if (!fs.existsSync(py) || (await run(py, ['-c', 'import piper'], { timeoutMs: 60000 })).code !== 0) {
+    if ((await run('python3', ['-m', 'venv', venv], { timeoutMs: 120000 })).code !== 0) return null;
+    const r = await run(py, ['-m', 'pip', 'install', '-q', '--disable-pip-version-check', 'piper-tts'], { timeoutMs: 600000 });
+    if (r.code !== 0) throw new Error(`piper install failed: ${r.stderr.slice(-200)}`);
+  }
+  for (const ext of ['', '.json']) {
+    const f = model + ext;
+    if (!fs.existsSync(f) || fs.statSync(f).size < 100) {
+      const ok = await download(`https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/${vpath}/${voice}.onnx${ext}`, f, 180000);
+      if (!ok) throw new Error(`could not download the ${voice} voice`);
+    }
+  }
+  const wav = path.join(WORK_DIR, 'narration_piper.wav');
+  const r = await new Promise<{ code: number; err: string }>((resolve) => {
+    const p = spawn(py, ['-m', 'piper', '-m', model, '-f', wav], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
+    p.on('close', (code) => resolve({ code: code ?? -1, err }));
+    p.on('error', (e) => resolve({ code: -1, err: String(e) }));
+    p.stdin.end(fs.readFileSync(textFile, 'utf8'));
+  });
+  const duration = fs.existsSync(wav) ? await probeDuration(wav) : 0;
+  if (r.code !== 0 || duration < 1) throw new Error(`piper failed: ${r.err.slice(-200)}`);
+  return { file: wav, duration, voice };
 }
 
 function estimateWordTimes(text: string, duration: number): Word[] {
@@ -3358,7 +3427,7 @@ async function writeMusicalSong(pastTitles: string[]): Promise<MusicalSong> {
       last = `invalid songwriter output from ${a.provider}/${a.model}`;
     } catch (e: any) { last = e?.message || String(e); }
   }
-  throw new PipelineError('musical_song_retry', `No free AI writer produced a valid original song (${last || 'all models failed'}). Nothing was posted; the next scheduled run will retry.`);
+  throw new PipelineError('musical_song_retry', `The AI model on the runner could not write a usable song this time (${last || 'no valid answer'}). Nothing was posted; the next scheduled run will retry.`);
 }
 /** ACE-Step 1.5 (open-source, MIT) — the only music engine — runs on the GitHub runner itself:
  *  its own REST server (/release_task → /query_result → download), never an online API. */
@@ -4007,7 +4076,7 @@ async function main() {
   log(`Metadata: ${script.description.split(/\s+/).length}-word description, hashtags: ${script.hashtags.map((h) => `#${h}`).join(' ')}`);
   if (script.usedFallbackTemplate && !CFG.allowFallbackPublish) {
     // Keys work but every free model was busy / rate-limited / filtered: retry later (no pause).
-    throw new PipelineError('script_retry', `No free AI model produced a script this time (${script.aiError || 'unknown error'}). Nothing was posted; the next attempt runs automatically with the next free model/key.`);
+    throw new PipelineError('script_retry', `The AI model on the runner could not write a usable script this time (${script.aiError || 'unknown error'}). Nothing was posted; the next attempt runs automatically.`);
   }
   const fullText = script.scenes.map((s) => s.narration).join(' ');
   await reportStatus('running', '2/5 Recording the voice-over', 22, `Script ready: "${script.title}" (${script.scenes.length} scenes${script.model ? `, ${script.model}` : ''}).`);

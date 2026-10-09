@@ -6,8 +6,7 @@
  * captions drawn onto the picture.
  *
  *   1. The files are downloaded together; then, at the same time,
- *        - the voice is transcribed word by word (Groq Whisper, pieces in parallel
- *          → local faster-whisper as fallback),
+ *        - the voice is transcribed word by word (faster-whisper on this runner),
  *        - the loudness of the voice is measured every 10 ms (to place cuts),
  *        - a separately recorded voice: the video is "watched" (frames described
  *          by a vision model, several batches at once).
@@ -160,59 +159,52 @@ const bare = (x: string) => x.toLowerCase().replace(/[^a-z0-9'\u00C0-\u024F\u040
 async function transcribe(audio: string, dur: number, hint: string): Promise<W[]> {
   // Test hook (never set in production): a ready word list.
   if (ENV.EDITOR_TRANSCRIPT && fs.existsSync(ENV.EDITOR_TRANSCRIPT)) return JSON.parse(fs.readFileSync(ENV.EDITOR_TRANSCRIPT, 'utf8'));
-  if (GROQ.length) {
-    // Groq Whisper: 16 kHz mono MP3 pieces of ≤ 10 min (well under the 25 MB limit), 3 at a time.
-    const piece = 600;
-    const starts: number[] = [];
-    for (let t = 0; t < dur; t += piece) starts.push(t);
-    const results = await pool(starts, 3, async (t, idx): Promise<W[] | null> => {
-      const mp3 = path.join(WORK, `asr_${t}.mp3`);
-      await ff(['-ss', String(t), '-t', String(piece + 1), '-i', audio, '-ac', '1', '-ar', '16000', '-b:a', '48k', mp3]);
-      const data = fs.readFileSync(mp3);
-      for (let k = 0; k < GROQ.length * 2; k++) {
-        const key = GROQ[(idx + k) % GROQ.length];
-        const form = new FormData();
-        form.append('file', new Blob([data], { type: 'audio/mpeg' }), 'audio.mp3');
-        form.append('model', 'whisper-large-v3-turbo');
-        form.append('response_format', 'verbose_json');
-        form.append('timestamp_granularities[]', 'word');
-        form.append('timestamp_granularities[]', 'segment');
-        // Spelling hints (product names in the title / instructions).
-        if (hint) form.append('prompt', hint.slice(0, 220));
-        const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(300000) }).catch(() => null);
-        if (!r?.ok) { if (r?.status === 429) await new Promise((z) => setTimeout(z, 3000)); continue; }
-        const j: any = await r.json();
-        const words: W[] = [];
-        for (const x of j.words || []) if (x.start >= 0 && (x.start < piece + 0.5 || t === 0)) words.push({ w: String(x.word).trim(), s: t + Number(x.start), e: t + Number(x.end) });
-        // Whisper's word list has no punctuation: take it from the segments.
-        punctuate(words, (j.segments || []).map((sg: any) => ({ text: String(sg.text || ''), s: t + Number(sg.start), e: t + Number(sg.end) })));
-        return words;
-      }
-      return null;
-    });
-    if (results.every(Boolean)) {
-      const words = dedupeOverlap(results.flat() as W[]);
-      if (words.length) { log(`Transcribed ${words.length} words with Groq Whisper (${starts.length} piece${starts.length > 1 ? 's' : ''} in parallel).`); return words; }
-    }
-    log('Groq Whisper was unavailable — transcribing on this runner instead (slower).');
+  // faster-whisper on this runner (CPU, int8). The workflow pre-installs it in its own cached
+  // environment (ASR_PYTHON); without that, it is installed here.
+  let py = ENV.ASR_PYTHON && fs.existsSync(ENV.ASR_PYTHON) ? ENV.ASR_PYTHON : '';
+  if (!py || (await run(py, ['-c', 'import faster_whisper'])).code !== 0) {
+    const venv = path.join(WORK, 'asr-venv');
+    log('Installing the speech-to-text engine on this runner…');
+    let r = await run('python3', ['-m', 'venv', venv], 300000);
+    py = r.code === 0 ? path.join(venv, 'bin', 'python') : 'python3';
+    r = await run(py, ['-m', 'pip', 'install', '-q', '--disable-pip-version-check', 'faster-whisper'], 900000);
+    if (r.code !== 0) r = await run(py, ['-m', 'pip', 'install', '-q', '--disable-pip-version-check', '--break-system-packages', 'faster-whisper'], 900000);
+    if ((await run(py, ['-c', 'import faster_whisper'])).code !== 0) throw new EditError(`Transcription failed: the speech-to-text engine could not be installed (${r.err.trim().split('\n').slice(-3).join(' | ').slice(0, 300)}).`);
   }
-  // Local fallback: faster-whisper (CPU, int8).
-  await run('python3', ['-m', 'pip', 'install', '-q', '--disable-pip-version-check', 'faster-whisper'], 900000);
-  const py = path.join(WORK, 'asr.py');
-  fs.writeFileSync(py, `import json,sys
+  const script = path.join(WORK, 'asr.py');
+  fs.writeFileSync(script, `import json,sys
 from faster_whisper import WhisperModel
-m=WhisperModel(sys.argv[2] if len(sys.argv)>2 else "small",device="cpu",compute_type="int8",cpu_threads=${CPUS})
-segs,_=m.transcribe(sys.argv[1],word_timestamps=True,vad_filter=False,initial_prompt=(sys.argv[3] if len(sys.argv)>3 and sys.argv[3] else None))
-out=[]
+audio,model,hint,out=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+m=WhisperModel(model,device="cpu",compute_type="int8",cpu_threads=${CPUS})
+segs,info=m.transcribe(audio,word_timestamps=True,vad_filter=False,beam_size=1,condition_on_previous_text=False,initial_prompt=(hint or None))
+words=[]
 for s in segs:
-  for w in (s.words or []): out.append({"w":w.word.strip(),"s":w.start,"e":w.end})
-print(json.dumps(out))
+  for w in (s.words or []):
+    if w.word.strip(): words.append({"w":w.word.strip(),"s":round(w.start,3),"e":round(w.end,3)})
+json.dump(words,open(out,"w"))
+print("language",info.language,"words",len(words),flush=True)
 `);
-  const r = await run('python3', [py, audio, dur > 1800 ? 'base' : 'small', hint.slice(0, 220)], 3 * 3600_000);
-  if (r.code !== 0) throw new EditError(`Transcription failed: ${r.err.slice(-400)}`);
-  const list: W[] = JSON.parse(r.out.trim().split('\n').pop() || '[]');
-  log(`Transcribed ${list.length} words on the runner (faster-whisper).`);
-  return list;
+  // A 16 kHz mono WAV is what Whisper reads anyway (and avoids codec surprises).
+  const wav = path.join(WORK, 'asr_in.wav');
+  if ((await ff(['-i', audio, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav])).code !== 0) throw new EditError('Transcription failed: the voice track could not be read.');
+  const models = dur > 1800 ? ['base', 'tiny'] : ['small', 'base', 'tiny'];
+  let last = '';
+  for (const model of models) {
+    const out = path.join(WORK, `asr_${model}.json`);
+    const t0 = Date.now();
+    log(`Transcribing the voice on this runner (Whisper ${model})…`);
+    const r = await run(py, [script, wav, model, hint.slice(0, 220), out], 3 * 3600_000);
+    if (r.code === 0 && fs.existsSync(out)) {
+      const list: W[] = JSON.parse(fs.readFileSync(out, 'utf8') || '[]');
+      log(`Transcribed ${list.length} words in ${Math.round((Date.now() - t0) / 1000)}s (Whisper ${model}, ${r.out.trim().split('\n').pop()}).`);
+      if (list.length || model === models[models.length - 1]) return list;
+      last = 'no words were heard';
+      continue;
+    }
+    last = (r.err || r.out).trim().split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 400);
+    log(`Whisper ${model} failed (${last}) — trying a smaller model.`);
+  }
+  throw new EditError(`Transcription failed: ${last || 'unknown error'}`);
 }
 function punctuate(words: W[], segs: { text: string; s: number; e: number }[]) {
   for (const sg of segs) {

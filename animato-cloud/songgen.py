@@ -36,7 +36,7 @@ DIT_CONFIG = "acestep-v15-turbo"
 NEEDED_COMPONENTS = [DIT_CONFIG, "vae", "Qwen3-Embedding-0.6B"]
 SAMPLE_RATE = 48000
 
-MIN_DURATION, MAX_DURATION = 10, 600
+MIN_DURATION, MAX_DURATION = 10, 300
 MAX_LYRICS = 4000          # ACE-Step accepts up to 4096 characters
 
 # acestep/constants.py VALID_LANGUAGES (+ "unknown" = let the model decide).
@@ -296,16 +296,134 @@ def write_mp3(tensor, sample_rate, out_dir):
     return mp3, audio.shape[0] / float(sample_rate)
 
 
+def _http(method, url, body=None, key="", timeout=60):
+    import urllib.request
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+    if key:
+        req.add_header("Authorization", "Bearer " + key)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+
+def start_server(repo, ckpt, key, port, use_lm):
+    """ACE-Step's own REST server (the same set-up the video renderer uses)."""
+    threads = str(os.cpu_count() or 4)
+    env = dict(os.environ)
+    env.update({
+        "ACESTEP_API_HOST": "127.0.0.1", "ACESTEP_API_PORT": str(port), "ACESTEP_API_KEY": key,
+        "ACESTEP_DEVICE": "cpu", "ACESTEP_INIT_LLM": "true" if use_lm else "false",
+        "ACESTEP_LM_BACKEND": "pt", "ACESTEP_LM_MODEL_PATH": "acestep-5Hz-lm-0.6B", "ACESTEP_LM_DEVICE": "cpu",
+        "ACESTEP_USE_FLASH_ATTENTION": "false", "ACESTEP_CONFIG_PATH": DIT_CONFIG,
+        "ACESTEP_PROJECT_ROOT": repo, "ACESTEP_CHECKPOINTS_DIR": ckpt,
+        "OMP_NUM_THREADS": threads, "MKL_NUM_THREADS": threads, "TOKENIZERS_PARALLELISM": "false",
+    })
+    logf = open(os.path.join(os.path.dirname(ckpt), "api_server.log"), "w")
+    proc = subprocess.Popen([sys.executable, "-m", "acestep.api_server"], cwd=repo, env=env, stdout=logf, stderr=subprocess.STDOUT)
+    base = f"http://127.0.0.1:{port}"
+    t0 = time.time()
+    while time.time() - t0 < 15 * 60:
+        if proc.poll() is not None:
+            tail = open(logf.name, encoding="utf-8", errors="replace").read()[-2500:]
+            raise RuntimeError("the music engine stopped while loading:\n" + tail)
+        try:
+            st, _ = _http("GET", base + "/health", timeout=5)
+            if st == 200:
+                log("composing", f"music engine ready in {time.time() - t0:.0f}s" + (" (with the song-planning model)" if use_lm else ""))
+                return proc, base, logf.name
+        except Exception:
+            pass
+        time.sleep(3)
+    proc.kill()
+    raise RuntimeError("the music engine did not start within 15 minutes")
+
+
+def compose(base, key, body, deadline):
+    task_id = ""
+    for attempt in range(3):
+        try:
+            st, raw = _http("POST", base + "/release_task", body, key, timeout=180)
+            rj = json.loads(raw.decode("utf-8", "replace") or "{}")
+            task_id = str((rj.get("data") or {}).get("task_id") or rj.get("task_id") or "").strip()
+            if task_id:
+                break
+            log("composing", f"request not accepted: {raw[:300]!r}")
+        except Exception as err:
+            log("composing", f"request attempt {attempt + 1} failed: {err}")
+        time.sleep(8 * (attempt + 1))
+    if not task_id:
+        raise RuntimeError("the music engine did not accept the song request")
+    log("composing", f"task {task_id[:24]} accepted; composing…")
+    t0, n = time.time(), 0
+    while time.time() < deadline:
+        time.sleep(5 if n < 6 else 10)
+        n += 1
+        try:
+            st, raw = _http("POST", base + "/query_result", {"task_id_list": [task_id]}, key, timeout=45)
+            qj = json.loads(raw.decode("utf-8", "replace") or "{}")
+        except Exception:
+            continue
+        data = qj.get("data") if isinstance(qj, dict) else qj
+        item = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+        status = int(item.get("status") or 0)
+        if status == 2:
+            raise RuntimeError("the music engine could not make the song: " + str(item.get("error") or item.get("result") or "failed")[:400])
+        if status != 1:
+            if n % 6 == 0:
+                log("composing", f"still composing ({time.time() - t0:.0f}s)…")
+            continue
+        res = item.get("result")
+        if isinstance(res, str):
+            try:
+                res = json.loads(res)
+            except Exception:
+                res = []
+        first = res[0] if isinstance(res, list) and res else (res or {})
+        ref = str(first.get("file") or first.get("audio_url") or first.get("url") or "")
+        if not ref:
+            raise RuntimeError("the music engine finished but returned no audio")
+        if ref.startswith("data:audio"):
+            import base64
+            return base64.b64decode(ref.split(",", 1)[1]), time.time() - t0
+        url = ref if re.match(r"^https?://", ref) else base + ("" if ref.startswith("/") else "/") + ref
+        for d in range(3):
+            try:
+                st, audio = _http("GET", url, None, key, timeout=240)
+                if len(audio) > 10000:
+                    return audio, time.time() - t0
+            except Exception as err:
+                log("composing", f"download attempt {d + 1} failed: {err}")
+            time.sleep(5)
+        raise RuntimeError("the song was made but could not be downloaded")
+    raise RuntimeError("the song took too long to compose")
+
+
+def finish_mp3(raw, out_dir):
+    src = os.path.join(out_dir, "raw_song.bin")
+    open(src, "wb").write(raw)
+    mp3 = os.path.join(out_dir, "song.mp3")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", src], capture_output=True, text=True)
+    try:
+        seconds = float(probe.stdout.strip())
+    except ValueError:
+        seconds = 0.0
+    fade = "afade=t=out:st={:.2f}:d=1.5,".format(max(0.0, seconds - 1.5)) if seconds > 4 else ""
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-af", fade + "loudnorm=I=-14:TP=-1.2:LRA=11",
+                    "-codec:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", mp3], check=True)
+    os.remove(src)
+    return mp3, seconds
+
+
 def cmd_generate(args):
     job = json.load(open(args.job, encoding="utf-8"))
-    out_dir = job.get("out") or "output"
+    out_dir = os.path.abspath(job.get("out") or "output")
     os.makedirs(out_dir, exist_ok=True)
-
     try:
-        duration = int(float(job.get("duration") or 60))
+        duration = int(float(job.get("duration") or 0))
     except ValueError:
-        duration = 60
-    duration = max(MIN_DURATION, min(MAX_DURATION, duration))
+        duration = 0
     try:
         seed = int(float(job.get("seed") or 0)) % (2 ** 32 - 1)
     except ValueError:
@@ -317,106 +435,60 @@ def cmd_generate(args):
     instrumental = not lyrics
     caption, bpm = build_caption(style, job.get("custom_style", ""), singer, lang_label, instrumental)
     title = clean_text(job.get("title"), 120)
+    # Long enough for every word: ~2.2 sung words a second plus intro, breaks and outro.
+    words = len(re.findall(r"[^\s\[\]]+", re.sub(r"\[[^\]]*\]", " ", lyrics)))
+    needed = int(words / 2.2 + 20) if words else 0
+    if needed > duration:
+        log("composing", f"{words} words need about {needed}s — making the song that long")
+        duration = needed
+    duration = max(MIN_DURATION, min(MAX_DURATION, duration or 60))
 
     log("composing", f"title={title!r} style={style} singer={singer} language={lang_code} duration={duration}s seed={seed}")
     log("composing", f"caption: {caption}")
     log("composing", "lyrics:\n" + (lyrics or "[Instrumental]"))
 
-    import torch
-    threads = os.cpu_count() or 4
-    torch.set_num_threads(threads)
-    log("composing", f"torch {torch.__version__}, {threads} CPU threads")
-
-    ckpt = checkpoints_dir()
-    os.environ["ACESTEP_CHECKPOINTS_DIR"] = ckpt
-    missing = [c for c in NEEDED_COMPONENTS if not has_weights(os.path.join(ckpt, c))]
-    if missing:
-        raise SystemExit(f"[songgen] model files missing ({', '.join(missing)}); run 'songgen.py download' first")
-
-    # ACE-Step's start-up check also wants the 1.7B planner LM (and would download all
-    # 10 GB of the main repo without it). DiT-only mode never loads it, so tell the
-    # check the main model is present once the three folders we need are there.
-    try:
-        from acestep.core.generation.handler import init_service_downloads as _isd
-        if hasattr(_isd, "check_main_model_exists"):
-            _isd.check_main_model_exists = lambda *_a, **_k: True
-    except Exception as err:
-        log("composing", f"note: could not skip the planner check ({err}); it may download the LM")
-
-    from acestep.handler import AceStepHandler
-    from acestep.inference import GenerationParams, GenerationConfig, generate_music
-
-    t_load = time.time()
-    handler = AceStepHandler()
-    status, ok = handler.initialize_service(
-        project_root=os.path.dirname(ckpt),
-        config_path=DIT_CONFIG,
-        device="cpu",
-        use_flash_attention=False,
-        compile_model=False,
-        offload_to_cpu=False,
-        offload_dit_to_cpu=False,
-        quantization=None,
-        use_mlx_dit=False,
-    )
-    log("composing", f"model loaded in {time.time() - t_load:.0f}s: ok={ok}")
-    print(status, flush=True)
-    if not ok:
-        raise SystemExit("[songgen] the music model failed to load (see above)")
-
-    params = GenerationParams(
-        task_type="text2music",
-        caption=caption,
-        lyrics=lyrics or "[Instrumental]",
-        instrumental=instrumental,
-        vocal_language=lang_code if not instrumental else "unknown",
-        bpm=bpm,
-        duration=float(duration),
-        inference_steps=8,           # turbo default
-        shift=3.0,                   # recommended for turbo
-        seed=seed,
-        # DiT-only: no planner LM, so every chain-of-thought step is off.
-        thinking=False,
-        use_cot_metas=False,
-        use_cot_caption=False,
-        use_cot_language=False,
-        use_cot_lyrics=False,
-    )
-    config = GenerationConfig(batch_size=1, use_random_seed=False, seeds=[seed], audio_format="flac")
-
+    repo = os.path.abspath(os.path.expanduser(os.environ.get("ACESTEP_REPO") or "~/acestep-local/repo"))
+    ckpt = os.path.join(repo, "checkpoints")
+    key = "animato-" + os.urandom(8).hex()
+    body = {
+        "prompt": caption, "caption": caption, "lyrics": lyrics or "[Instrumental]", "audio_duration": duration,
+        "audio_format": "mp3", "batch_size": 1, "vocal_language": lang_code if not instrumental else "unknown",
+        "time_signature": "4", "use_cot_caption": False, "ai_token": key, "seed": seed, "use_random_seed": False,
+    }
+    if bpm:
+        body["bpm"] = bpm
+    have_lm = os.path.isdir(os.path.join(ckpt, "acestep-5Hz-lm-0.6B"))
+    deadline = T0 + 120 * 60
+    last = None
+    raw, gen_seconds = None, 0.0
     t_gen = time.time()
-    log("composing", f"generating {duration}s of audio (8 diffusion steps)…")
-    result = generate_music(handler, None, params, config, save_dir=None)
-    gen_seconds = time.time() - t_gen
-    if not getattr(result, "success", False) or not result.audios:
-        raise SystemExit(f"[songgen] generation failed: {getattr(result, 'error', None) or getattr(result, 'status_message', '')}")
-    first = result.audios[0]
-    tensor = first.get("tensor")
-    if tensor is None:
-        raise SystemExit("[songgen] the model returned no audio")
+    for use_lm in ([True, False] if have_lm else [False]):
+        proc = None
+        try:
+            proc, base, logname = start_server(repo, ckpt, key, 8011, use_lm)
+            body["thinking"] = use_lm
+            raw, gen_seconds = compose(base, key, body, deadline)
+            break
+        except Exception as err:
+            last = err
+            log("composing", f"{'with' if use_lm else 'without'} the planning model failed: {err}")
+            raw = None
+        finally:
+            if proc is not None:
+                proc.kill()
+    if raw is None:
+        raise SystemExit(f"[songgen] the song could not be made: {last}")
     log("composing", f"composed in {gen_seconds:.0f}s")
 
     log("encoding mp3")
-    mp3, seconds = write_mp3(tensor, first.get("sample_rate", SAMPLE_RATE), out_dir)
+    mp3, seconds = finish_mp3(raw, out_dir)
     size = os.path.getsize(mp3)
     meta = {
-        "title": title,
-        "style": style,
-        "custom_style": clean_text(job.get("custom_style"), 300),
-        "singer": singer,
-        "language": lang_code,
-        "language_label": lang_label or "auto",
-        "instrumental": instrumental,
-        "duration": duration,
-        "seconds": round(seconds, 2),
-        "seed": seed,
-        "bpm": bpm,
-        "caption": caption,
-        "lyrics": lyrics,
-        "model": f"ACE-Step 1.5 {DIT_CONFIG} (DiT-only, CPU)",
-        "generate_seconds": round(gen_seconds, 1),
-        "total_seconds": round(time.time() - T0, 1),
-        "bytes": size,
+        "title": title, "style": style, "custom_style": clean_text(job.get("custom_style"), 300),
+        "singer": singer, "language": lang_code, "language_label": lang_label or "auto",
+        "instrumental": instrumental, "duration": duration, "seconds": round(seconds, 2), "seed": seed,
+        "bpm": bpm, "caption": caption, "lyrics": lyrics, "model": f"ACE-Step 1.5 {DIT_CONFIG} (CPU)",
+        "generate_seconds": round(time.time() - t_gen, 1), "total_seconds": round(time.time() - T0, 1), "bytes": size,
     }
     json.dump(meta, open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     log("done", f"{mp3} ({size / 1e6:.1f} MB, {seconds:.0f}s of audio)")

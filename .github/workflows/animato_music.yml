@@ -5,9 +5,8 @@
 # server/bootstrap/music.yml in the app instead.
 #
 # Used by Tools -> Music generation in the app, and runnable by hand from the Actions tab.
-# Model: ACE-Step 1.5 turbo (MIT licence), DiT-only mode (no planner LM), on CPU.
-# Nothing is cached between runs (the repository's cache quota is used by the other tools):
-# every run installs the engine and downloads the ~6.3 GB model again.
+# Model: ACE-Step 1.5 turbo (MIT licence) through its own local REST server, on CPU.
+# The engine is cached (shared with the video renderer), so only the first run installs it.
 # The song is attached to the run as the "animato-music-<run id>" artifact (song.mp3 + meta.json).
 
 name: Animato Music Generator
@@ -42,7 +41,7 @@ on:
         type: string
         default: en
       duration:
-        description: Length in seconds (10-600)
+        description: Length in seconds (10-300; grows to fit the lyrics)
         type: string
         default: '60'
       seed:
@@ -63,80 +62,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
-      # ACE-Step 1.5 source, pinned (main @ 2026-08-29).
-      ACESTEP_REF: ca1e85fe9430179831e6bc6be790c332190a3866
       HF_HUB_DISABLE_TELEMETRY: '1'
-      HF_HUB_ENABLE_HF_TRANSFER: '0'
       TOKENIZERS_PARALLELISM: 'false'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
-      PIP_NO_CACHE_DIR: '1'
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: animato-cloud
 
-      - name: Free up disk space and memory
+      - name: Add swap (the model is large for a 16 GB runner)
         run: |
-          df -h / /mnt 2>/dev/null || true
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
-          # Work on the big scratch disk when the runner has one.
-          if sudo mkdir -p /mnt/animato-music 2>/dev/null && sudo chown "$(id -u):$(id -g)" /mnt/animato-music; then
-            MUSIC_HOME=/mnt/animato-music
-          else
-            MUSIC_HOME="$HOME/animato-music"; mkdir -p "$MUSIC_HOME"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          if sudo fallocate -l 8G /mnt/animato-swap 2>/dev/null && sudo chmod 600 /mnt/animato-swap && sudo mkswap /mnt/animato-swap >/dev/null && sudo swapon /mnt/animato-swap; then
+            echo "added 8 GB of swap"
           fi
-          echo "MUSIC_HOME=$MUSIC_HOME" >> "$GITHUB_ENV"
-          echo "ACESTEP_CHECKPOINTS_DIR=$MUSIC_HOME/checkpoints" >> "$GITHUB_ENV"
-          echo "HF_HOME=$MUSIC_HOME/hf" >> "$GITHUB_ENV"
-          # The model needs ~13 GB of RAM in float32; extra swap keeps a 16 GB runner from being killed.
-          SWAP="$(dirname "$MUSIC_HOME")/animato-swap"
-          if sudo fallocate -l 10G "$SWAP" 2>/dev/null && sudo chmod 600 "$SWAP" && sudo mkswap "$SWAP" >/dev/null && sudo swapon "$SWAP"; then
-            echo "added 10 GB of swap at $SWAP"
-          else
-            echo "::warning::could not add swap - continuing with the runner's default"
-          fi
-          free -h; nproc; df -h / "$MUSIC_HOME"
+          free -h; nproc; df -h /
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install the music engine
+      # The same engine folder the video renderer uses — installed once, shared from the cache.
+      - name: Cache the music engine
+        uses: actions/cache@v4
+        with:
+          path: ~/acestep-local
+          key: animato-acestep-local-v1-${{ runner.os }}
+
+      - name: Install the music engine (first run only)
         run: |
           set -e
-          echo "[songgen] [installing] Python packages + ACE-Step $ACESTEP_REF"
-          VENV="$MUSIC_HOME/venv"
-          python -m venv "$VENV"
-          PIP="$VENV/bin/pip"
-          "$PIP" install --quiet --upgrade pip wheel
-          printf 'torch==2.10.0\ntorchvision==0.25.0\ntorchaudio==2.10.0\n' > "$MUSIC_HOME/constraints.txt"
-          "$PIP" install --quiet torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-          "$PIP" install --quiet -c "$MUSIC_HOME/constraints.txt" \
-            "transformers>=4.51.0,<4.58.0" "diffusers>=0.37.0" "scipy>=1.10.1" "soundfile>=0.13.1" "loguru>=0.7.3" \
-            "einops>=0.8.1" "accelerate>=1.12.0" diskcache "numba>=0.63.1" "vector-quantize-pytorch>=1.27.15" \
-            "torchao>=0.16.0,<0.17.0" toml "peft>=0.18.0" lycoris-lora "lightning>=2.0.0" "tensorboard>=2.20.0" \
-            modelscope "typer-slim>=0.21.1" "pytorch-wavelets>=1.3.0" "pywavelets>=1.9.0" "setuptools<72" \
-            "matplotlib>=3.7.5" "fastapi>=0.110.0" "uvicorn[standard]>=0.27.0" "python-multipart>=0.0.18" \
-            "gradio==6.2.0" huggingface_hub
-          # torchaudio 2.10 reads/writes audio through torchcodec; the song itself is written with soundfile.
-          "$PIP" install --quiet -c "$MUSIC_HOME/constraints.txt" "torchcodec>=0.10,<0.11" || echo "::warning::torchcodec could not be installed - not needed for text-to-music"
-          mkdir -p "$MUSIC_HOME/ace-step"
-          curl -fsSL --retry 3 "https://github.com/ACE-Step/ACE-Step-1.5/archive/${ACESTEP_REF}.tar.gz" -o "$MUSIC_HOME/acestep.tgz"
-          tar -xzf "$MUSIC_HOME/acestep.tgz" --strip-components=1 -C "$MUSIC_HOME/ace-step"
-          rm -f "$MUSIC_HOME/acestep.tgz"
-          # nano-vllm only serves the planner LM, which this workflow does not use.
-          "$PIP" install --quiet --no-deps "$MUSIC_HOME/ace-step/acestep/third_parts/nano-vllm" || echo "::warning::nano-vllm not installed (only needed by the planner LM, which is not used)"
-          echo "PYTHONPATH=$MUSIC_HOME/ace-step" >> "$GITHUB_ENV"
-          PYTHONPATH="$MUSIC_HOME/ace-step" "$VENV/bin/python" -c "import torch, acestep.handler, acestep.inference; print('[songgen] [installing] ready: torch', torch.__version__)"
-          df -h "$MUSIC_HOME"
-
-      - name: Download the music model
-        run: |
-          echo "[songgen] [downloading model] ACE-Step/Ace-Step1.5 (turbo DiT + VAE + text encoder)"
-          "$MUSIC_HOME/venv/bin/python" animato-cloud/songgen.py download
-          du -sh "$ACESTEP_CHECKPOINTS_DIR"/* || true
-          df -h "$MUSIC_HOME"
+          ROOT="$HOME/acestep-local"; REPO="$ROOT/repo"; VENV="$ROOT/venv"; PY="$VENV/bin/python"; CKPT="$REPO/checkpoints"
+          mkdir -p "$ROOT"
+          if [ ! -d "$REPO/acestep" ]; then git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git "$REPO"; fi
+          if [ ! -x "$PY" ]; then python3 -m venv "$VENV"; fi
+          if ! "$PY" -c "import acestep, torch, diffusers, transformers" 2>/dev/null; then
+            echo "[songgen] [installing] Python packages (first run only)"
+            "$PY" -m pip install -q --upgrade pip
+            "$PY" -m pip install -q torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+            "$PY" -m pip install -q "transformers>=4.51.0,<4.58.0" "diffusers>=0.37.0" "matplotlib>=3.7.5" "scipy>=1.10.1" "soundfile>=0.13.1" "loguru>=0.7.3" "einops>=0.8.1" "accelerate>=1.12.0" "fastapi>=0.110.0" diskcache "uvicorn[standard]>=0.27.0" "numba>=0.63.1" "vector-quantize-pytorch>=1.27.15" "torchao>=0.16.0,<0.17.0" toml "peft>=0.18.0" lycoris-lora modelscope "typer-slim>=0.21.1" "pytorch-wavelets>=1.3.0" "pywavelets>=1.9.0" "setuptools<72" huggingface_hub "gradio==6.2.0" "lightning>=2.0.0" "tensorboard>=2.20.0"
+            "$PY" -m pip install -q --no-deps -e "$REPO"
+          fi
+          if [ ! -d "$CKPT/acestep-v15-turbo" ] || [ ! -d "$CKPT/vae" ] || [ ! -d "$CKPT/Qwen3-Embedding-0.6B" ]; then
+            echo "[songgen] [downloading model] ACE-Step 1.5 turbo (first run only)"
+            "$PY" -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/Ace-Step1.5', local_dir='$CKPT', allow_patterns=['acestep-v15-turbo/*','vae/*','Qwen3-Embedding-0.6B/*','*.json','*.txt'])"
+          fi
+          if [ ! -d "$CKPT/acestep-5Hz-lm-0.6B" ]; then
+            "$PY" -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/acestep-5Hz-lm-0.6B', local_dir='$CKPT/acestep-5Hz-lm-0.6B')" || echo "planning model download failed (songs are made without it)"
+          fi
+          du -sh "$ROOT" || true
 
       - name: Compose the song
         env:
@@ -165,13 +141,13 @@ jobs:
               "custom_style": os.environ.get("SONG_CUSTOM_STYLE", "")[:300],
               "singer": (os.environ.get("SONG_SINGER") or "female_pop")[:40],
               "language": (os.environ.get("SONG_LANGUAGE") or "en")[:10],
-              "duration": num("SONG_DURATION", 60, 10, 600),
+              "duration": num("SONG_DURATION", 60, 10, 300),
               "seed": num("SONG_SEED", 1, 0, 2**32 - 2),
               "out": "output",
           }
           json.dump(job, open("song_job.json", "w"), ensure_ascii=False)
           PY
-          "$MUSIC_HOME/venv/bin/python" animato-cloud/songgen.py generate --job song_job.json
+          "$HOME/acestep-local/venv/bin/python" animato-cloud/songgen.py generate --job song_job.json
           ls -la output
 
       - name: Attach the song to the run

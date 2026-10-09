@@ -471,7 +471,7 @@ ${foreign
     ]),
     ],
   };
-  if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'No free AI model produced the podcast script this time. Nothing was posted; the next attempt runs automatically.');
+  if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'The AI model on the runner could not write the podcast script this time. Nothing was posted; the next attempt runs automatically.');
   await kit.reportStatus('running', '2/5 Recording the hosts', 22, `Script ready: "${clean(script.title, 90)}" (${script.lines.length} lines${got ? `, ${got.model}` : ''}).`);
 
   // Voices: one per host, distinct.
@@ -593,7 +593,7 @@ Return ONLY JSON: {"title": "max 60 chars", "logline": "one sentence", "descript
       { location: 'rooftop', time: 'night', card: 'Later', cast: ['c1', 'c2'], lines: [{ speaker: 'c2', text: '[calm] You know, this is the best night we have had in years.' }, { speaker: 'c1', text: '[happy] Yeah. Missing that train was the best mistake.' }] },
     ],
   };
-  if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'No free AI model produced the film script this time. Nothing was posted; the next attempt runs automatically.');
+  if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'The AI model on the runner could not write the film script this time. Nothing was posted; the next attempt runs automatically.');
   const chars = (s.characters as any[]).slice(0, 4).map((c, i) => ({ id: clean(c.id, 12) || `c${i + 1}`, name: clean(c.name, 24) || `Character ${i + 1}`, gender: c.gender === 'male' ? 'male' as const : 'female' as const, look: clean(c.look, 200), color: PALETTE[i], seed: `${CFG.campaignId}:${CFG.partNumber}:${c.name}:${i}:${Date.now() >> 20}` }));
   await kit.reportStatus('running', '2/5 Recording the cast', 22, `Script ready: "${clean(s.title, 80)}" — ${chars.map((c) => c.name).join(', ')}; ${s.scenes.length} scenes${got ? ` (${got.model})` : ''}.`);
   const used = new Set<string>([NARRATOR]);
@@ -701,7 +701,7 @@ Return ONLY JSON: {"title": "e.g. SPEED vs STRENGTH | Who Really Wins? (max 70 c
     if (j.rounds.some((r: any) => r.winner !== 'A' && r.winner !== 'B')) return 'bad round winner';
     return null;
   }, 'stickman_script');
-  if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'No free AI model produced the fight plan this time. Nothing was posted; the next attempt runs automatically.');
+  if (!got && !CFG.allowFallbackPublish && !CFG.offline && !CFG.dryRun) throw new kit.PipelineError('script_retry', 'The AI model on the runner could not write the fight plan this time. Nothing was posted; the next attempt runs automatically.');
   const pick = MATCHUPS[Math.abs(Math.floor(Number(CFG.partNumber) || 0)) % MATCHUPS.length];
   const j = got?.j || { title: pick.title, hook: pick.hook, verdict: pick.verdict, description: `${pick.sides[0].label} vs ${pick.sides[1].label} — who really wins? Tell us in the comments.`, hashtags: ['stickman', 'whowins', 'vs'], sides: pick.sides, rounds: pick.winners.map((w) => ({ winner: w })) };
   const defaults = [{ color: '#2f45b8' }, { color: '#b3150f' }];

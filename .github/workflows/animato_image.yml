@@ -65,7 +65,7 @@ jobs:
   generate:
     name: Draw the image
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -84,7 +84,7 @@ jobs:
             ~/imagegen-venv
             ~/.cache/huggingface
             ~/.cache/animato-imagegen
-          key: animato-imagegen-v3-${{ runner.os }}-py${{ steps.py.outputs.python-version }}
+          key: animato-imagegen-v4-${{ runner.os }}-py${{ steps.py.outputs.python-version }}
 
       - name: Set up the image generator
         run: |
@@ -96,15 +96,16 @@ jobs:
             echo "::warning::cached image generator environment is stale or broken - rebuilding it"
             rm -rf "$VENV"
           fi
-          if [ ! -f "$VENV/.ready-v3" ]; then
+          if [ ! -f "$VENV/.ready-v4" ]; then
             rm -rf "$VENV"
             python -m venv "$VENV"
             "$VENV/bin/pip" install --quiet --disable-pip-version-check --upgrade pip
-            "$VENV/bin/pip" install --quiet --disable-pip-version-check torch torchvision --index-url https://download.pytorch.org/whl/cpu
-            "$VENV/bin/pip" install --quiet --disable-pip-version-check diffusers transformers accelerate safetensors peft pillow numpy
+            # Pinned to versions known to work together on CPU (the newest releases have broken this before).
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu
+            "$VENV/bin/pip" install --quiet --disable-pip-version-check "diffusers>=0.37.0,<0.40" "transformers>=4.51.0,<4.58.0" "accelerate>=1.12.0" safetensors "peft>=0.18.0" pillow "numpy<2.4" huggingface_hub
             "$VENV/bin/pip" install --quiet --disable-pip-version-check spandrel || echo "::warning::spandrel could not be installed - the picture uses the plain resize"
             "$VENV/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('IDKiro/sdxs-512-dreamshaper')" || echo "::warning::model pre-download failed - it downloads when the picture is drawn"
-            touch "$VENV/.ready-v3"
+            touch "$VENV/.ready-v4"
           fi
           "$VENV/bin/python" -c "import torch, diffusers; print('image generator ready: torch', torch.__version__, 'diffusers', diffusers.__version__)"
 

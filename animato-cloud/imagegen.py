@@ -416,7 +416,19 @@ def init_models(profile=None):
     global UPSCALER
     try:
         with LOCK:
-            ensure_profile(profile or DEFAULT_PROFILE)
+            # The asked-for model first; if it cannot load, the others in turn (a picture beats an error).
+            order = [profile or DEFAULT_PROFILE] + [p for p in ("character", "classic", "anime") if p != (profile or DEFAULT_PROFILE)]
+            last = None
+            for name in order:
+                try:
+                    ensure_profile(name)
+                    last = None
+                    break
+                except Exception as err:
+                    last = err
+                    log(f"profile '{name}' could not be loaded ({str(err)[:200]}) - trying the next one")
+            if last is not None:
+                raise last
         UPSCALER = Upscaler()
         STATE["upscaler"] = UPSCALER.name
         log(f"upscaler: {UPSCALER.name}")
@@ -444,6 +456,8 @@ def cmd_batch(args):
         return 1
     failed = 0
     for job in jobs:
+        if LOADED.get("name"):
+            job = dict(job, profile=LOADED["name"])   # the model that actually loaded
         try:
             meta = generate(job)
             with open(os.path.splitext(job["out"])[0] + ".json", "w", encoding="utf-8") as f:
